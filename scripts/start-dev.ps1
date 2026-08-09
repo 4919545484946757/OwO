@@ -13,14 +13,30 @@ Set-StrictMode -Version Latest
 
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
-    $BuildDirectory = Join-Path $projectRoot 'build/windows-manual-test/Release'
+    $BuildDirectory = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'build') -Directory |
+        ForEach-Object { Join-Path $_.FullName 'Release' } |
+        Where-Object {
+            (Test-Path -LiteralPath (Join-Path $_ 'owo_core_service.exe') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $_ 'owo_tsf_profile_check.exe') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $_ 'owo_ipc_shell.exe') -PathType Leaf)
+        } |
+        Sort-Object { (Get-Item -LiteralPath (Join-Path $_ 'owo_core_service.exe')).LastWriteTime } `
+            -Descending |
+        Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
+        throw 'No complete Release development build was found under build/.'
+    }
 }
 $BuildDirectory = [IO.Path]::GetFullPath($BuildDirectory)
 
 $coreService = Join-Path $BuildDirectory 'owo_core_service.exe'
 $ipcShell = Join-Path $BuildDirectory 'owo_ipc_shell.exe'
 $profileCheck = Join-Path $BuildDirectory 'owo_tsf_profile_check.exe'
-$tsfDll = Join-Path $BuildDirectory 'OwO.TSF.dll'
+$buildTsfDll = Join-Path $BuildDirectory 'OwO.TSF.dll'
+$deployedTsf = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'build/manual-deploy') `
+        -Filter 'OwO.TSF.*.dll' -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$tsfDll = if ($null -ne $deployedTsf) { $deployedTsf.FullName } else { $buildTsfDll }
 $settingsCenter = Join-Path $projectRoot `
     'apps/settings_center/bin/Release/net10.0-windows10.0.26100.0/win-x64/OwO.Settings.exe'
 
@@ -43,8 +59,8 @@ if (-not $SkipRegistration) {
     & (Join-Path $PSScriptRoot 'register-dev.ps1') -Configuration Release -DllPath $tsfDll
 }
 
-& $profileCheck --enable
-if ($LASTEXITCODE -ne 0) { throw "OwO input profile could not be enabled: $LASTEXITCODE" }
+& $profileCheck --activate-session
+if ($LASTEXITCODE -ne 0) { throw "OwO input profile could not be activated: $LASTEXITCODE" }
 
 $running = @(Get-Process -Name 'owo_core_service' -ErrorAction SilentlyContinue)
 if ($RestartCore -and $running.Count -ne 0) {
@@ -108,4 +124,4 @@ Write-Output "Core PID: $processIds"
 Write-Output "TSF DLL: $tsfDll"
 Write-Output "Lexicon: $LexiconPath"
 Write-Output "User frequency: $frequencyPath"
-Write-Output 'Use Win+Space in the target app and select OwO.'
+Write-Output 'OwO is activated for this Windows session; use Win+Space if the target app kept another profile.'

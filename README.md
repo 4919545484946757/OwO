@@ -151,8 +151,10 @@ Core Service 仅在显式传入 `--model-host` 时启用增量模型适配。候
 
 验收时先启动 `owo_core_service.exe`；输入字母后应显示固定候选，按 `1` 或空格应提交“固定候选”。
 
-也可直接双击仓库根目录的 `start-owo-dev.cmd`。它会注册 `windows-manual-test` 构建的 TSF、启用
+也可直接双击仓库根目录的 `start-owo-dev.cmd`。它会自动选择最新的完整 Release 开发构建，注册
+`build/manual-deploy` 中最新的版本化 TSF（不存在时使用该构建内的 DLL），并启用
 OwO 输入配置、使用完整雾凇拼音词典重启 Core Service，并打开设置中心和记事本。服务日志
-写入 `%LOCALAPPDATA%\OwO\InputMethod\logs`；在目标应用中按 `Win+Space` 选择 OwO 后即可测试。
+写入 `%LOCALAPPDATA%\OwO\InputMethod\logs`；脚本会尝试为当前 Windows 会话直接激活 OwO，若目标
+应用仍保留旧输入配置，再按 `Win+Space` 选择 OwO 后测试。
 PowerShell 入口 `scripts/start-dev.ps1` 还支持 `-SkipRegistration`、`-RestartCore`、
 `-OpenSettings`、`-OpenNotepad` 以及自定义 `-BuildDirectory`/`-LexiconPath`。

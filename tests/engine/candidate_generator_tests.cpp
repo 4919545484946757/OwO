@@ -41,6 +41,11 @@ int main() {
     const auto nihao = generator.generate(schema.parse("nihao"));
     if (nihao.size() != 2 || nihao[0].text != "你好" || nihao[1].text != "你号")
         return fail("real Chinese nihao candidates failed");
+    const auto uppercase_nihao_parse = schema.parse("NiHao");
+    const auto uppercase_nihao = generator.generate(uppercase_nihao_parse);
+    if (uppercase_nihao_parse.normalized_input != "nihao" ||
+        uppercase_nihao != nihao)
+        return fail("uppercase pinyin normalization failed");
 
     const auto xian = generator.generate(schema.parse("xian"));
     if (xian.size() != 3 || xian[0].text != "西安" || xian[1].text != "先" ||
@@ -212,5 +217,22 @@ int main() {
         phrase_abbreviation.front().source_segments !=
             std::vector<std::string>{"bu", "g", "d"})
         return fail("lexicon-aware mixed abbreviation failed");
+
+    const owo::engine::MemoryLexicon word_priority_lexicon({
+        {{"shi"}, "中国", 10000}, {{"shi"}, "世界", 9000},
+        {{"shi"}, "可以", 8000},  {{"shi"}, "我们", 7000},
+        {{"shi"}, "你们", 6000},  {{"shi"}, "是", 1000000},
+        {{"shi"}, "时", 900000},  {{"shi"}, "生僻", 1},
+    });
+    const owo::engine::CandidateGenerator word_priority_generator(word_priority_lexicon);
+    const auto word_priority = word_priority_generator.generate(schema.parse("shi"));
+    const std::vector<std::string> expected_priority{
+        "中国", "世界", "可以", "我们", "你们", "是", "时", "生僻"};
+    if (word_priority.size() != expected_priority.size() ||
+        !std::equal(word_priority.begin(), word_priority.end(), expected_priority.begin(),
+                    [](const auto& candidate, const auto& expected) {
+                        return candidate.text == expected;
+                    }))
+        return fail("two-character word priority bands failed");
     return 0;
 }

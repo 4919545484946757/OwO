@@ -27,6 +27,8 @@ inline constexpr CLSID kTextServiceClsid{
     0x6d31c9b1, 0x8978, 0x4f49, {0x89, 0xb4, 0x66, 0xeb, 0x1e, 0x74, 0x15, 0x91}};
 inline constexpr GUID kLanguageProfileGuid{
     0x5d9f39c3, 0xbdb4, 0x453c, {0xa7, 0xba, 0xb9, 0xef, 0x82, 0x48, 0x76, 0x29}};
+inline constexpr GUID kLanguageModePreservedKeyGuid{
+    0x409a6b54, 0xd599, 0x4d7d, {0xa4, 0x36, 0xa1, 0x80, 0x60, 0xf5, 0xe1, 0x81}};
 inline constexpr LANGID kSimplifiedChinese = 0x0804;
 
 class TextService final : public ITfTextInputProcessorEx,
@@ -134,6 +136,8 @@ private:
     void schedule_candidate_request(bool reset_retry);
     void queue_commit_feedback(std::wstring candidate);
     void refresh_shortcut_config(bool force = false);
+    void sync_preserved_language_key();
+    void clear_preserved_language_key() noexcept;
     [[nodiscard]] bool shortcut_matches(std::string_view shortcut, WPARAM key) const;
     void handle_candidate_result(CandidateResult* result);
     void update_candidate_window();
@@ -149,6 +153,7 @@ private:
     HRESULT commit_candidate(ITfContext* context, std::size_t index);
     HRESULT commit_raw_input(ITfContext* context);
     HRESULT commit_candidate_from_window(std::size_t index);
+    HRESULT toggle_language_mode(ITfContext* context);
 
     LONG references_{1};
     ITfThreadMgr* thread_manager_{nullptr};
@@ -195,6 +200,9 @@ private:
     config::AppConfig shortcut_config_;
     ULONGLONG next_shortcut_config_refresh_{0};
     bool shortcut_config_initialized_{false};
+    std::string preserved_language_shortcut_;
+    TF_PRESERVEDKEY preserved_language_key_{};
+    bool preserved_language_key_registered_{false};
     bool correction_enabled_{true};
     bool chinese_mode_{true};
     bool foreground_focus_{true};

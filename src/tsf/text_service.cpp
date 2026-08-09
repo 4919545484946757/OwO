@@ -11,6 +11,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <chrono>
 #include <memory>
@@ -206,6 +207,69 @@ std::string shortcut_for_key_event(const WPARAM key) {
         const auto primary = primary_shortcut_name(key);
         if (primary.empty()) return {};
         append(primary);
+    }
+    return result;
+}
+
+UINT primary_shortcut_virtual_key(const std::string_view name) {
+    if (name.size() == 1 && ((name.front() >= 'A' && name.front() <= 'Z') ||
+                            (name.front() >= '0' && name.front() <= '9')))
+        return static_cast<UINT>(name.front());
+    if (name.size() >= 2 && name.front() == 'F') {
+        unsigned number = 0;
+        const auto parsed = std::from_chars(name.data() + 1, name.data() + name.size(), number);
+        if (parsed.ec == std::errc{} && parsed.ptr == name.data() + name.size() &&
+            number >= 1 && number <= 24)
+            return VK_F1 + number - 1;
+    }
+    constexpr std::pair<std::string_view, UINT> named[]{
+        {"Space", VK_SPACE}, {"Enter", VK_RETURN}, {"Tab", VK_TAB},
+        {"Escape", VK_ESCAPE}, {"Backspace", VK_BACK}, {"Delete", VK_DELETE},
+        {"Insert", VK_INSERT}, {"Home", VK_HOME}, {"End", VK_END},
+        {"PageUp", VK_PRIOR}, {"PageDown", VK_NEXT}, {"Left", VK_LEFT},
+        {"Right", VK_RIGHT}, {"Up", VK_UP}, {"Down", VK_DOWN},
+        {"[", VK_OEM_4}, {"]", VK_OEM_6}, {"Minus", VK_OEM_MINUS},
+        {"Plus", VK_OEM_PLUS}, {"Comma", VK_OEM_COMMA},
+        {"Period", VK_OEM_PERIOD}, {"Slash", VK_OEM_2},
+        {"Semicolon", VK_OEM_1}, {"Quote", VK_OEM_7},
+        {"Backtick", VK_OEM_3}};
+    const auto found = std::find_if(std::begin(named), std::end(named),
+                                    [name](const auto& value) { return value.first == name; });
+    return found == std::end(named) ? 0U : found->second;
+}
+
+bool preserved_shortcut(const std::string_view shortcut, TF_PRESERVEDKEY& result) {
+    result = {};
+    std::size_t offset = 0;
+    while (offset < shortcut.size()) {
+        const auto separator = shortcut.find('+', offset);
+        const auto token = shortcut.substr(offset, separator == std::string_view::npos
+                                                       ? shortcut.size() - offset
+                                                       : separator - offset);
+        if (token == "Ctrl") result.uModifiers |= TF_MOD_CONTROL;
+        else if (token == "Alt") result.uModifiers |= TF_MOD_ALT;
+        else if (token == "Shift") result.uModifiers |= TF_MOD_SHIFT;
+        else if (result.uVKey == 0) result.uVKey = primary_shortcut_virtual_key(token);
+        else return false;
+        if (separator == std::string_view::npos) break;
+        offset = separator + 1;
+    }
+    return result.uVKey != 0;
+}
+
+std::wstring case_preserving_segmented_input(const std::wstring_view input,
+                                              const std::wstring_view segmented) {
+    std::wstring result;
+    result.reserve(segmented.size());
+    std::size_t source = 0;
+    for (const wchar_t character : segmented) {
+        if (character == L'\'') {
+            result.push_back(character);
+            continue;
+        }
+        while (source < input.size() && input[source] == L'\'') ++source;
+        if (source >= input.size()) return std::wstring(segmented);
+        result.push_back(input[source++]);
     }
     return result;
 }
@@ -428,6 +492,7 @@ HRESULT TextService::Deactivate() {
     clear_composition();
     destroy_windows();
     if (thread_manager_ != nullptr) {
+        clear_preserved_language_key();
         ITfSource* source = nullptr;
         if (SUCCEEDED(thread_manager_->QueryInterface(IID_PPV_ARGS(&source)))) {
             if (thread_focus_sink_cookie_ != TF_INVALID_COOKIE)
@@ -553,24 +618,17 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
         }
     } else if (shortcut_config_.language_shortcut_enabled &&
                shortcut_matches(shortcut_config_.language_shortcut, key)) {
-        const bool entering_english_mode = chinese_mode_;
-        if (entering_english_mode && !input_buffer_.empty()) {
-            if (context != nullptr) {
-                const HRESULT committed = commit_raw_input(context);
-                if (FAILED(committed)) return committed;
-            } else {
-                clear_composition();
-            }
-        }
-        chinese_mode_ = !chinese_mode_;
-        if (!chinese_mode_) clear_composition();
+        return toggle_language_mode(context);
     } else if (!input_buffer_.empty() && shortcut_config_.raw_input_shortcut_enabled &&
                shortcut_matches(shortcut_config_.raw_input_shortcut, key)) {
         if (context != nullptr) return commit_raw_input(context);
         clear_composition();
     } else if (key >= 'A' && key <= 'Z') {
         if (input_buffer_.size() >= kMaximumPinyinInputLength) return S_OK;
-        input_buffer_.push_back(static_cast<wchar_t>(L'a' + (key - 'A')));
+        const bool shift = key_down(VK_SHIFT);
+        const bool caps_lock = (GetKeyState(VK_CAPITAL) & 1) != 0;
+        const wchar_t base = shift != caps_lock ? L'A' : L'a';
+        input_buffer_.push_back(static_cast<wchar_t>(base + (key - 'A')));
         segmented_input_.clear();
         candidate_page_ = 0;
         has_more_candidates_ = false;
@@ -634,10 +692,16 @@ HRESULT TextService::OnKeyUp(ITfContext*, const WPARAM key, LPARAM, BOOL* eaten)
     return S_OK;
 }
 
-HRESULT TextService::OnPreservedKey(ITfContext*, REFGUID, BOOL* eaten) {
+HRESULT TextService::OnPreservedKey(ITfContext* context, REFGUID guid, BOOL* eaten) {
     if (eaten == nullptr) return E_POINTER;
-    *eaten = FALSE;
-    return S_OK;
+    refresh_shortcut_config();
+    if (!IsEqualGUID(guid, kLanguageModePreservedKeyGuid) ||
+        !shortcut_config_.language_shortcut_enabled) {
+        *eaten = FALSE;
+        return S_OK;
+    }
+    *eaten = TRUE;
+    return toggle_language_mode(context);
 }
 
 HRESULT TextService::initialize_windows() {
@@ -1215,10 +1279,50 @@ void TextService::refresh_shortcut_config(const bool force) {
         if (!loaded.success) return;
         shortcut_config_initialized_ = true;
         shortcut_config_ = shortcut_config_store_.snapshot();
+        sync_preserved_language_key();
         return;
     }
     const auto reloaded = shortcut_config_store_.reload();
-    if (reloaded.success) shortcut_config_ = shortcut_config_store_.snapshot();
+    if (reloaded.success) {
+        shortcut_config_ = shortcut_config_store_.snapshot();
+        sync_preserved_language_key();
+    }
+}
+
+void TextService::sync_preserved_language_key() {
+    if (thread_manager_ == nullptr || client_id_ == TF_CLIENTID_NULL) return;
+    const std::string desired = shortcut_config_.language_shortcut_enabled
+                                    ? shortcut_config_.language_shortcut
+                                    : std::string{};
+    if (preserved_language_key_registered_ && desired == preserved_language_shortcut_) return;
+    clear_preserved_language_key();
+    if (desired.empty()) return;
+    TF_PRESERVEDKEY key{};
+    if (!preserved_shortcut(desired, key)) return;
+    ITfKeystrokeMgr* manager = nullptr;
+    if (FAILED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager)))) return;
+    constexpr wchar_t description[] = L"OwO 切换中英文输入";
+    const HRESULT preserved = manager->PreserveKey(
+        client_id_, kLanguageModePreservedKeyGuid, &key, description,
+        static_cast<ULONG>(std::size(description) - 1));
+    manager->Release();
+    if (SUCCEEDED(preserved)) {
+        preserved_language_key_ = key;
+        preserved_language_shortcut_ = desired;
+        preserved_language_key_registered_ = true;
+    }
+}
+
+void TextService::clear_preserved_language_key() noexcept {
+    if (!preserved_language_key_registered_ || thread_manager_ == nullptr) return;
+    ITfKeystrokeMgr* manager = nullptr;
+    if (SUCCEEDED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager)))) {
+        manager->UnpreserveKey(kLanguageModePreservedKeyGuid, &preserved_language_key_);
+        manager->Release();
+    }
+    preserved_language_key_ = {};
+    preserved_language_shortcut_.clear();
+    preserved_language_key_registered_ = false;
 }
 
 bool TextService::shortcut_matches(const std::string_view shortcut,
@@ -1441,7 +1545,8 @@ void TextService::handle_candidate_result(CandidateResult* raw_result) {
     if (!result->preserve_paging) {
         has_more_candidates_ = result->has_more;
         if (!result->segmented_input.empty())
-            segmented_input_ = std::move(result->segmented_input);
+            segmented_input_ = case_preserving_segmented_input(
+                input_buffer_, result->segmented_input);
     }
     if (deferred_candidate_text_) {
         const auto selected = std::find(candidates_.begin(), candidates_.end(),
@@ -1687,6 +1792,17 @@ HRESULT TextService::commit_raw_input(ITfContext* context) {
     session->Release();
     if (SUCCEEDED(request_result) && SUCCEEDED(session_result)) clear_composition();
     return FAILED(request_result) ? request_result : session_result;
+}
+
+HRESULT TextService::toggle_language_mode(ITfContext* context) {
+    if (chinese_mode_ && !input_buffer_.empty()) {
+        if (context == nullptr) return E_UNEXPECTED;
+        const HRESULT committed = commit_raw_input(context);
+        if (FAILED(committed)) return committed;
+    }
+    chinese_mode_ = !chinese_mode_;
+    if (!chinese_mode_) clear_composition();
+    return S_OK;
 }
 
 HRESULT TextService::commit_candidate_from_window(const std::size_t index) {
