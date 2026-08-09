@@ -553,7 +553,8 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
         }
     } else if (shortcut_config_.language_shortcut_enabled &&
                shortcut_matches(shortcut_config_.language_shortcut, key)) {
-        if (chinese_mode_ && !input_buffer_.empty()) {
+        const bool entering_english_mode = chinese_mode_;
+        if (entering_english_mode && !input_buffer_.empty()) {
             if (context != nullptr) {
                 const HRESULT committed = commit_raw_input(context);
                 if (FAILED(committed)) return committed;
@@ -562,6 +563,7 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
             }
         }
         chinese_mode_ = !chinese_mode_;
+        if (!chinese_mode_) clear_composition();
     } else if (!input_buffer_.empty() && shortcut_config_.raw_input_shortcut_enabled &&
                shortcut_matches(shortcut_config_.raw_input_shortcut, key)) {
         if (context != nullptr) return commit_raw_input(context);
@@ -754,20 +756,13 @@ HRESULT TextService::ensure_device_resources() {
     if (SUCCEEDED(result))
         result = create_brush(D2D1::ColorF(0x8AB4F8, 0.18F), &highlight_brush_);
     if (SUCCEEDED(result))
-        result = create_brush(D2D1::ColorF(0x2D2418, 1.0F),
-                              &strict_background_brush_);
-    if (SUCCEEDED(result))
         result = create_brush(D2D1::ColorF(0xFFB74D, 1.0F), &strict_accent_brush_);
-    if (SUCCEEDED(result))
-        result = create_brush(D2D1::ColorF(0xFFB74D, 0.20F), &strict_highlight_brush_);
     if (FAILED(result)) discard_device_resources();
     return result;
 }
 
 void TextService::discard_device_resources() noexcept {
-    release_interface(strict_highlight_brush_);
     release_interface(strict_accent_brush_);
-    release_interface(strict_background_brush_);
     release_interface(highlight_brush_);
     release_interface(accent_brush_);
     release_interface(secondary_text_brush_);
@@ -886,14 +881,13 @@ void TextService::render_candidate_window() {
     render_target_->BeginDraw();
     render_target_->SetTransform(D2D1::Matrix3x2F::Identity());
     render_target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    auto* mode_background_brush = correction_enabled_ ? background_brush_
-                                                       : strict_background_brush_;
-    auto* mode_accent_brush = correction_enabled_ ? accent_brush_ : strict_accent_brush_;
-    auto* mode_highlight_brush = correction_enabled_ ? highlight_brush_
-                                                      : strict_highlight_brush_;
-    auto* mode_border_brush = correction_enabled_ ? border_brush_ : strict_accent_brush_;
-    render_target_->Clear(correction_enabled_ ? D2D1::ColorF(0x202124, 1.0F)
-                                              : D2D1::ColorF(0x2D2418, 1.0F));
+    auto* mode_background_brush = background_brush_;
+    auto* mode_accent_brush = accent_brush_;
+    auto* mode_highlight_brush = highlight_brush_;
+    auto* mode_border_brush = border_brush_;
+    auto* candidate_number_brush = correction_enabled_ ? accent_brush_
+                                                        : strict_accent_brush_;
+    render_target_->Clear(D2D1::ColorF(0x202124, 1.0F));
 
     const D2D1_SIZE_F size = render_target_->GetSize();
     const UINT dpi = std::max(GetDpiForWindow(candidate_window_), 96U);
@@ -925,7 +919,7 @@ void TextService::render_candidate_window() {
         1, static_cast<std::size_t>(shortcut_config_.candidate_wrap_length));
     const auto draw_candidate = [this, &target_matches, &add_hit_region, wrap_length,
                                  mode_accent_brush, mode_border_brush,
-                                 mode_highlight_brush](
+                                 mode_highlight_brush, candidate_number_brush](
                                     const D2D1_RECT_F bounds, const std::size_t index) {
         const HitTarget target{HitKind::candidate, index};
         const D2D1_ROUNDED_RECT pill{bounds, 7.0F, 7.0F};
@@ -944,7 +938,7 @@ void TextService::render_candidate_window() {
         render_target_->FillRoundedRectangle(badge, mode_border_brush);
         const std::wstring label = std::to_wstring(index + 1);
         render_target_->DrawTextW(label.data(), static_cast<UINT32>(label.size()),
-                                  label_text_format_, badge.rect, mode_accent_brush,
+                                  label_text_format_, badge.rect, candidate_number_brush,
                                   D2D1_DRAW_TEXT_OPTIONS_CLIP);
         const auto display = wrapped_candidate_text(candidates_[index], wrap_length);
         render_target_->DrawTextW(
@@ -1468,7 +1462,11 @@ void TextService::handle_candidate_result(CandidateResult* raw_result) {
 }
 
 void TextService::update_candidate_window() {
-    if (candidate_window_ == nullptr || input_buffer_.empty() || !foreground_focus_) return;
+    if (candidate_window_ == nullptr) return;
+    if (!chinese_mode_ || input_buffer_.empty() || !foreground_focus_) {
+        ShowWindow(candidate_window_, SW_HIDE);
+        return;
+    }
     POINT position = candidate_anchor_;
     if (!candidate_anchor_valid_) GetCursorPos(&position);
     const UINT dpi = std::max(GetDpiForWindow(candidate_window_), 96U);

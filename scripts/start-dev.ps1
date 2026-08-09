@@ -13,7 +13,7 @@ Set-StrictMode -Version Latest
 
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
-    $BuildDirectory = Join-Path $projectRoot 'build/windows-p4-permissions-verify/Release'
+    $BuildDirectory = Join-Path $projectRoot 'build/windows-manual-test/Release'
 }
 $BuildDirectory = [IO.Path]::GetFullPath($BuildDirectory)
 
