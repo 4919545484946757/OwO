@@ -198,18 +198,30 @@ public sealed partial class MainPage : Page
         var package = await picker.PickSingleFileAsync();
         if (package is null) return;
 
-        var message = $"{package.Name}\n{package.Path}\n\n"
-            + "系统将执行完整的离线签名与发布者信任验证，成功后原子安装并立即激活该版本。"
-            + "若本机缺少证书链或吊销缓存，安装会安全拒绝；不允许绕过为未签名开发模式。";
-        if (!await ConfirmAsync("安装签名插件包", message, "验证并安装")) return;
-
         SetBusy(true);
         try {
-            var result = await _pluginClient.InstallAsync(package.Path);
+            var preview = await _pluginClient.InspectInstallAsync(package.Path);
+            PluginInstallSnapshot result;
+            if (preview.RequiresRiskConsent) {
+                SetBusy(false);
+                if (!await ConfirmRiskInstallAsync(package.Name, package.Path, preview)) return;
+                SetBusy(true);
+                result = await _pluginClient.InstallRiskAsync(package.Path, preview.InventorySha256);
+            } else {
+                SetBusy(false);
+                var message = $"{package.Name}\n{package.Path}\n\n"
+                    + $"插件：{preview.Name} {preview.Version}（{preview.PluginId}）\n"
+                    + $"发布者：{PluginUiText.Trust(preview.TrustTier)}\n"
+                    + "系统将重新核对精确包摘要，随后原子安装并立即启用。";
+                if (!await ConfirmAsync("安装插件包", message, "验证并安装")) return;
+                SetBusy(true);
+                result = await _pluginClient.InstallAsync(package.Path);
+            }
             await LoadPluginsAsync();
             var publisher = string.IsNullOrWhiteSpace(result.PublisherDisplayName)
-                ? result.PublisherCertificateSha256 : result.PublisherDisplayName;
-            ShowStatus($"已安装并启用 {result.Name} {result.Version}（{result.PluginId}）；发布者：{publisher}。",
+                ? PluginUiText.Trust(result.TrustTier) : result.PublisherDisplayName;
+            var state = result.Activated ? "已安装并启用" : "已安装但保持停用";
+            ShowStatus($"{state} {result.Name} {result.Version}（{result.PluginId}）；发布者：{publisher}。",
                        InfoBarSeverity.Success);
         } catch (Exception error) {
             await LoadPluginsAsync();
@@ -217,6 +229,56 @@ public sealed partial class MainPage : Page
         } finally {
             SetBusy(false);
         }
+    }
+
+    private async Task<bool> ConfirmRiskInstallAsync(
+        string packageName, string packagePath, PluginInstallPreviewSnapshot preview)
+    {
+        var permissions = preview.Permissions.Count == 0 ? "（未申请具名权限）"
+            : string.Join("\n", preview.Permissions.Select(
+                permission => $"• {PluginUiText.Permission(permission)}（{permission}）"));
+        var trustDetail = string.IsNullOrWhiteSpace(preview.TrustDiagnostic)
+            ? "未能建立 Windows 发布者信任。" : preview.TrustDiagnostic;
+        var acknowledgement = new CheckBox {
+            Content = "我已阅读并理解：该插件可能造成隐私泄露、文件或账户损失，风险由我承担。",
+        };
+        var content = new StackPanel { Spacing = 12, MaxWidth = 620 };
+        content.Children.Add(new TextBlock {
+            Text = $"{packageName}\n{packagePath}\n\n"
+                + $"插件：{preview.Name} {preview.Version}（{preview.PluginId}）\n"
+                + $"风险：{PluginUiText.Risk(preview.RiskLevel)}\n"
+                + $"信任：{PluginUiText.Trust(preview.TrustTier)}\n"
+                + $"包摘要：{preview.InventorySha256}\n\n"
+                + $"申请的能力：\n{permissions}\n\n"
+                + $"验证说明：{trustDetail}\n\n"
+                + "风险与免责：第三方插件可能读取、修改、删除或上传你的数据，捕获屏幕/音频、"
+                + "覆盖界面、启动程序或以当前 Windows 用户权限执行操作。OwO 项目不代表已审计"
+                + "第三方代码，也不保证其安全性、可用性或数据可恢复性。继续安装表示你理解并自行承担后果。"
+                + "本授权只绑定上方精确版本与包摘要，更新或新增权限必须重新授权。",
+            TextWrapping = Microsoft.UI.Xaml.TextWrapping.Wrap,
+        });
+        content.Children.Add(acknowledgement);
+        var disclosure = new ContentDialog {
+            XamlRoot = XamlRoot,
+            Title = "高风险插件安全告知",
+            Content = new ScrollViewer {
+                Content = content,
+                MaxHeight = 520,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            },
+            PrimaryButtonText = "我已理解风险",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close,
+            IsPrimaryButtonEnabled = false,
+        };
+        acknowledgement.Checked += (_, _) => disclosure.IsPrimaryButtonEnabled = true;
+        acknowledgement.Unchecked += (_, _) => disclosure.IsPrimaryButtonEnabled = false;
+        if (await disclosure.ShowAsync() != ContentDialogResult.Primary) return false;
+        return await ConfirmAsync("单独授权安装",
+            $"只授权安装此包：\n{preview.Name} {preview.Version}\n{preview.PluginId}\n"
+                + $"SHA-256 清单摘要：{preview.InventorySha256}\n\n"
+                + "安装后将保持停用；启用前仍可撤销权限或卸载。",
+            "授权并安装");
     }
 
     private async Task<bool> ConfirmAsync(string title, string message, string action)
@@ -236,7 +298,12 @@ public sealed partial class MainPage : Page
     {
         if (sender is not Button { Tag: PluginVersionSnapshot plugin }) return;
         var action = plugin.Active ? "停用" : "启用";
-        if (!await ConfirmAsync($"{action}插件", $"{plugin.Name} {plugin.Version}\n{plugin.Id}", action))
+        var warning = plugin.Active ? "" : $"\n\n{PluginUiText.Risk(plugin.RiskLevel)} · "
+            + $"{PluginUiText.Trust(plugin.TrustTier)}\n"
+            + (plugin.Permissions.Count == 0 ? "未申请具名权限" :
+               $"已授权：{string.Join("、", plugin.Permissions.Select(PluginUiText.Permission))}");
+        if (!await ConfirmAsync($"{action}插件",
+            $"{plugin.Name} {plugin.Version}\n{plugin.Id}{warning}", action))
             return;
         SetBusy(true);
         try {
@@ -244,6 +311,26 @@ public sealed partial class MainPage : Page
             else await _pluginClient.ActivateAsync(plugin.Id, plugin.Version);
             await LoadPluginsAsync();
             ShowStatus($"插件已{action}。", InfoBarSeverity.Success);
+        } catch (Exception error) {
+            ShowStatus(error.Message, InfoBarSeverity.Error);
+        } finally {
+            SetBusy(false);
+        }
+    }
+
+    private async void PluginVersionRevoke_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: PluginVersionSnapshot plugin } || !plugin.CanRevoke) return;
+        var message = $"{plugin.Name} {plugin.Version}\n{plugin.Id}\n\n"
+            + "将撤销此精确版本的全部运行权限。插件文件与数据保留；已运行的插件应先停用，"
+            + "再次授权需要重新安装该精确包。";
+        if (!await ConfirmAsync("撤销插件权限", message, "撤销权限")) return;
+        SetBusy(true);
+        try {
+            if (plugin.Active) await _pluginClient.DeactivateAsync(plugin.Id, plugin.Version);
+            await _pluginClient.RevokeAsync(plugin.Id, plugin.Version);
+            await LoadPluginsAsync();
+            ShowStatus("插件权限已撤销，插件已停用。", InfoBarSeverity.Success);
         } catch (Exception error) {
             ShowStatus(error.Message, InfoBarSeverity.Error);
         } finally {

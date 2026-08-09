@@ -46,6 +46,13 @@ bool parse_arguments(const int argc, wchar_t** argv, Arguments& result) {
            narrow_ascii(argv[4], result.plugin_id);
 }
 
+bool full_trust_is_explicit() {
+    wchar_t value[2]{};
+    return GetEnvironmentVariableW(L"OWO_PLUGIN_FULL_TRUST", value,
+                                   static_cast<DWORD>(std::size(value))) == 1 &&
+           value[0] == L'1';
+}
+
 bool sandbox_is_active() {
     HANDLE token = nullptr;
     DWORD is_appcontainer = 0;
@@ -55,7 +62,7 @@ bool sandbox_is_active() {
                             sizeof(is_appcontainer), &returned) != FALSE;
     if (token != nullptr) CloseHandle(token);
     BOOL in_job = FALSE;
-    return queried && is_appcontainer != 0 &&
+    return queried && (is_appcontainer != 0 || full_trust_is_explicit()) &&
            IsProcessInJob(GetCurrentProcess(), nullptr, &in_job) != FALSE && in_job != FALSE;
 }
 
@@ -127,12 +134,15 @@ int run_plugin(const Arguments& arguments) {
     if (environment_length == 0 || environment_length >= std::size(environment_data) ||
         std::filesystem::path(environment_data).lexically_normal() !=
             arguments.data_path.lexically_normal()) return 14;
-    if (!installed_directory_is_read_only()) return 12;
+    if (!full_trust_is_explicit() && !installed_directory_is_read_only()) return 12;
     if (!write_data_probe(arguments.data_path)) return 13;
 
     auto connected = owo::plugin::connect_plugin_pipe_client(
         arguments.pipe_name, std::chrono::seconds(5));
-    if (!connected) return 20;
+    if (!connected) {
+        write_marker(arguments.data_path, L"connect-error.txt", connected.diagnostic);
+        return 20;
+    }
     owo::plugin::PluginMessage hello;
     hello.type = owo::plugin::PluginMessageType::hello_request;
     hello.status = owo::plugin::PluginStatus::success;

@@ -240,8 +240,15 @@ ManifestResult parse_manifest(const std::string_view json) {
             return {false, {}, "unknown permission: " + permission};
         if (!seen.insert(permission).second) return {false, {}, "duplicate permission: " + permission};
     }
-    if (result.permissions.size() > 16) return {false, {}, "too many permissions"};
-    if (result.network) return {false, {}, "network access is not supported by P3C v1"};
+    if (result.permissions.size() > 32) return {false, {}, "too many permissions"};
+    const bool network_permission = std::find(result.permissions.begin(), result.permissions.end(),
+                                              "network.client") != result.permissions.end();
+    if (result.network != network_permission)
+        return {false, {}, "network must exactly match the network.client permission"};
+    const bool full_trust = std::find(result.permissions.begin(), result.permissions.end(),
+                                      "system.full_trust") != result.permissions.end();
+    if (plugin_permissions_require_full_trust(result.permissions) && !full_trust)
+        return {false, {}, "requested capabilities require system.full_trust"};
     return {true, std::move(result), {}};
 }
 

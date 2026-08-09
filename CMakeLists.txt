@@ -384,6 +384,15 @@ if(BUILD_TESTING)
         add_test(NAME owo.plugin.host COMMAND owo_plugin_host_tests
                  ${CMAKE_CURRENT_BINARY_DIR}/plugin-host-test-store
                  $<TARGET_FILE:owo_example_process_plugin>)
+        add_executable(owo_plugin_full_trust_tests tests/plugin/plugin_full_trust_tests.cpp)
+        target_link_libraries(owo_plugin_full_trust_tests PRIVATE owo_plugin)
+        add_dependencies(owo_plugin_full_trust_tests owo_example_process_plugin)
+        target_compile_features(owo_plugin_full_trust_tests PRIVATE cxx_std_20)
+        target_compile_options(owo_plugin_full_trust_tests PRIVATE /W4 /permissive- /utf-8 /EHsc)
+        add_test(NAME owo.plugin.full_trust COMMAND owo_plugin_full_trust_tests
+                 ${CMAKE_CURRENT_BINARY_DIR}/plugin-full-trust-test-store-
+                 $<TARGET_FILE:owo_example_process_plugin>)
+        set_tests_properties(owo.plugin.full_trust PROPERTIES SKIP_RETURN_CODE 77)
         add_executable(owo_core_plugin_executor_tests tests/core/plugin_executor_tests.cpp)
         target_link_libraries(owo_core_plugin_executor_tests PRIVATE owo_core_plugin)
         add_dependencies(owo_core_plugin_executor_tests owo_example_process_plugin)

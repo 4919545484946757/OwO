@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <limits>
 #include <span>
+#include <utility>
 
 namespace owo::plugin {
 namespace {
@@ -77,6 +78,61 @@ bool deflate_extraction_available() noexcept {
 #else
     return false;
 #endif
+}
+
+PackageEntryReadResult read_package_entry(
+    const PackageInspection& package, const std::string_view entry_path,
+    const std::size_t maximum_bytes) {
+    if (!package.ok || package.snapshot_bytes == nullptr || entry_path.empty())
+        return {false, {}, "a successful immutable package preflight is required"};
+    const auto found = std::find_if(package.entries.begin(), package.entries.end(),
+        [entry_path](const PackageEntry& entry) { return entry.path == entry_path; });
+    if (found == package.entries.end() || found->path.ends_with('/'))
+        return {false, {}, "package entry is missing"};
+    if (found->uncompressed_size > maximum_bytes ||
+        found->uncompressed_size > std::numeric_limits<std::size_t>::max() ||
+        found->data_offset > package.snapshot_bytes->size() ||
+        found->compressed_size > package.snapshot_bytes->size() - found->data_offset)
+        return {false, {}, "package entry is oversized or outside the immutable snapshot"};
+    const auto compressed = std::span<const unsigned char>(*package.snapshot_bytes).subspan(
+        static_cast<std::size_t>(found->data_offset),
+        static_cast<std::size_t>(found->compressed_size));
+    std::string output;
+    if (found->compression_method == 0) {
+        output.assign(reinterpret_cast<const char*>(compressed.data()), compressed.size());
+    } else if (found->compression_method == 8) {
+#ifdef OWO_HAS_ZLIB
+        if (found->compressed_size > std::numeric_limits<uInt>::max() ||
+            found->uncompressed_size > std::numeric_limits<uInt>::max())
+            return {false, {}, "Deflate entry exceeds zlib chunk limits"};
+        output.resize(static_cast<std::size_t>(found->uncompressed_size));
+        unsigned char empty_output{};
+        z_stream stream{};
+        stream.next_in = const_cast<Bytef*>(compressed.data());
+        stream.avail_in = static_cast<uInt>(compressed.size());
+        stream.next_out = output.empty() ? &empty_output
+                                         : reinterpret_cast<Bytef*>(output.data());
+        stream.avail_out = output.empty() ? 1U : static_cast<uInt>(output.size());
+        if (inflateInit2(&stream, -MAX_WBITS) != Z_OK)
+            return {false, {}, "cannot initialize raw Deflate decoder"};
+        const auto result = inflate(&stream, Z_FINISH);
+        const auto consumed = stream.total_in;
+        const auto produced = stream.total_out;
+        inflateEnd(&stream);
+        if (result != Z_STREAM_END || consumed != compressed.size() ||
+            produced != found->uncompressed_size)
+            return {false, {}, "Deflate stream does not match declared package sizes"};
+#else
+        return {false, {}, "Deflate extraction is unavailable"};
+#endif
+    } else {
+        return {false, {}, "unsupported extraction method"};
+    }
+    const auto data = std::span<const unsigned char>(
+        reinterpret_cast<const unsigned char*>(output.data()), output.size());
+    if (crc32(data) != found->crc32)
+        return {false, {}, "package entry CRC-32 mismatch"};
+    return {true, std::move(output), {}};
 }
 
 ExtractionResult extract_package_to_staging(

@@ -142,5 +142,39 @@ int main() {
     std::sort(forged.granted_permissions.begin(), forged.granted_permissions.end());
     if (owo::plugin::is_plugin_permission_granted(
             forged, manifest, inventory, certificate, "input.replace")) return 21;
+
+    auto full_trust_manifest = manifest;
+    full_trust_manifest.permissions = {"system.full_trust", "ui.desktop_pet"};
+    if (owo::plugin::make_plugin_authorization(
+            full_trust_manifest, inventory, certificate,
+            full_trust_manifest.permissions).ok) return 24;
+    const owo::plugin::PluginAuthorizationContext consent{
+        owo::plugin::PluginTrustTier::unverified_package,
+        owo::plugin::kPluginRiskDisclaimerVersion, true};
+    const auto high_risk = owo::plugin::make_plugin_authorization(
+        full_trust_manifest, inventory, std::string(64, '0'),
+        full_trust_manifest.permissions, consent);
+    const auto high_risk_record = high_risk.ok
+        ? owo::plugin::serialize_plugin_authorization(high_risk.value) : std::string{};
+    const auto parsed_high_risk = owo::plugin::parse_plugin_authorization(high_risk_record);
+    if (!parsed_high_risk.ok || parsed_high_risk.value.schema_version != 2 ||
+        !parsed_high_risk.value.context.informed_consent ||
+        parsed_high_risk.value.context.trust_tier !=
+            owo::plugin::PluginTrustTier::unverified_package ||
+        !owo::plugin::is_plugin_permission_granted(
+            parsed_high_risk.value, full_trust_manifest, inventory,
+            std::string(64, '0'), "system.full_trust")) return 25;
+    auto stale_disclaimer = high_risk_record;
+    stale_disclaimer.replace(stale_disclaimer.find("disclaimer_version=1"),
+                             std::string("disclaimer_version=1").size(),
+                             "disclaimer_version=0");
+    if (owo::plugin::parse_plugin_authorization(stale_disclaimer).ok) return 26;
+    const std::string legacy = "schema_version=1\nplugin_id=owo.plugin.example\n"
+        "version=1.0.0\ninventory_sha256=" + inventory +
+        "\npublisher_certificate_sha256=" + certificate +
+        "\ngranted_permissions=clipboard.read\n";
+    const auto parsed_legacy = owo::plugin::parse_plugin_authorization(legacy);
+    if (!parsed_legacy.ok || parsed_legacy.value.schema_version != 1 ||
+        owo::plugin::serialize_plugin_authorization(parsed_legacy.value) != legacy) return 27;
     return 0;
 }

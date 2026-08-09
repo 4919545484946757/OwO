@@ -31,12 +31,15 @@ std::string read_file(const std::filesystem::path& path) {
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
-std::string manifest_json(const std::string_view plugin_id) {
+std::string manifest_json(const std::string_view plugin_id,
+                          const bool full_trust = false) {
     return "{\"id\":\"" + std::string(plugin_id) +
         "\",\"name\":\"Runtime Test\",\"version\":\"1.0.0\","
         "\"api_version\":1,\"runtime\":\"process\","
         "\"entry\":\"bin/example-process-plugin.exe\","
-        "\"permissions\":[\"input.context\"],"
+        "\"permissions\":" + std::string(full_trust
+            ? "[\"system.full_trust\",\"ui.desktop_pet\"]"
+            : "[\"input.context\"]") + ","
         "\"network\":false,\"config_schema\":\"config.schema.json\"}";
 }
 
@@ -291,5 +294,57 @@ int main(const int argc, char** argv) {
     if (forced_wait != WAIT_OBJECT_0) return finish(14);
     if (owo::plugin::launch_active_plugin(
             root, "../escape", std::chrono::seconds(1))) return finish(15);
+
+    const auto full_trust_id = "owo.plugin.full-trust-test-" + unique_suffix;
+    const auto full_staging = root / L"staging" / L".runtime-full-trust";
+    std::filesystem::create_directories(full_staging / L"bin", error);
+    if (error || !CopyFileW(probe.c_str(),
+                            (full_staging / L"bin" / L"example-process-plugin.exe").c_str(),
+                            TRUE) ||
+        !write_file(full_staging / L"manifest.json", manifest_json(full_trust_id, true)) ||
+        !write_file(full_staging / L"config.schema.json", "{}")) return finish(38);
+    const auto full_published = owo::plugin::publish_staged_plugin(
+        root, full_staging, std::string(64, 'c'), std::string(64, '0'));
+    if (!full_published.ok || !full_published.activated ||
+        owo::plugin::launch_active_plugin(root, full_trust_id, std::chrono::seconds(1)))
+        return finish(39);
+    const owo::plugin::PluginAuthorizationContext full_consent{
+        owo::plugin::PluginTrustTier::unverified_package,
+        owo::plugin::kPluginRiskDisclaimerVersion, true};
+    const auto full_authorization = owo::plugin::make_plugin_authorization(
+        full_published.manifest, std::string(64, 'c'), std::string(64, '0'),
+        full_published.manifest.permissions, full_consent);
+    if (!full_authorization.ok ||
+        !owo::plugin::save_plugin_authorization(root, full_authorization.value).ok)
+        return finish(40);
+    auto full_launched = owo::plugin::launch_active_plugin(
+        root, full_trust_id, std::chrono::seconds(5));
+    if (!full_launched) {
+        std::cerr << "Full-trust PluginHost launch failed: "
+                  << full_launched.diagnostic << '\n';
+        return finish(41);
+    }
+    HANDLE full_process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                      full_launched.session.process_id());
+    HANDLE full_token = nullptr;
+    DWORD is_appcontainer = 1;
+    DWORD returned = 0;
+    BOOL in_job = FALSE;
+    const bool full_boundary = full_process != nullptr &&
+        OpenProcessToken(full_process, TOKEN_QUERY, &full_token) != FALSE &&
+        GetTokenInformation(full_token, TokenIsAppContainer, &is_appcontainer,
+                            sizeof(is_appcontainer), &returned) != FALSE &&
+        IsProcessInJob(full_process, nullptr, &in_job) != FALSE &&
+        is_appcontainer == 0 && in_job != FALSE;
+    if (full_token != nullptr) CloseHandle(full_token);
+    if (full_process != nullptr) CloseHandle(full_process);
+    owo::plugin::PluginInvokeRequest full_echo;
+    full_echo.service = "example.echo.v1";
+    full_echo.payload = "full-trust-ok";
+    full_echo.timeout = std::chrono::seconds(2);
+    const auto full_echoed = full_launched.session.invoke(std::move(full_echo));
+    const auto full_shutdown = full_launched.session.shutdown(std::chrono::seconds(2));
+    if (!full_boundary || !full_echoed.ok || full_echoed.payload != "full-trust-ok" ||
+        !full_shutdown.ok) return finish(42);
     return finish(0);
 }

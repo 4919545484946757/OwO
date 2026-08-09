@@ -306,6 +306,8 @@ int wmain(const int argc, wchar_t** argv) {
     const bool launched = CreateProcessW(copied.c_str(), command.data(), nullptr, nullptr, FALSE,
                                          flags, nullptr, profile.profile_directory.c_str(),
                                          &startup.StartupInfo, &process) != FALSE;
+    const bool pipe_bound = launched && owo::plugin::bind_plugin_pipe_client_process(
+        pipe_server.pipe, process.dwProcessId);
     HANDLE child_handle_copy = nullptr;
     const bool copied_child_handle = launched &&
         DuplicateHandle(process.hProcess, inheritable, GetCurrentProcess(), &child_handle_copy,
@@ -313,7 +315,7 @@ int wmain(const int argc, wchar_t** argv) {
     const bool inherited_same = copied_child_handle &&
         CompareObjectHandles(child_handle_copy, inheritable) != FALSE;
     if (child_handle_copy != nullptr) CloseHandle(child_handle_copy);
-    bool assigned = launched && !inherited_same &&
+    bool assigned = pipe_bound && !inherited_same &&
         AssignProcessToJobObject(job, process.hProcess) != FALSE;
     bool resumed = assigned && ResumeThread(process.hThread) != static_cast<DWORD>(-1);
     bool pipe_ok = false;

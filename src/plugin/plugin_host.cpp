@@ -81,6 +81,24 @@ std::wstring current_user_sid() {
     return result;
 }
 
+bool current_process_is_appcontainer() {
+    HANDLE token = nullptr;
+    DWORD value = 0;
+    DWORD returned = 0;
+    const bool queried = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) != FALSE &&
+        GetTokenInformation(token, TokenIsAppContainer, &value, sizeof(value), &returned) != FALSE;
+    if (token != nullptr) CloseHandle(token);
+    return queried && value != 0;
+}
+
+bool current_process_has_restricted_token() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return true;
+    const bool restricted = IsTokenRestricted(token) != FALSE;
+    CloseHandle(token);
+    return restricted;
+}
+
 bool collect_safe_tree(const std::filesystem::path& root,
                        std::vector<std::filesystem::path>& paths,
                        std::string& diagnostic) {
@@ -221,7 +239,8 @@ std::wstring environment_value(const wchar_t* name) {
     return value;
 }
 
-std::vector<wchar_t> restricted_environment(const std::filesystem::path& data_path) {
+std::vector<wchar_t> restricted_environment(const std::filesystem::path& data_path,
+                                             const bool full_trust) {
     wchar_t windows_directory[MAX_PATH]{};
     const auto length = GetWindowsDirectoryW(windows_directory, MAX_PATH);
     if (length == 0 || length >= MAX_PATH) return {};
@@ -248,6 +267,7 @@ std::vector<wchar_t> restricted_environment(const std::filesystem::path& data_pa
         L"TMP=" + data_path.native(),
         L"WINDIR=" + std::wstring(windows_directory, length),
     });
+    if (full_trust) variables.emplace_back(L"OWO_PLUGIN_FULL_TRUST=1");
     std::sort(variables.begin(), variables.end(), [](const auto& left, const auto& right) {
         return _wcsicmp(left.c_str(), right.c_str()) < 0;
     });
@@ -626,94 +646,142 @@ PluginHostLaunchResult launch_active_plugin(
         return launch_failure("invalid PluginHost startup timeout");
     const auto installed = query_active_plugin_version(plugin_store_root, plugin_id);
     if (!installed.ok) return launch_failure(installed.diagnostic);
-    if (installed.manifest.runtime != "process" || installed.manifest.network)
+    if (installed.manifest.runtime != "process")
         return launch_failure("active plugin runtime policy is unsupported");
-    const auto profile = prepare_plugin_sandbox_profile(installed.manifest.id);
-    if (!profile.ok) return launch_failure(profile.diagnostic);
+    const bool full_trust = std::find(installed.manifest.permissions.begin(),
+        installed.manifest.permissions.end(), "system.full_trust") !=
+        installed.manifest.permissions.end();
+    if (installed.manifest.network && !full_trust)
+        return launch_failure("network access requires full-trust execution");
+    if (full_trust) {
+        if (current_process_is_appcontainer() || current_process_has_restricted_token())
+            return launch_failure("full-trust execution is unavailable from a sandboxed host");
+        const auto authorization = load_plugin_authorization(
+            plugin_store_root, installed.manifest.id, installed.manifest.version);
+        const bool all_permissions_granted = authorization.ok && std::all_of(
+            installed.manifest.permissions.begin(), installed.manifest.permissions.end(),
+            [&](const std::string& permission) {
+                return is_plugin_permission_granted(
+                    authorization.value, installed.manifest, installed.inventory_sha256,
+                    installed.publisher_certificate_sha256, permission);
+            });
+        if (!all_permissions_granted)
+            return launch_failure(
+                "full-trust plugin permissions are missing, revoked, or do not match this version");
+    }
     const auto data_path = plugin_store_root.lexically_normal() / L"data" /
         std::filesystem::path(installed.manifest.id);
-    std::string access_diagnostic;
-    if (!prepare_runtime_access(installed.installed_path, data_path,
-                                profile.sid_string, access_diagnostic))
-        return launch_failure(access_diagnostic);
     std::filesystem::path entry;
     if (!safe_entry(installed.installed_path, installed.manifest.entry, entry))
         return launch_failure("active plugin entry point is missing or unsafe");
-    auto pipe = create_plugin_pipe_server(profile.sid_string);
-    if (!pipe) return launch_failure(pipe.diagnostic);
+
     PSID appcontainer_sid = nullptr;
-    if (FAILED(DeriveAppContainerSidFromAppContainerName(
-            profile.profile_name.c_str(), &appcontainer_sid)) || appcontainer_sid == nullptr)
-        return launch_failure("cannot derive active plugin AppContainer SID");
-    SIZE_T attribute_size = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_size);
-    auto* attributes = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
-        HeapAlloc(GetProcessHeap(), 0, attribute_size));
-    SECURITY_CAPABILITIES capabilities{};
-    capabilities.AppContainerSid = appcontainer_sid;
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes = nullptr;
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
-    const bool attributes_ready = attributes != nullptr &&
-        InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_size) != FALSE &&
-        UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-                                  &capabilities, sizeof(capabilities), nullptr, nullptr) != FALSE;
-    startup.lpAttributeList = attributes;
-    if (!attributes_ready) {
-        if (attributes != nullptr) HeapFree(GetProcessHeap(), 0, attributes);
-        FreeSid(appcontainer_sid);
-        return launch_failure(win32_error("cannot prepare plugin process attributes"));
+    PluginPipeOpenResult pipe;
+    if (full_trust) {
+        pipe = create_full_trust_plugin_pipe_server();
+    } else {
+        const auto profile = prepare_plugin_sandbox_profile(installed.manifest.id);
+        if (!profile.ok) return launch_failure(profile.diagnostic);
+        std::string access_diagnostic;
+        if (!prepare_runtime_access(installed.installed_path, data_path,
+                                    profile.sid_string, access_diagnostic))
+            return launch_failure(access_diagnostic);
+        pipe = create_plugin_pipe_server(profile.sid_string);
+        if (!pipe) return launch_failure(pipe.diagnostic);
+        if (FAILED(DeriveAppContainerSidFromAppContainerName(
+                profile.profile_name.c_str(), &appcontainer_sid)) || appcontainer_sid == nullptr)
+            return launch_failure("cannot derive active plugin AppContainer SID");
+        SIZE_T attribute_size = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_size);
+        attributes = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+            HeapAlloc(GetProcessHeap(), 0, attribute_size));
+        SECURITY_CAPABILITIES capabilities{};
+        capabilities.AppContainerSid = appcontainer_sid;
+        const bool attributes_ready = attributes != nullptr &&
+            InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_size) != FALSE &&
+            UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                                      &capabilities, sizeof(capabilities), nullptr, nullptr) != FALSE;
+        if (!attributes_ready) {
+            if (attributes != nullptr) HeapFree(GetProcessHeap(), 0, attributes);
+            FreeSid(appcontainer_sid);
+            return launch_failure(win32_error("cannot prepare plugin process attributes"));
+        }
+        startup.lpAttributeList = attributes;
     }
+    if (!pipe) {
+        if (attributes != nullptr) {
+            DeleteProcThreadAttributeList(attributes);
+            HeapFree(GetProcessHeap(), 0, attributes);
+        }
+        if (appcontainer_sid != nullptr) FreeSid(appcontainer_sid);
+        return launch_failure(pipe.diagnostic);
+    }
+    const auto release_process_attributes = [&]() {
+        if (attributes != nullptr) {
+            DeleteProcThreadAttributeList(attributes);
+            HeapFree(GetProcessHeap(), 0, attributes);
+            attributes = nullptr;
+        }
+        if (appcontainer_sid != nullptr) {
+            FreeSid(appcontainer_sid);
+            appcontainer_sid = nullptr;
+        }
+    };
     HANDLE job = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
         JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_PROCESS_MEMORY |
         JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
-    limits.BasicLimitInformation.ActiveProcessLimit = 1;
-    limits.ProcessMemoryLimit = 128ULL * 1024ULL * 1024ULL;
+    const bool process_launch = std::find(installed.manifest.permissions.begin(),
+        installed.manifest.permissions.end(), "process.launch") !=
+        installed.manifest.permissions.end();
+    limits.BasicLimitInformation.ActiveProcessLimit = full_trust && process_launch ? 8 : 1;
+    limits.ProcessMemoryLimit = (full_trust ? 512ULL : 128ULL) * 1024ULL * 1024ULL;
     if (job == nullptr || !SetInformationJobObject(
             job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
         const DWORD error = GetLastError();
         if (job != nullptr) CloseHandle(job);
-        DeleteProcThreadAttributeList(attributes);
-        HeapFree(GetProcessHeap(), 0, attributes);
-        FreeSid(appcontainer_sid);
+        release_process_attributes();
         return launch_failure(win32_error("cannot prepare plugin Job", error));
     }
     const auto wide_id = ascii_wide(installed.manifest.id);
-    auto environment = restricted_environment(data_path);
+    auto environment = restricted_environment(data_path, full_trust);
     if (environment.empty()) {
         CloseHandle(job);
-        DeleteProcThreadAttributeList(attributes);
-        HeapFree(GetProcessHeap(), 0, attributes);
-        FreeSid(appcontainer_sid);
+        release_process_attributes();
         return launch_failure("cannot prepare restricted plugin environment");
     }
     std::wstring command = quote_argument(entry.native()) + L" --owo-plugin-pipe " +
         quote_argument(pipe.pipe_name) + L" --owo-plugin-id " + quote_argument(wide_id) +
         L" --owo-plugin-data " + quote_argument(data_path.native());
     PROCESS_INFORMATION process{};
-    const DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT |
-        CREATE_DEFAULT_ERROR_MODE | EXTENDED_STARTUPINFO_PRESENT;
+    DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT |
+        CREATE_DEFAULT_ERROR_MODE;
+    if (attributes != nullptr) flags |= EXTENDED_STARTUPINFO_PRESENT;
     const bool launched = CreateProcessW(
         entry.c_str(), command.data(), nullptr, nullptr, FALSE, flags,
         environment.data(), installed.installed_path.c_str(),
         &startup.StartupInfo, &process) != FALSE;
     const DWORD launch_error = launched ? ERROR_SUCCESS : GetLastError();
-    const bool assigned = launched &&
+    const bool pipe_bound = launched &&
+        bind_plugin_pipe_client_process(pipe.pipe, process.dwProcessId);
+    const bool assigned = pipe_bound &&
         AssignProcessToJobObject(job, process.hProcess) != FALSE;
-    const DWORD assign_error = launched && !assigned ? GetLastError() : ERROR_SUCCESS;
+    const DWORD assign_error = pipe_bound && !assigned ? GetLastError() : ERROR_SUCCESS;
     const bool resumed = assigned &&
         ResumeThread(process.hThread) != static_cast<DWORD>(-1);
     const DWORD resume_error = assigned && !resumed ? GetLastError() : ERROR_SUCCESS;
     if (launched) CloseHandle(process.hThread);
-    DeleteProcThreadAttributeList(attributes);
-    HeapFree(GetProcessHeap(), 0, attributes);
-    FreeSid(appcontainer_sid);
-    if (!launched || !assigned || !resumed) {
+    release_process_attributes();
+    if (!launched || !pipe_bound || !assigned || !resumed) {
         if (launched) TerminateProcess(process.hProcess, ERROR_PROCESS_ABORTED);
         if (launched) CloseHandle(process.hProcess);
         CloseHandle(job);
         return launch_failure(!launched ? win32_error("CreateProcessW", launch_error)
+            : !pipe_bound ? "cannot bind plugin pipe to the launched process"
             : !assigned ? win32_error("AssignProcessToJobObject", assign_error)
                         : win32_error("ResumeThread", resume_error));
     }
@@ -735,8 +803,13 @@ PluginHostLaunchResult launch_active_plugin(
     auto accepted = accept_plugin_pipe_client(session.implementation_->pipe,
                                               remaining(deadline));
     if (!accepted.ok) {
+        DWORD child_exit = STILL_ACTIVE;
+        const bool child_exited = GetExitCodeProcess(session.implementation_->process,
+                                                     &child_exit) != FALSE &&
+                                  child_exit != STILL_ACTIVE;
         session.terminate();
-        return launch_failure("plugin pipe accept failed: " + accepted.diagnostic);
+        return launch_failure("plugin pipe accept failed: " + accepted.diagnostic +
+            (child_exited ? "; plugin exited with code " + std::to_string(child_exit) : ""));
     }
     auto hello = receive_plugin_pipe_message(session.implementation_->pipe,
                                              remaining(deadline));

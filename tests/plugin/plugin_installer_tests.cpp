@@ -1,6 +1,8 @@
 #include "owo/plugin/package_archive.h"
 #include "owo/plugin/package_signature.h"
 #include "owo/plugin/plugin_installer.h"
+#include "owo/plugin/plugin_authorization_store.h"
+#include "owo/plugin/plugin_store.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -25,13 +27,23 @@ void put32(std::vector<unsigned char>& output, const std::uint32_t value) {
     put16(output, static_cast<std::uint16_t>(value >> 16U));
 }
 
+std::uint32_t crc32(const std::string_view data) {
+    std::uint32_t crc = 0xffffffffU;
+    for (const unsigned char byte : data) {
+        crc ^= byte;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1U) ^ (0xedb88320U & (0U - (crc & 1U)));
+    }
+    return ~crc;
+}
+
 std::vector<unsigned char> package(const std::vector<Entry>& entries) {
     std::vector<unsigned char> output;
     std::vector<std::uint32_t> offsets;
     for (const auto& entry : entries) {
         offsets.push_back(static_cast<std::uint32_t>(output.size()));
         put32(output, 0x04034b50U); put16(output, 20); put16(output, 0x0800U);
-        put16(output, 0); put16(output, 0); put16(output, 0); put32(output, 0);
+        put16(output, 0); put16(output, 0); put16(output, 0); put32(output, crc32(entry.data));
         put32(output, static_cast<std::uint32_t>(entry.data.size()));
         put32(output, static_cast<std::uint32_t>(entry.data.size()));
         put16(output, static_cast<std::uint16_t>(entry.path.size())); put16(output, 0);
@@ -43,7 +55,7 @@ std::vector<unsigned char> package(const std::vector<Entry>& entries) {
         const auto& entry = entries[index];
         put32(output, 0x02014b50U); put16(output, 20); put16(output, 20);
         put16(output, 0x0800U); put16(output, 0); put16(output, 0); put16(output, 0);
-        put32(output, 0); put32(output, static_cast<std::uint32_t>(entry.data.size()));
+        put32(output, crc32(entry.data)); put32(output, static_cast<std::uint32_t>(entry.data.size()));
         put32(output, static_cast<std::uint32_t>(entry.data.size()));
         put16(output, static_cast<std::uint16_t>(entry.path.size()));
         put16(output, 0); put16(output, 0); put16(output, 0); put16(output, 0);
@@ -83,7 +95,8 @@ int main(const int argc, char** argv) {
     const std::string manifest =
         "{\"id\":\"owo.plugin.transaction\",\"name\":\"Transaction\","
         "\"version\":\"1.0.0\",\"api_version\":1,\"runtime\":\"process\","
-        "\"entry\":\"bin/plugin.exe\",\"permissions\":[],\"network\":false,"
+        "\"entry\":\"bin/plugin.exe\",\"permissions\":[\"system.full_trust\","
+        "\"ui.desktop_pet\"],\"network\":false,"
         "\"config_schema\":\"config.schema.json\"}";
     std::vector<Entry> entries{{"manifest.json", manifest}, {"bin/plugin.exe", "MZ"},
                                {"config.schema.json", "{}"}};
@@ -106,6 +119,39 @@ int main(const int argc, char** argv) {
     if (untrusted.ok || untrusted.stage != owo::plugin::PluginInstallStage::publisher_trust ||
         untrusted.version_published || untrusted.activated ||
         std::filesystem::exists(store_root)) return 10;
+
+    const auto preview = owo::plugin::inspect_plugin_install(package_path);
+    if (!preview.ok || preview.trust_tier != owo::plugin::PluginTrustTier::unverified_package ||
+        preview.risk_level != owo::plugin::PluginInstallRiskLevel::critical ||
+        !preview.requires_risk_consent || !preview.requires_full_trust) return 12;
+    owo::plugin::PluginInstallConsent consent;
+    consent.inventory_sha256.assign(64, 'f');
+    consent.disclaimer_version = owo::plugin::kPluginRiskDisclaimerVersion;
+    consent.accept_untrusted_publisher = true;
+    consent.accept_full_trust = true;
+    consent.granted_permissions = preview.manifest.permissions;
+    const auto mismatched = owo::plugin::install_plugin_package(
+        package_path, store_root, consent);
+    if (mismatched.ok || mismatched.stage != owo::plugin::PluginInstallStage::risk_consent ||
+        std::filesystem::exists(store_root)) return 13;
+    consent.inventory_sha256 = preview.inventory_sha256;
+    const auto installed = owo::plugin::install_plugin_package(
+        package_path, store_root, consent);
+    if (!installed.ok || installed.stage != owo::plugin::PluginInstallStage::completed ||
+        !installed.version_published || installed.activated ||
+        !installed.permissions_authorized) return 14;
+    const auto installed_binding = owo::plugin::query_installed_plugin_version(
+        store_root, preview.manifest.id, preview.manifest.version);
+    if (!installed_binding.ok || installed_binding.trust_tier !=
+            owo::plugin::PluginTrustTier::unverified_package) return 16;
+    const auto authorization = owo::plugin::load_plugin_authorization(
+        store_root, preview.manifest.id, preview.manifest.version);
+    if (!authorization.ok || !authorization.value.context.informed_consent ||
+        authorization.value.context.trust_tier !=
+            owo::plugin::PluginTrustTier::unverified_package ||
+        !owo::plugin::is_plugin_permission_granted(
+            authorization.value, preview.manifest, preview.inventory_sha256,
+            std::string(64, '0'), "system.full_trust")) return 15;
 
     std::filesystem::remove(package_path, error);
     if (error) return 11;

@@ -1,11 +1,15 @@
 #include "owo/plugin/plugin_installer.h"
+#include "owo/plugin/plugin_authorization_store.h"
+#include "owo/plugin/plugin_permissions.h"
 #include "owo/plugin/plugin_store.h"
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <charconv>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -77,12 +81,90 @@ const char* install_stage(const owo::plugin::PluginInstallStage stage) {
     case none: return "none";
     case package_inspection: return "package_inspection";
     case publisher_trust: return "publisher_trust";
+    case risk_consent: return "risk_consent";
     case store_initialization: return "store_initialization";
     case staging_extraction: return "staging_extraction";
     case version_publication: return "version_publication";
+    case permission_authorization: return "permission_authorization";
     case completed: return "completed";
     }
     return "unknown";
+}
+
+const char* risk_level(const owo::plugin::PluginInstallRiskLevel risk) {
+    using enum owo::plugin::PluginInstallRiskLevel;
+    switch (risk) {
+    case low: return "low";
+    case elevated: return "elevated";
+    case high: return "high";
+    case critical: return "critical";
+    }
+    return "critical";
+}
+
+void print_permissions(const std::vector<std::string>& permissions) {
+    std::cout << '[';
+    for (std::size_t index = 0; index < permissions.size(); ++index) {
+        if (index != 0) std::cout << ',';
+        std::cout << json_escape(permissions[index]);
+    }
+    std::cout << ']';
+}
+
+owo::plugin::PluginInstallRiskLevel manifest_risk(
+    const owo::plugin::PluginManifest& manifest,
+    const owo::plugin::PluginTrustTier trust_tier) {
+    auto risk = owo::plugin::PluginInstallRiskLevel::low;
+    for (const auto& permission : manifest.permissions) {
+        const auto permission_risk = owo::plugin::plugin_permission_risk(permission);
+        owo::plugin::PluginInstallRiskLevel value{};
+        switch (permission_risk) {
+        case owo::plugin::PluginPermissionRisk::low:
+            value = owo::plugin::PluginInstallRiskLevel::low;
+            break;
+        case owo::plugin::PluginPermissionRisk::elevated:
+            value = owo::plugin::PluginInstallRiskLevel::elevated;
+            break;
+        case owo::plugin::PluginPermissionRisk::high:
+            value = owo::plugin::PluginInstallRiskLevel::high;
+            break;
+        case owo::plugin::PluginPermissionRisk::critical:
+            value = owo::plugin::PluginInstallRiskLevel::critical;
+            break;
+        }
+        if (static_cast<int>(value) > static_cast<int>(risk)) risk = value;
+    }
+    if (trust_tier == owo::plugin::PluginTrustTier::third_party_signed &&
+        static_cast<int>(risk) < static_cast<int>(owo::plugin::PluginInstallRiskLevel::high))
+        risk = owo::plugin::PluginInstallRiskLevel::high;
+    if (trust_tier == owo::plugin::PluginTrustTier::unverified_package)
+        risk = owo::plugin::PluginInstallRiskLevel::critical;
+    return risk;
+}
+
+void print_install_preview(const owo::plugin::PluginInstallPreview& preview) {
+    std::cout << "{\"schema_version\":1"
+              << ",\"ok\":" << (preview.ok ? "true" : "false")
+              << ",\"plugin_id\":" << json_escape(preview.manifest.id)
+              << ",\"name\":" << json_escape(preview.manifest.name)
+              << ",\"version\":" << json_escape(preview.manifest.version)
+              << ",\"inventory_sha256\":" << json_escape(preview.inventory_sha256)
+              << ",\"trust_tier\":"
+              << json_escape(owo::plugin::plugin_trust_tier_name(preview.trust_tier))
+              << ",\"risk_level\":" << json_escape(risk_level(preview.risk_level))
+              << ",\"requires_risk_consent\":"
+              << (preview.requires_risk_consent ? "true" : "false")
+              << ",\"requires_full_trust\":"
+              << (preview.requires_full_trust ? "true" : "false")
+              << ",\"network\":" << (preview.manifest.network ? "true" : "false")
+              << ",\"permissions\":";
+    print_permissions(preview.manifest.permissions);
+    std::cout << ",\"publisher_display_name\":"
+              << json_escape(preview.publisher_display_name)
+              << ",\"publisher_certificate_sha256\":"
+              << json_escape(preview.publisher_certificate_sha256)
+              << ",\"trust_diagnostic\":" << json_escape(preview.trust_diagnostic)
+              << ",\"diagnostic\":" << json_escape(preview.diagnostic) << "}\n";
 }
 
 void print_install_result(const owo::plugin::PluginInstallResult& result) {
@@ -105,6 +187,11 @@ void print_install_result(const owo::plugin::PluginInstallResult& result) {
               << json_escape(result.publisher_display_name)
               << ",\"publisher_certificate_sha256\":"
               << json_escape(result.publisher_certificate_sha256)
+              << ",\"trust_tier\":"
+              << json_escape(owo::plugin::plugin_trust_tier_name(result.trust_tier))
+              << ",\"risk_level\":" << json_escape(risk_level(result.risk_level))
+              << ",\"permissions_authorized\":"
+              << (result.permissions_authorized ? "true" : "false")
               << ",\"diagnostic\":" << json_escape(result.diagnostic) << "}\n";
 }
 
@@ -146,11 +233,28 @@ int list(const std::filesystem::path& root) {
     std::cout << "{\"schema_version\":1,\"plugins\":[";
     for (std::size_t index = 0; index < plugins.versions.size(); ++index) {
         const auto& plugin = plugins.versions[index];
+        const auto installed = owo::plugin::query_installed_plugin_version(
+            root, plugin.manifest.id, plugin.manifest.version);
+        const auto authorization = owo::plugin::load_plugin_authorization(
+            root, plugin.manifest.id, plugin.manifest.version);
+        const auto trust_tier = installed.ok
+            ? installed.trust_tier
+            : owo::plugin::PluginTrustTier::unverified_package;
         if (index != 0) std::cout << ',';
         std::cout << "{\"id\":" << json_escape(plugin.manifest.id)
                   << ",\"name\":" << json_escape(plugin.manifest.name)
                   << ",\"version\":" << json_escape(plugin.manifest.version)
-                  << ",\"active\":" << (plugin.active ? "true" : "false") << '}';
+                  << ",\"active\":" << (plugin.active ? "true" : "false")
+                  << ",\"trust_tier\":"
+                  << json_escape(owo::plugin::plugin_trust_tier_name(trust_tier))
+                  << ",\"risk_level\":"
+                  << json_escape(risk_level(manifest_risk(plugin.manifest, trust_tier)))
+                  << ",\"permissions_authorized\":"
+                  << (authorization.ok && !authorization.value.granted_permissions.empty()
+                          ? "true" : "false")
+                  << ",\"permissions\":";
+        print_permissions(plugin.manifest.permissions);
+        std::cout << '}';
     }
     std::cout << "],\"recovery\":[";
     for (std::size_t index = 0; index < recovery.items.size(); ++index) {
@@ -173,13 +277,23 @@ int list(const std::filesystem::path& root) {
 int wmain(const int argc, wchar_t** argv) {
     if (argc < 3) {
         std::cerr << "usage: owo_plugin_shell <store-root> "
-                     "<list|install|activate|deactivate|uninstall|cleanup> ...\n";
+                     "<list|inspect-install|install|install-risk|activate|deactivate|"
+                     "revoke|uninstall|cleanup> ...\n";
         return 1;
     }
     SetConsoleOutputCP(CP_UTF8);
     const std::filesystem::path root(argv[1]);
     const std::wstring_view command(argv[2]);
     if (command == L"list" && argc == 3) return list(root);
+    if (command == L"inspect-install" && argc == 4) {
+        const auto preview = owo::plugin::inspect_plugin_install(argv[3]);
+        print_install_preview(preview);
+        if (!preview.ok) {
+            std::cerr << preview.diagnostic << '\n';
+            return 2;
+        }
+        return 0;
+    }
     if (command == L"install" && argc == 4) {
         const auto result = owo::plugin::install_plugin_package(argv[3], root);
         print_install_result(result);
@@ -189,9 +303,59 @@ int wmain(const int argc, wchar_t** argv) {
         }
         return 0;
     }
+    if (command == L"install-risk" && argc == 7) {
+        if (std::wstring_view(argv[5]) != L"1" ||
+            std::wstring_view(argv[6]) != L"I_ACCEPT_PLUGIN_RISK_V1") {
+            std::cerr << "risk disclaimer acknowledgement is invalid\n";
+            return 2;
+        }
+        const auto preview = owo::plugin::inspect_plugin_install(argv[3]);
+        if (!preview.ok) {
+            print_install_preview(preview);
+            std::cerr << preview.diagnostic << '\n';
+            return 2;
+        }
+        owo::plugin::PluginInstallConsent consent;
+        consent.inventory_sha256 = utf8(argv[4]);
+        consent.disclaimer_version = owo::plugin::kPluginRiskDisclaimerVersion;
+        consent.accept_untrusted_publisher = true;
+        consent.accept_full_trust = true;
+        consent.granted_permissions = preview.manifest.permissions;
+        const auto result = owo::plugin::install_plugin_package(argv[3], root, consent);
+        print_install_result(result);
+        if (!result.ok) {
+            std::cerr << result.diagnostic << '\n';
+            return 2;
+        }
+        return 0;
+    }
     if (command == L"activate" && argc == 5) {
+        const auto id = utf8(argv[3]);
+        const auto version = utf8(argv[4]);
+        const auto installed = owo::plugin::query_installed_plugin_version(root, id, version);
+        if (!installed.ok) {
+            std::cerr << installed.diagnostic << '\n';
+            return 2;
+        }
+        const bool full_trust = std::find(installed.manifest.permissions.begin(),
+            installed.manifest.permissions.end(), "system.full_trust") !=
+            installed.manifest.permissions.end();
+        if (full_trust) {
+            const auto authorization = owo::plugin::load_plugin_authorization(root, id, version);
+            const bool complete = authorization.ok && std::all_of(
+                installed.manifest.permissions.begin(), installed.manifest.permissions.end(),
+                [&](const std::string& permission) {
+                    return owo::plugin::is_plugin_permission_granted(
+                        authorization.value, installed.manifest, installed.inventory_sha256,
+                        installed.publisher_certificate_sha256, permission);
+                });
+            if (!complete) {
+                std::cerr << "full-trust authorization is incomplete or revoked\n";
+                return 2;
+            }
+        }
         const auto result = owo::plugin::activate_installed_plugin_version(
-            root, utf8(argv[3]), utf8(argv[4]));
+            root, id, version);
         if (!result.ok) {
             std::cerr << result.diagnostic << '\n';
             return 2;
@@ -208,6 +372,28 @@ int wmain(const int argc, wchar_t** argv) {
             return 2;
         }
         print_management_result(result);
+        return 0;
+    }
+    if (command == L"revoke" && argc == 5) {
+        const auto id = utf8(argv[3]);
+        const auto version = utf8(argv[4]);
+        const auto installed = owo::plugin::query_installed_plugin_version(root, id, version);
+        const auto existing = owo::plugin::load_plugin_authorization(root, id, version);
+        if (!installed.ok || !existing.ok) {
+            std::cerr << (installed.ok ? existing.diagnostic : installed.diagnostic) << '\n';
+            return 2;
+        }
+        const auto revoked = owo::plugin::make_plugin_authorization(
+            installed.manifest, installed.inventory_sha256,
+            installed.publisher_certificate_sha256, {}, existing.value.context);
+        const auto saved = revoked.ok
+            ? owo::plugin::save_plugin_authorization(root, revoked.value)
+            : owo::plugin::PluginAuthorizationStoreResult{false, {}, {}, revoked.diagnostic};
+        if (!saved.ok) {
+            std::cerr << saved.diagnostic << '\n';
+            return 2;
+        }
+        print_management_result({true, id, version, saved.record_path, {}});
         return 0;
     }
     if (command == L"uninstall" && argc == 5) {

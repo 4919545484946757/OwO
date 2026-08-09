@@ -4,7 +4,7 @@ OwO 是一个面向 Windows 11、从零实现的模块化输入法项目。基�
 
 本项目采用 `GPL-3.0-only` 许可证，完整条款见 `LICENSE`。选择该许可证是为了允许在遵守同一强 Copyleft 分发义务的前提下集成雾凇拼音词库派生数据。
 
-当前处于 **P3C：插件框架基础**。P1 的 Windows 11 TSF—Core Service 闭环、P2 基础输入引擎、P3A 模型基础和 P3B 设置中心均已通过阶段验收；P3C 已完成完全离线强签名包安装、版本绑定、零能力 AppContainer、安全管道、真实已安装入口的授权调用与回收、设置中心签名包安装/显式管理/精确版本卸载，以及 Core Service 的有界非 TSF 插件执行线程。P3C 明确不开放未签名降级或可伪造的外部插件调用入口；全量与 Windows 11 手工验收仍在推进。
+当前进入 **P4：首批官方插件**。P1～P3 已建立 Windows 11 TSF—Core Service、基础输入、模型/设置中心和插件框架闭环；P4.0 正在加入受控高权限插件通道。受信低风险包继续使用离线强签名与零能力 AppContainer；第三方、未验证或高权限包必须展示信任、权限、风险和精确清单摘要，经风险/免责勾选及第二次逐包授权后才能安装，并默认保持停用。`system.full_trust` 只在精确版本完整获授后开放当前用户 Win32 令牌，不进入 TSF/Core，也不包含管理员提权。
 
 TSF 捕获英文字母形成临时预编辑缓冲，并在后台请求基础候选与可选智能增量；`1` 或空格提交，Backspace 删除，Escape 取消。候选窗保留为 TSF 进程内的轻量 Win32 非激活窗口，使用 Direct2D/DirectWrite 绘制两行布局：首行忠实显示用户输入并以 `'` 标出 Core 推断的分段（不会显示词典补全后的拼音），次行显示可点击候选、翻页和展开表格按钮。窗口总宽度按当前候选胶囊、间距和控制按钮的实测宽度动态适配，并受显示器工作区限制；异步请求期间保留上一帧视觉快照，避免候选和胶囊闪烁。此时按下数字键、空格或点击可见候选会暂存候选文本，待最新响应确认仍存在后，再使用新响应的拼音消费范围提交，不会将选择键泄漏到宿主文本框。部分提交会先发布剩余拼音候选请求，再发布学习反馈；命名管道客户端会在原截止时间内跨过 Core 更换管道实例的短暂空档。首次传输失败还会以新 request ID 有界重试一次，仍失败则结束加载状态并显示具体管道或协议错误，不会永久卡在旧快照。窗口优先定位到文本光标，无法取得范围时回退到鼠标位置。
 
@@ -86,7 +86,7 @@ Core 默认热加载 `%LOCALAPPDATA%\OwO\InputMethod\config\owo.conf`，与设�
 .\scripts\build_settings_center.ps1 -Configuration Release
 ```
 
-开发运行时可设置 `OWO_CONFIG_SHELL_PATH` 指向 `owo_config_shell.exe`，并用 `OWO_CONFIG_PATH` 覆盖默认的 `%LOCALAPPDATA%\OwO\InputMethod\config\owo.conf`。插件管理后端可用 `OWO_PLUGIN_SHELL_PATH` 覆盖，测试仓库可用 `OWO_PLUGIN_STORE_PATH` 覆盖默认的 `%LOCALAPPDATA%\OwO\InputMethod\plugins`。设置中心可选择 `.owopkg`，在展示精确路径并二次确认后调用完整离线签名安装事务；成功版本会立即激活，未签名包和无法由本机缓存完成信任验证的包都会拒绝。设置中心缺失不影响输入主链路。
+开发运行时可设置 `OWO_CONFIG_SHELL_PATH` 指向 `owo_config_shell.exe`，并用 `OWO_CONFIG_PATH` 覆盖默认的 `%LOCALAPPDATA%\OwO\InputMethod\config\owo.conf`。插件管理后端可用 `OWO_PLUGIN_SHELL_PATH` 覆盖，测试仓库可用 `OWO_PLUGIN_STORE_PATH` 覆盖默认的 `%LOCALAPPDATA%\OwO\InputMethod\plugins`。设置中心会先预检 `.owopkg`：受信低风险包确认后安装并启用；第三方、未验证或高权限包必须完成双重知情授权，安装后保持停用，且可逐版本撤销权限。设置中心缺失不影响输入主链路。
 
 候选翻页支持 `PageUp`/`PageDown`、紧凑键盘上的 `[`/`]` 和窗口内前后翻页按钮；候选可直接鼠标点击上屏，展开按钮以三列表格显示当前页全部候选。单引号可显式指定音节边界。Core 同时返回整段候选和可消费输入前缀的词语候选；选择前缀候选后只移除对应拼音，并立即为剩余拼音重新生成候选。
 

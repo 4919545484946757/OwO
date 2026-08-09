@@ -76,7 +76,7 @@ bool read_record(const std::filesystem::path& path, std::string& bytes) {
     if (!safe_file(path)) return false;
     std::error_code error;
     const auto size = std::filesystem::file_size(path, error);
-    if (error || size == 0 || size > 2048) return false;
+    if (error || size == 0 || size > 4096) return false;
     std::ifstream input(path, std::ios::binary);
     bytes.assign(static_cast<std::size_t>(size), '\0');
     return input.read(bytes.data(), static_cast<std::streamsize>(bytes.size())) &&
@@ -90,11 +90,19 @@ PluginAuthorizationResult canonical_authorization(
         authorization.plugin_id != installed.manifest.id ||
         authorization.version != installed.manifest.version ||
         authorization.inventory_sha256 != installed.inventory_sha256 ||
-        authorization.publisher_certificate_sha256 != installed.publisher_certificate_sha256)
+        authorization.publisher_certificate_sha256 != installed.publisher_certificate_sha256 ||
+        (authorization.schema_version == 1 &&
+         installed.trust_tier != PluginTrustTier::trusted_publisher) ||
+        (authorization.schema_version >= 2 &&
+         authorization.context.trust_tier != installed.trust_tier))
         return {false, {}, "authorization does not match installed version binding"};
-    return make_plugin_authorization(installed.manifest, installed.inventory_sha256,
-                                     installed.publisher_certificate_sha256,
-                                     authorization.granted_permissions);
+    auto canonical = make_plugin_authorization(
+        installed.manifest, installed.inventory_sha256,
+        installed.publisher_certificate_sha256,
+        authorization.granted_permissions, authorization.context);
+    if (canonical.ok && authorization.schema_version == 1)
+        canonical.value.schema_version = 1;
+    return canonical;
 }
 #endif
 

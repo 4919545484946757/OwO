@@ -21,7 +21,13 @@ namespace owo::plugin {
 struct PluginPipeAccess {
     static std::uintptr_t native(const PluginPipe& pipe) { return pipe.native_handle_; }
     static const std::wstring& expected_sid(const PluginPipe& pipe) {
-        return pipe.expected_appcontainer_sid_;
+        return pipe.expected_peer_sid_;
+    }
+    static bool expected_appcontainer(const PluginPipe& pipe) {
+        return pipe.expected_appcontainer_;
+    }
+    static std::uint32_t expected_process_id(const PluginPipe& pipe) {
+        return pipe.expected_process_id_;
     }
 };
 
@@ -182,6 +188,13 @@ bool read_exact(const HANDLE pipe, char* output, const DWORD size, const Deadlin
 bool expected_pipe_client(const PluginPipe& pipe, std::string& diagnostic) {
     const auto& expected_sid = PluginPipeAccess::expected_sid(pipe);
     if (expected_sid.empty()) return true;
+    ULONG client_process_id = 0;
+    if (PluginPipeAccess::expected_process_id(pipe) != 0 &&
+        (!GetNamedPipeClientProcessId(native_handle(pipe), &client_process_id) ||
+         client_process_id != PluginPipeAccess::expected_process_id(pipe))) {
+        diagnostic = "named pipe client process identity mismatch";
+        return false;
+    }
     if (!ImpersonateNamedPipeClient(native_handle(pipe))) {
         diagnostic = win32_error("ImpersonateNamedPipeClient");
         return false;
@@ -202,21 +215,33 @@ bool expected_pipe_client(const PluginPipe& pipe, std::string& diagnostic) {
         GetTokenInformation(token, TokenIsAppContainer, &is_appcontainer,
                             sizeof(is_appcontainer), &returned) != FALSE &&
         is_appcontainer != 0;
-    DWORD size = 0;
-    GetTokenInformation(token, TokenAppContainerSid, nullptr, 0, &size);
-    std::vector<unsigned char> buffer(size);
-    const bool read_sid = size >= sizeof(TOKEN_APPCONTAINER_INFORMATION) &&
-        GetTokenInformation(token, TokenAppContainerSid, buffer.data(), size, &size) != FALSE;
     PSID expected = nullptr;
     const bool parsed = ConvertStringSidToSidW(expected_sid.c_str(), &expected) != FALSE;
-    const auto* information = read_sid
-        ? reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(buffer.data()) : nullptr;
-    const bool matches = appcontainer && parsed && information != nullptr &&
-        information->TokenAppContainer != nullptr &&
-        EqualSid(expected, information->TokenAppContainer) != FALSE;
+    bool matches = false;
+    if (PluginPipeAccess::expected_appcontainer(pipe)) {
+        DWORD size = 0;
+        GetTokenInformation(token, TokenAppContainerSid, nullptr, 0, &size);
+        std::vector<unsigned char> buffer(size);
+        const bool read_sid = size >= sizeof(TOKEN_APPCONTAINER_INFORMATION) &&
+            GetTokenInformation(token, TokenAppContainerSid, buffer.data(), size, &size) != FALSE;
+        const auto* information = read_sid
+            ? reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(buffer.data()) : nullptr;
+        matches = appcontainer && parsed && information != nullptr &&
+            information->TokenAppContainer != nullptr &&
+            EqualSid(expected, information->TokenAppContainer) != FALSE;
+    } else {
+        DWORD size = 0;
+        GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+        std::vector<unsigned char> buffer(size);
+        const bool read_user = size >= sizeof(TOKEN_USER) &&
+            GetTokenInformation(token, TokenUser, buffer.data(), size, &size) != FALSE;
+        const auto* user = read_user ? reinterpret_cast<const TOKEN_USER*>(buffer.data()) : nullptr;
+        matches = !appcontainer && parsed && user != nullptr &&
+            EqualSid(expected, user->User.Sid) != FALSE;
+    }
     if (expected != nullptr) LocalFree(expected);
     CloseHandle(token);
-    if (!matches) diagnostic = "named pipe client AppContainer SID mismatch";
+    if (!matches) diagnostic = "named pipe client token identity mismatch";
     return matches;
 }
 #endif
@@ -234,19 +259,30 @@ PluginPipeReceiveResult receive_failure(PluginPipe& pipe, std::string diagnostic
 }  // namespace
 
 PluginPipe::PluginPipe(const std::uintptr_t native_handle,
-                       std::wstring expected_appcontainer_sid)
+                       std::wstring expected_peer_sid,
+                       const bool expected_appcontainer)
     : native_handle_(native_handle),
-      expected_appcontainer_sid_(std::move(expected_appcontainer_sid)) {}
+      expected_peer_sid_(std::move(expected_peer_sid)),
+      expected_appcontainer_(expected_appcontainer) {}
 
 PluginPipe::PluginPipe(PluginPipe&& other) noexcept
     : native_handle_(std::exchange(other.native_handle_, static_cast<std::uintptr_t>(-1))),
-      expected_appcontainer_sid_(std::move(other.expected_appcontainer_sid_)) {}
+      expected_peer_sid_(std::move(other.expected_peer_sid_)),
+      expected_appcontainer_(other.expected_appcontainer_),
+      expected_process_id_(other.expected_process_id_) {
+    other.expected_appcontainer_ = false;
+    other.expected_process_id_ = 0;
+}
 
 PluginPipe& PluginPipe::operator=(PluginPipe&& other) noexcept {
     if (this != &other) {
         close();
         native_handle_ = std::exchange(other.native_handle_, static_cast<std::uintptr_t>(-1));
-        expected_appcontainer_sid_ = std::move(other.expected_appcontainer_sid_);
+        expected_peer_sid_ = std::move(other.expected_peer_sid_);
+        expected_appcontainer_ = other.expected_appcontainer_;
+        expected_process_id_ = other.expected_process_id_;
+        other.expected_appcontainer_ = false;
+        other.expected_process_id_ = 0;
     }
     return *this;
 }
@@ -262,7 +298,9 @@ void PluginPipe::close() noexcept {
     if (valid()) CloseHandle(native_handle(*this));
 #endif
     native_handle_ = static_cast<std::uintptr_t>(-1);
-    expected_appcontainer_sid_.clear();
+    expected_peer_sid_.clear();
+    expected_appcontainer_ = false;
+    expected_process_id_ = 0;
 }
 
 PluginPipeOpenResult create_plugin_pipe_server(
@@ -309,12 +347,49 @@ PluginPipeOpenResult create_plugin_pipe_server(
     LocalFree(descriptor);
     if (handle == INVALID_HANDLE_VALUE)
         return open_failure(win32_error("CreateNamedPipeW", error));
-    return {PluginPipe(reinterpret_cast<std::uintptr_t>(handle), expected_text),
+    return {PluginPipe(reinterpret_cast<std::uintptr_t>(handle), expected_text, true),
             client_name, {}};
 #else
     static_cast<void>(expected_appcontainer_sid);
     return open_failure("secure plugin pipes are currently available on Windows only");
 #endif
+}
+
+PluginPipeOpenResult create_full_trust_plugin_pipe_server() {
+#ifdef _WIN32
+    const auto user_sid = current_user_sid();
+    const auto suffix = random_pipe_suffix();
+    if (user_sid.empty() || suffix.empty())
+        return open_failure("cannot prepare full-trust plugin pipe identity");
+    const std::wstring name = std::wstring(kPipePrefix) + suffix;
+    const std::wstring sddl = L"D:P(A;;GA;;;" + user_sid + L")";
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr))
+        return open_failure(win32_error("ConvertStringSecurityDescriptor"));
+    SECURITY_ATTRIBUTES security{sizeof(security), descriptor, FALSE};
+    const HANDLE handle = CreateNamedPipeW(
+        name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED |
+                          FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, static_cast<DWORD>(kMaximumPluginWireBytes + 4U),
+        static_cast<DWORD>(kMaximumPluginWireBytes + 4U), 1000, &security);
+    const DWORD error = handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    LocalFree(descriptor);
+    if (handle == INVALID_HANDLE_VALUE)
+        return open_failure(win32_error("CreateNamedPipeW", error));
+    return {PluginPipe(reinterpret_cast<std::uintptr_t>(handle), user_sid, false), name, {}};
+#else
+    return open_failure("secure plugin pipes are currently available on Windows only");
+#endif
+}
+
+bool bind_plugin_pipe_client_process(PluginPipe& server,
+                                     const std::uint32_t process_id) noexcept {
+    if (!server.valid() || server.expected_peer_sid_.empty() || process_id == 0 ||
+        server.expected_process_id_ != 0) return false;
+    server.expected_process_id_ = process_id;
+    return true;
 }
 
 PluginPipeOpenResult connect_plugin_pipe_client(
@@ -335,7 +410,7 @@ PluginPipeOpenResult connect_plugin_pipe_client(
             SECURITY_EFFECTIVE_ONLY,
         nullptr);
     if (handle == INVALID_HANDLE_VALUE) return open_failure(win32_error("CreateFileW"));
-    return {PluginPipe(reinterpret_cast<std::uintptr_t>(handle), {}), name, {}};
+    return {PluginPipe(reinterpret_cast<std::uintptr_t>(handle), {}, false), name, {}};
 #else
     static_cast<void>(pipe_name);
     static_cast<void>(timeout);
@@ -347,7 +422,7 @@ PluginPipeOperationResult accept_plugin_pipe_client(
     PluginPipe& server,
     const std::chrono::milliseconds timeout) {
 #ifdef _WIN32
-    if (!server.valid() || server.expected_appcontainer_sid_.empty())
+    if (!server.valid() || server.expected_peer_sid_.empty())
         return operation_failure("plugin pipe is not a server");
     if (timeout.count() <= 0) return operation_failure("invalid plugin pipe accept timeout");
     OVERLAPPED operation{};
@@ -449,7 +524,7 @@ PluginPipeReceiveResult receive_plugin_pipe_message(
 
 void disconnect_plugin_pipe(PluginPipe& server) noexcept {
 #ifdef _WIN32
-    if (server.valid() && !server.expected_appcontainer_sid_.empty()) {
+    if (server.valid() && !server.expected_peer_sid_.empty()) {
         DisconnectNamedPipe(native_handle(server));
     }
 #else

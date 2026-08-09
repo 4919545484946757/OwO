@@ -80,10 +80,11 @@
             <ContentControl x:Name="PluginSection" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="14">
                 <TextBlock Text="插件管理" Style="{StaticResource SubtitleTextBlockStyle}" />
-                <TextBlock Text="只安装通过 Windows 发布者信任验证的签名包；不提供未签名开发模式。插件停用后，版本、授权和用户数据会保留。"
+                <TextBlock Text="默认使用 Windows 发布者信任。第三方、未验证或高权限包必须先显示完整风险，再对该包单独授权；安装后保持停用。授权不会跨版本继承，可随时撤销。"
+                           TextWrapping="Wrap"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <StackPanel Orientation="Horizontal" Spacing="12">
-                    <Button x:Name="PluginInstallButton" Content="安装签名插件包…"
+                    <Button x:Name="PluginInstallButton" Content="安装插件包…"
                             Click="PluginInstallButton_Click" />
                     <Button x:Name="PluginReloadButton" Content="刷新插件状态"
                             Click="PluginReloadButton_Click" />
@@ -106,6 +107,9 @@
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
                                     <Button Content="{Binding ActionLabel}" Tag="{Binding}"
                                             Click="PluginVersionAction_Click" />
+                                    <Button Content="撤销权限" Tag="{Binding}"
+                                            IsEnabled="{Binding CanRevoke}"
+                                            Click="PluginVersionRevoke_Click" />
                                     <Button Content="卸载此版本" Tag="{Binding}"
                                             IsEnabled="{Binding CanUninstall}"
                                             Click="PluginVersionUninstall_Click" />

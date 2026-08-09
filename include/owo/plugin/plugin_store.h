@@ -1,5 +1,6 @@
 #pragma once
 
+#include "owo/plugin/plugin_authorization.h"
 #include "owo/plugin/plugin_manifest.h"
 
 #include <filesystem>
@@ -25,6 +26,7 @@ struct InstalledPluginVersionResult {
     std::string inventory_sha256;
     std::string publisher_certificate_sha256;
     std::string diagnostic;
+    PluginTrustTier trust_tier{PluginTrustTier::trusted_publisher};
 };
 
 enum class PluginRecoveryKind {
@@ -91,7 +93,9 @@ struct PluginUninstallResult {
 /// Publishes one prevalidated direct child of root/staging, then atomically activates it.
 [[nodiscard]] PluginStoreResult publish_staged_plugin(
     const std::filesystem::path& root, const std::filesystem::path& staging_directory,
-    std::string_view inventory_sha256, std::string_view publisher_certificate_sha256);
+    std::string_view inventory_sha256, std::string_view publisher_certificate_sha256,
+    bool activate = true,
+    PluginTrustTier trust_tier = PluginTrustTier::trusted_publisher);
 
 /// Atomically switches the active record to an already installed version.
 [[nodiscard]] PluginStoreResult activate_installed_plugin_version(

@@ -170,10 +170,12 @@ bool move_directory_write_through(const std::filesystem::path& source,
 #endif
 
 std::string serialize_record(const PluginManifest& manifest, const std::string_view inventory,
-                             const std::string_view certificate) {
-    return "schema_version=1\nplugin_id=" + manifest.id + "\nversion=" + manifest.version +
+                             const std::string_view certificate,
+                             const PluginTrustTier trust_tier) {
+    return "schema_version=2\nplugin_id=" + manifest.id + "\nversion=" + manifest.version +
            "\ninventory_sha256=" + std::string(inventory) +
-           "\npublisher_certificate_sha256=" + std::string(certificate) + "\n";
+           "\npublisher_certificate_sha256=" + std::string(certificate) +
+           "\ntrust_tier=" + std::string(plugin_trust_tier_name(trust_tier)) + "\n";
 }
 
 struct Record {
@@ -181,11 +183,21 @@ struct Record {
     std::string version;
     std::string inventory;
     std::string certificate;
+    PluginTrustTier trust_tier{PluginTrustTier::trusted_publisher};
 };
 
 bool same_record(const Record& left, const Record& right) {
     return left.plugin_id == right.plugin_id && left.version == right.version &&
-           left.inventory == right.inventory && left.certificate == right.certificate;
+           left.inventory == right.inventory && left.certificate == right.certificate &&
+           left.trust_tier == right.trust_tier;
+}
+
+bool parse_trust_tier(const std::string_view value, PluginTrustTier& result) {
+    if (value == "trusted_publisher") result = PluginTrustTier::trusted_publisher;
+    else if (value == "third_party_signed") result = PluginTrustTier::third_party_signed;
+    else if (value == "unverified_package") result = PluginTrustTier::unverified_package;
+    else return false;
+    return true;
 }
 
 bool parse_record(const std::string_view bytes, Record& result) {
@@ -202,12 +214,16 @@ bool parse_record(const std::string_view bytes, Record& result) {
                             std::string(line.substr(separator + 1))).second) return false;
         offset = end + 1;
     }
-    if (fields.size() != 5 || fields["schema_version"] != "1" ||
+    const bool legacy = fields["schema_version"] == "1";
+    if ((!legacy && fields["schema_version"] != "2") ||
+        fields.size() != (legacy ? 5U : 6U) ||
         !plugin_id_text(fields["plugin_id"]) || !version_text(fields["version"]) ||
         !sha256_text(fields["inventory_sha256"]) ||
         !sha256_text(fields["publisher_certificate_sha256"])) return false;
+    PluginTrustTier trust_tier = PluginTrustTier::trusted_publisher;
+    if (!legacy && !parse_trust_tier(fields["trust_tier"], trust_tier)) return false;
     result = {fields["plugin_id"], fields["version"], fields["inventory_sha256"],
-              fields["publisher_certificate_sha256"]};
+              fields["publisher_certificate_sha256"], trust_tier};
     return true;
 }
 
@@ -420,7 +436,8 @@ PluginStoreResult initialize_plugin_store(const std::filesystem::path& root) {
 
 PluginStoreResult publish_staged_plugin(
     const std::filesystem::path& root, const std::filesystem::path& staging_directory,
-    const std::string_view inventory_sha256, const std::string_view publisher_certificate_sha256) {
+    const std::string_view inventory_sha256, const std::string_view publisher_certificate_sha256,
+    const bool activate, const PluginTrustTier trust_tier) {
 #ifdef _WIN32
     const auto initialized = initialize_plugin_store(root);
     if (!initialized.ok) return initialized;
@@ -454,7 +471,7 @@ PluginStoreResult publish_staged_plugin(
     if (!move_directory_write_through(normalized_staging, destination))
         return failure(windows_error("cannot atomically publish staged plugin version"));
     const auto record_bytes = serialize_record(manifest.value, inventory_sha256,
-                                               publisher_certificate_sha256);
+                                               publisher_certificate_sha256, trust_tier);
     const auto version_record = records_for_plugin / std::filesystem::path(manifest.value.version + ".record");
     if (!atomic_write(version_record, record_bytes)) {
         const bool rolled_back = move_directory_write_through(destination, normalized_staging);
@@ -465,7 +482,7 @@ PluginStoreResult publish_staged_plugin(
         result.version_published = !rolled_back;
         return result;
     }
-    if (!atomic_write(active_path, record_bytes)) {
+    if (activate && !atomic_write(active_path, record_bytes)) {
         auto result = failure(windows_error("plugin version was installed but could not be activated"));
         result.manifest = manifest.value;
         result.installed_path = destination;
@@ -473,10 +490,11 @@ PluginStoreResult publish_staged_plugin(
         result.version_published = true;
         return result;
     }
-    return {true, manifest.value, destination, previous.version, {}, true, true};
+    return {true, manifest.value, destination, previous.version, {}, true, activate};
 #else
     static_cast<void>(root); static_cast<void>(staging_directory);
     static_cast<void>(inventory_sha256); static_cast<void>(publisher_certificate_sha256);
+    static_cast<void>(activate); static_cast<void>(trust_tier);
     return failure("plugin store is currently available on Windows only");
 #endif
 }
@@ -507,7 +525,8 @@ PluginStoreResult activate_installed_plugin_version(
     Record previous;
     const auto active_path = root / L"active" / std::filesystem::path(std::string(plugin_id) + ".record");
     read_record(active_path, previous);
-    if (!atomic_write(active_path, serialize_record(manifest.value, record.inventory, record.certificate)))
+    if (!atomic_write(active_path, serialize_record(
+            manifest.value, record.inventory, record.certificate, record.trust_tier)))
         return failure(windows_error("cannot atomically activate installed plugin version"));
     return {true, manifest.value, installed, previous.version, {}, true, true};
 #else
@@ -541,7 +560,10 @@ InstalledPluginVersionResult query_installed_plugin_version(
     if (!read_record(record_path, record) || record.plugin_id != plugin_id ||
         record.version != version)
         return {false, {}, {}, {}, {}, "installed version record is missing or invalid"};
-    return {true, manifest.value, installed, record.inventory, record.certificate, {}};
+    InstalledPluginVersionResult result{
+        true, manifest.value, installed, record.inventory, record.certificate, {}};
+    result.trust_tier = record.trust_tier;
+    return result;
 #else
     static_cast<void>(root); static_cast<void>(plugin_id); static_cast<void>(version);
     return {false, {}, {}, {}, {},
@@ -567,7 +589,8 @@ InstalledPluginVersionResult query_active_plugin_version(
     auto installed = query_installed_plugin_version(
         store_root, record.plugin_id, record.version);
     if (!installed.ok || installed.inventory_sha256 != record.inventory ||
-        installed.publisher_certificate_sha256 != record.certificate)
+        installed.publisher_certificate_sha256 != record.certificate ||
+        installed.trust_tier != record.trust_tier)
         return {false, {}, {}, {}, {},
                 "active plugin record does not match the installed version binding"};
     return installed;
@@ -719,7 +742,7 @@ PluginRecoveryScanResult scan_plugin_store_recovery(const std::filesystem::path&
         }
         for (const auto& path : authorization_paths) {
             std::string bytes;
-            const auto parsed = read_small_file(path, 2048, bytes)
+            const auto parsed = read_small_file(path, 4096, bytes)
                 ? parse_plugin_authorization(bytes) : PluginAuthorizationResult{};
             bool valid = parsed.ok;
             if (valid) {
@@ -801,7 +824,8 @@ PluginStateListResult list_installed_plugins(const std::filesystem::path& root) 
             const bool is_active = active.ok &&
                 active.manifest.version == manifest.value.version &&
                 active.inventory_sha256 == installed.inventory_sha256 &&
-                active.publisher_certificate_sha256 == installed.publisher_certificate_sha256;
+                active.publisher_certificate_sha256 == installed.publisher_certificate_sha256 &&
+                active.trust_tier == installed.trust_tier;
             result.versions.push_back({manifest.value, version_directory, is_active});
         }
     }
@@ -981,12 +1005,13 @@ PluginUninstallResult uninstall_plugin_version(
     result.version_removed = true;
 
     Record expected{installed.manifest.id, installed.manifest.version,
-                    installed.inventory_sha256, installed.publisher_certificate_sha256};
+                    installed.inventory_sha256, installed.publisher_certificate_sha256,
+                    installed.trust_tier};
     const auto record_path = store_root / L"records" / std::filesystem::path(plugin_id) /
                              std::filesystem::path(std::string(version) + ".record");
     const auto record_bytes = serialize_record(
         installed.manifest, installed.inventory_sha256,
-        installed.publisher_certificate_sha256);
+        installed.publisher_certificate_sha256, installed.trust_tier);
     bool record_removed = false;
     auto rollback = [&](const bool restore_record) {
         const bool record_restored = !restore_record || atomic_write(record_path, record_bytes);

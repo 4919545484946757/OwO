@@ -44,5 +44,18 @@ int main(const int argc, char** argv) {
     if (argc != 2) return 15;
     const auto loaded = owo::plugin::load_manifest(argv[1]);
     if (!loaded.ok || loaded.value.entry != "bin/example.exe") return 16;
+    auto desktop_pet = valid;
+    desktop_pet.replace(desktop_pet.find("\"permissions\":[]"),
+        std::string("\"permissions\":[]").size(),
+        "\"permissions\":[\"ui.desktop_pet\",\"system.full_trust\"]");
+    if (!owo::plugin::parse_manifest(desktop_pet).ok) return 17;
+    if (!rejected(desktop_pet, "\"system.full_trust\"", "\"clipboard.read\"")) return 18;
+    auto network = valid;
+    network.replace(network.find("\"permissions\":[]"),
+        std::string("\"permissions\":[]").size(),
+        "\"permissions\":[\"network.client\",\"system.full_trust\"]");
+    network.replace(network.find("\"network\":false"),
+        std::string("\"network\":false").size(), "\"network\":true");
+    if (!owo::plugin::parse_manifest(network).ok) return 19;
     return 0;
 }
