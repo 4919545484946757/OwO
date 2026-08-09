@@ -2,7 +2,8 @@
 <Page x:Class="OwO_Settings.MainPage"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-      KeyDown="Page_KeyDown">
+      KeyDown="Page_KeyDown"
+      KeyUp="Page_KeyUp">
     <ScrollViewer>
         <StackPanel MaxWidth="720" Padding="32" Spacing="20" HorizontalAlignment="Left">
             <TextBlock Text="OwO 输入法设置" Style="{StaticResource TitleTextBlockStyle}" />
@@ -36,7 +37,7 @@
             <ContentControl x:Name="ShortcutSection" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="14">
                 <TextBlock Text="输入快捷键" Style="{StaticResource SubtitleTextBlockStyle}" />
-                <TextBlock Text="点击快捷键按钮后按下新的单键或组合键。启用的快捷键不能重复，设置会由输入法自动热加载。"
+                <TextBlock Text="点击快捷键按钮后按下新的单键或组合键；组合键会等待主键按下，单独 Alt 在松开时确认。启用的快捷键不能重复，设置会由输入法自动热加载。"
                            TextWrapping="Wrap"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <Grid ColumnSpacing="18" RowSpacing="12">

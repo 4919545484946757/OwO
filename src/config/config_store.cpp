@@ -82,7 +82,7 @@ bool valid_shortcut(const std::string_view shortcut) {
         if (separator == std::string_view::npos) break;
         offset = separator + 1;
     }
-    if (!control && !alt && !shift && primary.empty()) return false;
+    if (primary.empty() && (control || shift || !alt)) return false;
     std::string canonical;
     const auto append = [&canonical](const std::string_view token) {
         if (!canonical.empty()) canonical.push_back('+');

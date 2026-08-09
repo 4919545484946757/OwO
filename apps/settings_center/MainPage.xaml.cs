@@ -88,6 +88,13 @@ public sealed partial class MainPage : Page
     private void Page_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (_shortcutCaptureTarget is null) return;
+        if (IsModifierKey(e.Key)) {
+            var modifiers = ShortcutForKeyEvent(e.Key);
+            _shortcutCaptureTarget.Content = string.IsNullOrEmpty(modifiers)
+                ? "请按新的快捷键…" : $"{modifiers}+…";
+            e.Handled = true;
+            return;
+        }
         var shortcut = ShortcutForKeyEvent(e.Key);
         if (shortcut is null) {
             ShowStatus("该按键暂不支持，请使用字母、数字、功能键、导航键或常用符号键。",
@@ -95,6 +102,30 @@ public sealed partial class MainPage : Page
             e.Handled = true;
             return;
         }
+        CommitCapturedShortcut(shortcut);
+        e.Handled = true;
+    }
+
+    private void Page_KeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        if (_shortcutCaptureTarget is null || !IsModifierKey(e.Key)) return;
+        var shortcut = ShortcutForKeyEvent(e.Key);
+        if (shortcut == "Alt") {
+            CommitCapturedShortcut(shortcut);
+        } else {
+            _shortcutCaptureTarget.Content = "请继续按主键…";
+            ShowStatus("Ctrl、Shift 或多个修饰键不能单独作为快捷键，请继续按一个主键。",
+                       InfoBarSeverity.Warning);
+        }
+        e.Handled = true;
+    }
+
+    private static bool IsModifierKey(VirtualKey key) =>
+        (int)key is 0x10 or 0x11 or 0x12 or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5;
+
+    private void CommitCapturedShortcut(string shortcut)
+    {
+        if (_shortcutCaptureTarget is null) return;
         switch (_shortcutCaptureTarget.Tag?.ToString()) {
             case "correction": _correctionShortcut = shortcut; break;
             case "language": _languageShortcut = shortcut; break;
@@ -103,7 +134,6 @@ public sealed partial class MainPage : Page
         _shortcutCaptureTarget = null;
         UpdateShortcutButtons();
         ShowStatus($"快捷键已改为 {shortcut}，点击“保存”后生效。", InfoBarSeverity.Informational);
-        e.Handled = true;
     }
 
     private static bool IsDown(int key) => (GetKeyState(key) & 0x8000) != 0;

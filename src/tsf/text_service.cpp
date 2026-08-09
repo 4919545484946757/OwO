@@ -620,20 +620,15 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
 
 HRESULT TextService::OnTestKeyUp(ITfContext*, const WPARAM key, LPARAM, BOOL* eaten) {
     if (eaten == nullptr) return E_POINTER;
-    refresh_shortcut_config();
-    *eaten = ((shortcut_config_.correction_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.correction_shortcut, key)) ||
-              (shortcut_config_.language_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.language_shortcut, key))) ? TRUE : FALSE;
+    static_cast<void>(key);
+    *eaten = FALSE;
     return S_OK;
 }
 
 HRESULT TextService::OnKeyUp(ITfContext*, const WPARAM key, LPARAM, BOOL* eaten) {
     if (eaten == nullptr) return E_POINTER;
-    *eaten = ((shortcut_config_.correction_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.correction_shortcut, key)) ||
-              (shortcut_config_.language_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.language_shortcut, key))) ? TRUE : FALSE;
+    static_cast<void>(key);
+    *eaten = FALSE;
     return S_OK;
 }
 

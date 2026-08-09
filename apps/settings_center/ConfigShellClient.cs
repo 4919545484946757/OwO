@@ -23,7 +23,7 @@ internal sealed class ConfigShellClient
     {
         var result = await RunAsync([_configPath, "show"], cancellationToken);
         var values = result.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .Select(line => line.Split('=', 2)).Where(parts => parts.Length == 2)
+            .Select(line => line.TrimEnd('\r').Split('=', 2)).Where(parts => parts.Length == 2)
             .ToDictionary(parts => parts[0], parts => parts[1], StringComparer.Ordinal);
         return new(uint.Parse(values["candidate_page_size"]),
                    uint.Parse(values["candidate_wrap_length"]),

@@ -114,6 +114,15 @@ int main(const int argc, char** argv) {
     auto noncanonical_shortcut = changed;
     noncanonical_shortcut.correction_shortcut = "Alt+Ctrl+C";
     if (owo::config::validate_config(noncanonical_shortcut).ok) return 22;
+    noncanonical_shortcut = changed;
+    noncanonical_shortcut.correction_shortcut = "Ctrl";
+    if (owo::config::validate_config(noncanonical_shortcut).ok) return 25;
+    noncanonical_shortcut.correction_shortcut = "Shift";
+    if (owo::config::validate_config(noncanonical_shortcut).ok) return 26;
+    noncanonical_shortcut.correction_shortcut = "Ctrl+Alt";
+    if (owo::config::validate_config(noncanonical_shortcut).ok) return 27;
+    noncanonical_shortcut.correction_shortcut = "Alt";
+    if (!owo::config::validate_config(noncanonical_shortcut).ok) return 28;
 
     const auto stable = owo::config::serialize_config(changed);
     const auto round_trip = owo::config::parse_config(stable);
