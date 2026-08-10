@@ -278,6 +278,7 @@ if(WIN32)
     add_library(owo_tsf SHARED
         src/tsf/owo_tsf.def
         src/tsf/dll_main.cpp
+        src/tsf/pinyin_cursor.cpp
         src/tsf/text_service.cpp
     )
     target_include_directories(owo_tsf PRIVATE include src/tsf)
@@ -654,6 +655,16 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME owo.tsf.dll_smoke
                  COMMAND owo_tsf_smoke $<TARGET_FILE:owo_tsf>)
+
+        add_executable(owo_pinyin_cursor_tests
+            tests/tsf/pinyin_cursor_tests.cpp
+            src/tsf/pinyin_cursor.cpp)
+        target_include_directories(owo_pinyin_cursor_tests PRIVATE include)
+        target_compile_features(owo_pinyin_cursor_tests PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(owo_pinyin_cursor_tests PRIVATE /W4 /permissive- /utf-8)
+        endif()
+        add_test(NAME owo.tsf.pinyin_cursor COMMAND owo_pinyin_cursor_tests)
 
         add_executable(owo_ipc_integration tests/ipc/core_service_integration.cpp)
         target_link_libraries(owo_ipc_integration PRIVATE owo_ipc)

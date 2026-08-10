@@ -1,5 +1,7 @@
 #include "text_service.h"
 
+#include "owo/tsf/pinyin_cursor.h"
+
 #include "owo/config/config_paths.h"
 #include "owo/ipc/named_pipe.h"
 #include "owo/protocol/messages.h"
@@ -790,12 +792,21 @@ bool TextService::should_eat_key(const WPARAM key) const noexcept {
         shortcut_matches(shortcut_config_.language_shortcut, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.raw_input_shortcut_enabled &&
         shortcut_matches(shortcut_config_.raw_input_shortcut, key)) return true;
+    if (!input_buffer_.empty() && shortcut_config_.cursor_left_shortcut_enabled &&
+        shortcut_matches(shortcut_config_.cursor_left_shortcut, key)) return true;
+    if (!input_buffer_.empty() && shortcut_config_.cursor_right_shortcut_enabled &&
+        shortcut_matches(shortcut_config_.cursor_right_shortcut, key)) return true;
+    if (!input_buffer_.empty() && shortcut_config_.previous_page_shortcut_enabled &&
+        shortcut_matches(shortcut_config_.previous_page_shortcut, key)) return true;
+    if (!input_buffer_.empty() && shortcut_config_.next_page_shortcut_enabled &&
+        shortcut_matches(shortcut_config_.next_page_shortcut, key)) return true;
     if (!chinese_mode_) return false;
     if (key >= 'A' && key <= 'Z') return !command_modifier_down();
     if (input_buffer_.empty()) return false;
     if (key == VK_OEM_7) return GetKeyState(VK_SHIFT) >= 0 && !command_modifier_down();
     if (key == VK_BACK || key == VK_ESCAPE) return true;
-    if ((key == VK_UP || key == VK_DOWN) && candidates_expanded_) return true;
+    if ((key == VK_UP || key == VK_DOWN) && candidates_expanded_ &&
+        !key_down(VK_SHIFT) && !command_modifier_down()) return true;
     if (key == VK_NEXT || key == VK_OEM_6)
         return candidates_expanded_ ||
                (!candidate_request_pending_ && has_more_candidates_);
@@ -847,42 +858,52 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
                shortcut_matches(shortcut_config_.raw_input_shortcut, key)) {
         if (context != nullptr) return commit_raw_input(context);
         clear_composition();
+    } else if (!input_buffer_.empty() && shortcut_config_.cursor_left_shortcut_enabled &&
+               shortcut_matches(shortcut_config_.cursor_left_shortcut, key)) {
+        move_pinyin_cursor(-1);
+    } else if (!input_buffer_.empty() && shortcut_config_.cursor_right_shortcut_enabled &&
+               shortcut_matches(shortcut_config_.cursor_right_shortcut, key)) {
+        move_pinyin_cursor(1);
+    } else if (!input_buffer_.empty() && shortcut_config_.previous_page_shortcut_enabled &&
+               shortcut_matches(shortcut_config_.previous_page_shortcut, key)) {
+        move_candidate_page_from_shortcut(-1);
+    } else if (!input_buffer_.empty() && shortcut_config_.next_page_shortcut_enabled &&
+               shortcut_matches(shortcut_config_.next_page_shortcut, key)) {
+        move_candidate_page_from_shortcut(1);
     } else if (key >= 'A' && key <= 'Z') {
         if (input_buffer_.size() >= kMaximumPinyinInputLength) return S_OK;
         const bool shift = key_down(VK_SHIFT);
         const bool caps_lock = (GetKeyState(VK_CAPITAL) & 1) != 0;
         const wchar_t base = shift != caps_lock ? L'A' : L'a';
         const wchar_t character = static_cast<wchar_t>(base + (key - 'A'));
-        input_buffer_.push_back(character);
+        insert_at_pinyin_cursor(input_buffer_, segmented_input_, input_cursor_,
+                                character);
         // Keep the last confirmed segmentation visible until the new parse and
-        // candidates arrive together. Appending the raw character prevents the
-        // preview from briefly falling back to the completely unsegmented input.
-        if (!segmented_input_.empty()) segmented_input_.push_back(character);
+        // candidates arrive together. Editing that snapshot in place prevents
+        // the preview from briefly falling back to completely unsegmented input.
         candidate_page_ = 0;
         has_more_candidates_ = false;
         candidates_expanded_ = false;
         ++context_generation_;
         queue_candidate_request();
     } else if (key == VK_OEM_7 && !input_buffer_.empty() &&
-               input_buffer_.back() != L'\'' &&
                input_buffer_.size() < kMaximumPinyinInputLength) {
-        input_buffer_.push_back(L'\'');
-        if (!segmented_input_.empty() && segmented_input_.back() != L'\'')
-            segmented_input_.push_back(L'\'');
+        input_cursor_ = std::min(input_cursor_, input_buffer_.size());
+        const bool left_separator = input_cursor_ > 0 &&
+                                    input_buffer_[input_cursor_ - 1] == L'\'';
+        const bool right_separator = input_cursor_ < input_buffer_.size() &&
+                                     input_buffer_[input_cursor_] == L'\'';
+        if (left_separator || right_separator) return S_OK;
+        insert_at_pinyin_cursor(input_buffer_, segmented_input_, input_cursor_,
+                                L'\'');
         candidate_page_ = 0;
         has_more_candidates_ = false;
         candidates_expanded_ = false;
         ++context_generation_;
         queue_candidate_request();
     } else if (key == VK_BACK) {
-        if (!input_buffer_.empty()) input_buffer_.pop_back();
-        if (!segmented_input_.empty()) {
-            while (!segmented_input_.empty() && segmented_input_.back() == L'\'')
-                segmented_input_.pop_back();
-            if (!segmented_input_.empty()) segmented_input_.pop_back();
-            while (!segmented_input_.empty() && segmented_input_.back() == L'\'')
-                segmented_input_.pop_back();
-        }
+        if (!erase_before_pinyin_cursor(
+                input_buffer_, segmented_input_, input_cursor_)) return S_OK;
         candidate_page_ = 0;
         has_more_candidates_ = false;
         candidates_expanded_ = false;
@@ -892,10 +913,12 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
     } else if (key == VK_ESCAPE) {
         clear_composition();
     } else if (candidates_expanded_ &&
-               (key == VK_DOWN || key == VK_NEXT || key == VK_OEM_6)) {
+               ((key == VK_DOWN && !key_down(VK_SHIFT) && !command_modifier_down()) ||
+                key == VK_NEXT || key == VK_OEM_6)) {
         scroll_expanded_candidates(1);
     } else if (candidates_expanded_ &&
-               (key == VK_UP || key == VK_PRIOR || key == VK_OEM_4)) {
+               ((key == VK_UP && !key_down(VK_SHIFT) && !command_modifier_down()) ||
+                key == VK_PRIOR || key == VK_OEM_4)) {
         scroll_expanded_candidates(-1);
     } else if (!candidates_expanded_ &&
                (key == VK_NEXT || key == VK_OEM_6) && has_more_candidates_) {
@@ -1197,11 +1220,61 @@ void TextService::render_candidate_window() {
 
     const std::wstring& reading = segmented_input_.empty() ? input_buffer_ : segmented_input_;
     const std::wstring& preview = reading;
-    render_target_->DrawTextW(
+    IDWriteTextLayout* preview_layout = nullptr;
+    const HRESULT preview_layout_result = dwrite_factory_->CreateTextLayout(
         preview.data(), static_cast<UINT32>(preview.size()), input_text_format_,
-        D2D1::RectF(kHorizontalPaddingDip, 0.0F, size.width - kHorizontalPaddingDip,
-                    kHeaderHeightDip),
-        mode_accent_brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        std::max(1.0F, size.width - kHorizontalPaddingDip * 2.0F),
+        kHeaderHeightDip, &preview_layout);
+    if (SUCCEEDED(preview_layout_result) && preview_layout != nullptr) {
+        render_target_->DrawTextLayout(
+            D2D1::Point2F(kHorizontalPaddingDip, 0.0F), preview_layout,
+            mode_accent_brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+        std::vector<float> caret_positions(preview.size() + 1, 0.0F);
+        for (std::size_t shown = 0; shown <= preview.size(); ++shown) {
+            FLOAT x = 0.0F;
+            FLOAT y = 0.0F;
+            DWRITE_HIT_TEST_METRICS metrics{};
+            if (SUCCEEDED(preview_layout->HitTestTextPosition(
+                    static_cast<UINT32>(shown), FALSE, &x, &y, &metrics)))
+                caret_positions[shown] = x;
+            else if (shown != 0)
+                caret_positions[shown] = caret_positions[shown - 1];
+        }
+        for (std::size_t shown = 0; shown <= preview.size(); ++shown) {
+            const float left = shown == 0
+                                   ? kHorizontalPaddingDip
+                                   : kHorizontalPaddingDip +
+                                         (caret_positions[shown - 1] +
+                                          caret_positions[shown]) * 0.5F;
+            const float right = shown == preview.size()
+                                    ? size.width - kHorizontalPaddingDip
+                                    : kHorizontalPaddingDip +
+                                          (caret_positions[shown] +
+                                           caret_positions[shown + 1]) * 0.5F;
+            hit_regions_.push_back({
+                dip_rect_to_pixels(
+                    D2D1::RectF(left, 0.0F, std::max(left + 1.0F, right),
+                                kHeaderHeightDip), dpi),
+                {HitKind::pinyin_cursor,
+                 input_cursor_for_preview_index(input_buffer_, preview, shown)}});
+        }
+        const auto shown_cursor = preview_index_for_input_cursor(
+            input_buffer_, preview, input_cursor_);
+        const float caret_x = kHorizontalPaddingDip +
+                              caret_positions[std::min(shown_cursor, preview.size())];
+        render_target_->DrawLine(
+            D2D1::Point2F(caret_x, 7.0F),
+            D2D1::Point2F(caret_x, kHeaderHeightDip - 7.0F),
+            mode_accent_brush, 1.5F);
+        preview_layout->Release();
+    } else {
+        render_target_->DrawTextW(
+            preview.data(), static_cast<UINT32>(preview.size()), input_text_format_,
+            D2D1::RectF(kHorizontalPaddingDip, 0.0F,
+                        size.width - kHorizontalPaddingDip, kHeaderHeightDip),
+            mode_accent_brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
     render_target_->DrawLine(
         D2D1::Point2F(10.0F, kHeaderHeightDip),
         D2D1::Point2F(size.width - 10.0F, kHeaderHeightDip), mode_border_brush, 1.0F);
@@ -1421,8 +1494,14 @@ LRESULT CALLBACK TextService::window_proc(HWND window, UINT message, WPARAM wpar
         const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         const auto target = service->hit_test(point);
         if (target != service->hovered_target_) {
+            const bool old_cursor = service->hovered_target_.has_value() &&
+                                    service->hovered_target_->kind ==
+                                        HitKind::pinyin_cursor;
+            const bool new_cursor = target.has_value() &&
+                                    target->kind == HitKind::pinyin_cursor;
             service->hovered_target_ = target;
-            InvalidateRect(window, nullptr, FALSE);
+            if (!(old_cursor && new_cursor))
+                InvalidateRect(window, nullptr, FALSE);
         }
         TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
         TrackMouseEvent(&tracking);
@@ -1465,8 +1544,10 @@ LRESULT CALLBACK TextService::window_proc(HWND window, UINT message, WPARAM wpar
         POINT point{};
         GetCursorPos(&point);
         ScreenToClient(window, &point);
-        if (service->hit_test(point)) {
-            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        const auto target = service->hit_test(point);
+        if (target) {
+            SetCursor(LoadCursorW(
+                nullptr, target->kind == HitKind::pinyin_cursor ? IDC_IBEAM : IDC_HAND));
             return TRUE;
         }
     }
@@ -2094,6 +2175,27 @@ void TextService::change_candidate_page(const int direction) {
     queue_candidate_request();
 }
 
+void TextService::move_pinyin_cursor(const int direction) {
+    const auto current = static_cast<std::int64_t>(
+        std::min(input_cursor_, input_buffer_.size()));
+    const auto requested = current + static_cast<std::int64_t>(direction);
+    const auto clamped = std::clamp<std::int64_t>(
+        requested, 0, static_cast<std::int64_t>(input_buffer_.size()));
+    if (clamped == current) return;
+    input_cursor_ = static_cast<std::size_t>(clamped);
+    hovered_target_.reset();
+    pressed_target_.reset();
+    if (candidate_window_ != nullptr)
+        InvalidateRect(candidate_window_, nullptr, FALSE);
+}
+
+void TextService::move_candidate_page_from_shortcut(const int direction) {
+    if (candidates_expanded_)
+        scroll_expanded_candidates(direction);
+    else
+        change_candidate_page(direction);
+}
+
 void TextService::scroll_expanded_candidates(const int rows) {
     if (!candidates_expanded_ || rows == 0) return;
     const auto page_size = std::max<std::size_t>(
@@ -2121,12 +2223,22 @@ std::optional<TextService::HitTarget> TextService::hit_test(const POINT point) c
 }
 
 void TextService::invoke_hit_target(const HitTarget& target) {
+    if (target.kind == HitKind::pinyin_cursor) {
+        input_cursor_ = std::min(target.candidate_index, input_buffer_.size());
+        hovered_target_.reset();
+        pressed_target_.reset();
+        if (candidate_window_ != nullptr)
+            InvalidateRect(candidate_window_, nullptr, FALSE);
+        return;
+    }
     if (candidate_request_pending_) {
         if (target.kind == HitKind::candidate)
             defer_candidate_selection(target.candidate_index, nullptr);
         return;
     }
     switch (target.kind) {
+        case HitKind::pinyin_cursor:
+            break;
         case HitKind::candidate:
             commit_candidate_from_window(target.candidate_index);
             break;
@@ -2191,6 +2303,7 @@ void TextService::clear_composition() {
     latest_candidate_request_id_.store(0, std::memory_order_release);
     if (candidate_cancellation_event_ != nullptr) SetEvent(candidate_cancellation_event_);
     input_buffer_.clear();
+    input_cursor_ = 0;
     segmented_input_.clear();
     candidates_.clear();
     candidate_consumed_.clear();
@@ -2237,6 +2350,7 @@ HRESULT TextService::commit_candidate(ITfContext* context, const std::size_t ind
             if (input_buffer_.empty()) {
                 clear_composition();
             } else {
+                input_cursor_ = input_buffer_.size();
                 ++context_generation_;
                 segmented_input_.clear();
                 candidate_page_ = 0;

@@ -101,13 +101,29 @@ int wmain(const int argc, wchar_t** argv) {
     sensitivity_input.close();
     if (sensitivity_bytes.find("user_learning_sensitivity=9\n") == std::string::npos)
         return 20;
+    PROCESS_INFORMATION navigation{};
+    if (!launch(executable + L" " + config +
+                L" set-all 4 true true 40 true Ctrl+Alt+C false Ctrl+Shift+Space true Enter 18 9"
+                L" true Ctrl+Shift+Left true Ctrl+Shift+Right true Ctrl+Shift+Up true Ctrl+Shift+Down",
+                navigation) || wait_and_close(navigation) != 0) return 21;
+    std::ifstream navigation_input(path, std::ios::binary);
+    const std::string navigation_bytes((std::istreambuf_iterator<char>(navigation_input)), {});
+    navigation_input.close();
+    if (navigation_bytes.find("cursor_left_shortcut=Ctrl+Shift+Left\n") ==
+            std::string::npos ||
+        navigation_bytes.find("cursor_right_shortcut=Ctrl+Shift+Right\n") ==
+            std::string::npos ||
+        navigation_bytes.find("previous_page_shortcut=Ctrl+Shift+Up\n") ==
+            std::string::npos ||
+        navigation_bytes.find("next_page_shortcut=Ctrl+Shift+Down\n") ==
+            std::string::npos) return 22;
     PROCESS_INFORMATION invalid_all{};
     if (!launch(executable + L" " + config + L" set-all 4 true false 999", invalid_all) ||
         wait_and_close(invalid_all) == 0) return 15;
     std::ifstream invalid_all_input(path, std::ios::binary);
     const std::string after_invalid_all((std::istreambuf_iterator<char>(invalid_all_input)), {});
     invalid_all_input.close();
-    if (after_invalid_all != sensitivity_bytes) return 16;
+    if (after_invalid_all != navigation_bytes) return 16;
 
     PROCESS_INFORMATION show{};
     if (!launch(executable + L" " + config + L" show", show) || wait_and_close(show) != 0) return 10;
@@ -118,7 +134,7 @@ int wmain(const int argc, wchar_t** argv) {
     std::ifstream repaired_input(path, std::ios::binary);
     const std::string repaired((std::istreambuf_iterator<char>(repaired_input)), {});
     if (repaired.find("candidate_page_size=4\n") == std::string::npos ||
-        repaired.find("user_learning_sensitivity=7\n") == std::string::npos) return 12;
+        repaired.find("user_learning_sensitivity=9\n") == std::string::npos) return 12;
     std::filesystem::remove_all(root, error);
     return 0;
 }

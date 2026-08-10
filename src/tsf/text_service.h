@@ -115,6 +115,7 @@ private:
         std::chrono::steady_clock::time_point queued_at{std::chrono::steady_clock::now()};
     };
     enum class HitKind : std::uint8_t {
+        pinyin_cursor,
         candidate,
         previous_page,
         next_page,
@@ -162,6 +163,8 @@ private:
     [[nodiscard]] bool shortcut_matches(std::string_view shortcut, WPARAM key) const;
     void handle_candidate_result(CandidateResult* result);
     void update_candidate_window();
+    void move_pinyin_cursor(int direction);
+    void move_candidate_page_from_shortcut(int direction);
     void change_candidate_page(int direction);
     void scroll_expanded_candidates(int rows);
     void invoke_hit_target(const HitTarget& target);
@@ -202,6 +205,7 @@ private:
     ID2D1SolidColorBrush* highlight_brush_{nullptr};
     ID2D1SolidColorBrush* strict_accent_brush_{nullptr};
     std::wstring input_buffer_;
+    std::size_t input_cursor_{0};
     std::wstring recent_language_context_;
     std::wstring segmented_input_;
     std::vector<std::wstring> candidates_;

@@ -37,6 +37,10 @@ int main(const int argc, char** argv) {
     changed.correction_shortcut = "Ctrl+Alt+C";
     changed.language_shortcut = "Ctrl+Shift+Space";
     changed.raw_input_shortcut_enabled = false;
+    changed.cursor_left_shortcut = "Ctrl+Shift+Left";
+    changed.cursor_right_shortcut = "Ctrl+Shift+Right";
+    changed.previous_page_shortcut = "Ctrl+Shift+Up";
+    changed.next_page_shortcut = "Ctrl+Shift+Down";
     const auto first_save = store.save(changed);
     if (!first_save.success || !first_save.changed || first_save.generation != 2) return 4;
     changed.candidate_page_size = 8;
@@ -101,6 +105,8 @@ int main(const int argc, char** argv) {
         legacy.value.correction_shortcut != "Alt" ||
         legacy.value.language_shortcut != "Ctrl+Space" ||
         legacy.value.raw_input_shortcut != "Enter" ||
+        legacy.value.cursor_left_shortcut != "Shift+Left" ||
+        legacy.value.next_page_shortcut != "Shift+Down" ||
         legacy.value.candidate_wrap_length != 12 ||
         legacy.value.user_learning_sensitivity != 7) return 20;
 
@@ -129,6 +135,11 @@ int main(const int argc, char** argv) {
     if (owo::config::validate_config(noncanonical_shortcut).ok) return 27;
     noncanonical_shortcut.correction_shortcut = "Alt";
     if (!owo::config::validate_config(noncanonical_shortcut).ok) return 28;
+
+    auto duplicate_navigation = changed;
+    duplicate_navigation.cursor_right_shortcut =
+        duplicate_navigation.cursor_left_shortcut;
+    if (owo::config::validate_config(duplicate_navigation).ok) return 30;
 
     const auto stable = owo::config::serialize_config(changed);
     const auto round_trip = owo::config::parse_config(stable);

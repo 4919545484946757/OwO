@@ -56,6 +56,10 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Text="切换拼音纠错" VerticalAlignment="Center" />
                     <ToggleSwitch x:Name="CorrectionShortcutEnabled" Grid.Row="0" Grid.Column="1" />
@@ -71,6 +75,26 @@
                     <ToggleSwitch x:Name="RawInputShortcutEnabled" Grid.Row="2" Grid.Column="1" />
                     <Button x:Name="RawInputShortcutButton" Grid.Row="2" Grid.Column="2"
                             HorizontalAlignment="Stretch" Tag="raw"
+                            Click="ShortcutButton_Click" />
+                    <TextBlock Grid.Row="3" Text="拼音光标左移" VerticalAlignment="Center" />
+                    <ToggleSwitch x:Name="CursorLeftShortcutEnabled" Grid.Row="3" Grid.Column="1" />
+                    <Button x:Name="CursorLeftShortcutButton" Grid.Row="3" Grid.Column="2"
+                            HorizontalAlignment="Stretch" Tag="cursor-left"
+                            Click="ShortcutButton_Click" />
+                    <TextBlock Grid.Row="4" Text="拼音光标右移" VerticalAlignment="Center" />
+                    <ToggleSwitch x:Name="CursorRightShortcutEnabled" Grid.Row="4" Grid.Column="1" />
+                    <Button x:Name="CursorRightShortcutButton" Grid.Row="4" Grid.Column="2"
+                            HorizontalAlignment="Stretch" Tag="cursor-right"
+                            Click="ShortcutButton_Click" />
+                    <TextBlock Grid.Row="5" Text="候选词上一页" VerticalAlignment="Center" />
+                    <ToggleSwitch x:Name="PreviousPageShortcutEnabled" Grid.Row="5" Grid.Column="1" />
+                    <Button x:Name="PreviousPageShortcutButton" Grid.Row="5" Grid.Column="2"
+                            HorizontalAlignment="Stretch" Tag="previous-page"
+                            Click="ShortcutButton_Click" />
+                    <TextBlock Grid.Row="6" Text="候选词下一页" VerticalAlignment="Center" />
+                    <ToggleSwitch x:Name="NextPageShortcutEnabled" Grid.Row="6" Grid.Column="1" />
+                    <Button x:Name="NextPageShortcutButton" Grid.Row="6" Grid.Column="2"
+                            HorizontalAlignment="Stretch" Tag="next-page"
                             Click="ShortcutButton_Click" />
                 </Grid>
               </StackPanel>

@@ -7,7 +7,7 @@
 
 namespace owo::config {
 
-inline constexpr std::uint32_t kConfigSchemaVersion = 4;
+inline constexpr std::uint32_t kConfigSchemaVersion = 5;
 
 struct AppConfig {
     std::uint32_t candidate_page_size{5};
@@ -22,6 +22,14 @@ struct AppConfig {
     std::string language_shortcut{"Ctrl+Space"};
     bool raw_input_shortcut_enabled{true};
     std::string raw_input_shortcut{"Enter"};
+    bool cursor_left_shortcut_enabled{true};
+    std::string cursor_left_shortcut{"Shift+Left"};
+    bool cursor_right_shortcut_enabled{true};
+    std::string cursor_right_shortcut{"Shift+Right"};
+    bool previous_page_shortcut_enabled{true};
+    std::string previous_page_shortcut{"Shift+Up"};
+    bool next_page_shortcut_enabled{true};
+    std::string next_page_shortcut{"Shift+Down"};
     bool operator==(const AppConfig&) const = default;
 };
 

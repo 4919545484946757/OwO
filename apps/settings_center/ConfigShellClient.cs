@@ -8,7 +8,11 @@ internal sealed record SettingsSnapshot(uint CandidatePageSize, uint CandidateWr
                                         bool ModelRankingEnabled, uint ModelTimeoutMs,
                                         bool CorrectionShortcutEnabled, string CorrectionShortcut,
                                         bool LanguageShortcutEnabled, string LanguageShortcut,
-                                        bool RawInputShortcutEnabled, string RawInputShortcut);
+                                        bool RawInputShortcutEnabled, string RawInputShortcut,
+                                        bool CursorLeftShortcutEnabled, string CursorLeftShortcut,
+                                        bool CursorRightShortcutEnabled, string CursorRightShortcut,
+                                        bool PreviousPageShortcutEnabled, string PreviousPageShortcut,
+                                        bool NextPageShortcutEnabled, string NextPageShortcut);
 
 internal sealed class ConfigShellClient
 {
@@ -37,7 +41,15 @@ internal sealed class ConfigShellClient
                    bool.Parse(values["language_shortcut_enabled"]),
                    values["language_shortcut"],
                    bool.Parse(values["raw_input_shortcut_enabled"]),
-                   values["raw_input_shortcut"]);
+                   values["raw_input_shortcut"],
+                   bool.Parse(values["cursor_left_shortcut_enabled"]),
+                   values["cursor_left_shortcut"],
+                   bool.Parse(values["cursor_right_shortcut_enabled"]),
+                   values["cursor_right_shortcut"],
+                   bool.Parse(values["previous_page_shortcut_enabled"]),
+                   values["previous_page_shortcut"],
+                   bool.Parse(values["next_page_shortcut_enabled"]),
+                   values["next_page_shortcut"]);
     }
 
     internal Task SaveAsync(SettingsSnapshot value, CancellationToken cancellationToken = default) =>
@@ -52,7 +64,15 @@ internal sealed class ConfigShellClient
                   value.RawInputShortcutEnabled.ToString().ToLowerInvariant(),
                   value.RawInputShortcut,
                   value.CandidateWrapLength.ToString(),
-                  value.UserLearningSensitivity.ToString()], cancellationToken);
+                  value.UserLearningSensitivity.ToString(),
+                  value.CursorLeftShortcutEnabled.ToString().ToLowerInvariant(),
+                  value.CursorLeftShortcut,
+                  value.CursorRightShortcutEnabled.ToString().ToLowerInvariant(),
+                  value.CursorRightShortcut,
+                  value.PreviousPageShortcutEnabled.ToString().ToLowerInvariant(),
+                  value.PreviousPageShortcut,
+                  value.NextPageShortcutEnabled.ToString().ToLowerInvariant(),
+                  value.NextPageShortcut], cancellationToken);
 
     private async Task<string> RunAsync(IEnumerable<string> arguments,
                                         CancellationToken cancellationToken)

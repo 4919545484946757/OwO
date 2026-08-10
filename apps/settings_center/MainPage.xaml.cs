@@ -16,6 +16,10 @@ public sealed partial class MainPage : Page
     private string _correctionShortcut = "Alt";
     private string _languageShortcut = "Ctrl+Space";
     private string _rawInputShortcut = "Enter";
+    private string _cursorLeftShortcut = "Shift+Left";
+    private string _cursorRightShortcut = "Shift+Right";
+    private string _previousPageShortcut = "Shift+Up";
+    private string _nextPageShortcut = "Shift+Down";
 
     [DllImport("user32.dll")]
     private static extern short GetKeyState(int virtualKey);
@@ -63,9 +67,17 @@ public sealed partial class MainPage : Page
             CorrectionShortcutEnabled.IsOn = value.CorrectionShortcutEnabled;
             LanguageShortcutEnabled.IsOn = value.LanguageShortcutEnabled;
             RawInputShortcutEnabled.IsOn = value.RawInputShortcutEnabled;
+            CursorLeftShortcutEnabled.IsOn = value.CursorLeftShortcutEnabled;
+            CursorRightShortcutEnabled.IsOn = value.CursorRightShortcutEnabled;
+            PreviousPageShortcutEnabled.IsOn = value.PreviousPageShortcutEnabled;
+            NextPageShortcutEnabled.IsOn = value.NextPageShortcutEnabled;
             _correctionShortcut = value.CorrectionShortcut;
             _languageShortcut = value.LanguageShortcut;
             _rawInputShortcut = value.RawInputShortcut;
+            _cursorLeftShortcut = value.CursorLeftShortcut;
+            _cursorRightShortcut = value.CursorRightShortcut;
+            _previousPageShortcut = value.PreviousPageShortcut;
+            _nextPageShortcut = value.NextPageShortcut;
             UpdateShortcutButtons();
             ShowStatus("配置已加载", InfoBarSeverity.Success);
         } catch (Exception error) {
@@ -86,7 +98,11 @@ public sealed partial class MainPage : Page
                 UserLearning.IsOn, ModelRanking.IsOn, (uint)ModelTimeout.Value,
                 CorrectionShortcutEnabled.IsOn, _correctionShortcut,
                 LanguageShortcutEnabled.IsOn, _languageShortcut,
-                RawInputShortcutEnabled.IsOn, _rawInputShortcut);
+                RawInputShortcutEnabled.IsOn, _rawInputShortcut,
+                CursorLeftShortcutEnabled.IsOn, _cursorLeftShortcut,
+                CursorRightShortcutEnabled.IsOn, _cursorRightShortcut,
+                PreviousPageShortcutEnabled.IsOn, _previousPageShortcut,
+                NextPageShortcutEnabled.IsOn, _nextPageShortcut);
             await _client.SaveAsync(value);
             ShowStatus("配置已保存，Core Service 将自动应用。", InfoBarSeverity.Success);
         } catch (Exception error) {
@@ -153,6 +169,10 @@ public sealed partial class MainPage : Page
             case "correction": _correctionShortcut = shortcut; break;
             case "language": _languageShortcut = shortcut; break;
             case "raw": _rawInputShortcut = shortcut; break;
+            case "cursor-left": _cursorLeftShortcut = shortcut; break;
+            case "cursor-right": _cursorRightShortcut = shortcut; break;
+            case "previous-page": _previousPageShortcut = shortcut; break;
+            case "next-page": _nextPageShortcut = shortcut; break;
         }
         _shortcutCaptureTarget = null;
         StopShortcutCaptureHook();
@@ -248,6 +268,10 @@ public sealed partial class MainPage : Page
         CorrectionShortcutButton.Content = _correctionShortcut;
         LanguageShortcutButton.Content = _languageShortcut;
         RawInputShortcutButton.Content = _rawInputShortcut;
+        CursorLeftShortcutButton.Content = _cursorLeftShortcut;
+        CursorRightShortcutButton.Content = _cursorRightShortcut;
+        PreviousPageShortcutButton.Content = _previousPageShortcut;
+        NextPageShortcutButton.Content = _nextPageShortcut;
     }
 
     private void ValidateShortcutConflicts()
@@ -256,6 +280,10 @@ public sealed partial class MainPage : Page
         if (CorrectionShortcutEnabled.IsOn) shortcuts.Add(_correctionShortcut);
         if (LanguageShortcutEnabled.IsOn) shortcuts.Add(_languageShortcut);
         if (RawInputShortcutEnabled.IsOn) shortcuts.Add(_rawInputShortcut);
+        if (CursorLeftShortcutEnabled.IsOn) shortcuts.Add(_cursorLeftShortcut);
+        if (CursorRightShortcutEnabled.IsOn) shortcuts.Add(_cursorRightShortcut);
+        if (PreviousPageShortcutEnabled.IsOn) shortcuts.Add(_previousPageShortcut);
+        if (NextPageShortcutEnabled.IsOn) shortcuts.Add(_nextPageShortcut);
         if (shortcuts.Count != shortcuts.Distinct(StringComparer.Ordinal).Count())
             throw new InvalidOperationException("启用的快捷键不能重复。");
     }

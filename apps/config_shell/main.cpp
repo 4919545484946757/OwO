@@ -46,6 +46,14 @@ bool apply(owo::config::AppConfig& config, const std::wstring_view field,
         return parse_ascii(value, config.language_shortcut);
     if (field == L"raw_input_shortcut")
         return parse_ascii(value, config.raw_input_shortcut);
+    if (field == L"cursor_left_shortcut")
+        return parse_ascii(value, config.cursor_left_shortcut);
+    if (field == L"cursor_right_shortcut")
+        return parse_ascii(value, config.cursor_right_shortcut);
+    if (field == L"previous_page_shortcut")
+        return parse_ascii(value, config.previous_page_shortcut);
+    if (field == L"next_page_shortcut")
+        return parse_ascii(value, config.next_page_shortcut);
     bool parsed{};
     if (value == L"true") parsed = true;
     else if (value != L"false") return false;
@@ -57,6 +65,14 @@ bool apply(owo::config::AppConfig& config, const std::wstring_view field,
         config.language_shortcut_enabled = parsed;
     else if (field == L"raw_input_shortcut_enabled")
         config.raw_input_shortcut_enabled = parsed;
+    else if (field == L"cursor_left_shortcut_enabled")
+        config.cursor_left_shortcut_enabled = parsed;
+    else if (field == L"cursor_right_shortcut_enabled")
+        config.cursor_right_shortcut_enabled = parsed;
+    else if (field == L"previous_page_shortcut_enabled")
+        config.previous_page_shortcut_enabled = parsed;
+    else if (field == L"next_page_shortcut_enabled")
+        config.next_page_shortcut_enabled = parsed;
     else return false;
     return true;
 }
@@ -66,7 +82,10 @@ void usage() {
                  "set-all <page-size> <learning> <ranking> <timeout-ms> "
                  "[<correction-enabled> <correction-key> <language-enabled> <language-key> "
                  "<raw-enabled> <raw-key> [<candidate-wrap-length> "
-                 "[<learning-sensitivity>]]] | watch <timeout-ms>\n";
+                 "[<learning-sensitivity> [<cursor-left-enabled> <cursor-left-key> "
+                 "<cursor-right-enabled> <cursor-right-key> <previous-page-enabled> "
+                 "<previous-page-key> <next-page-enabled> <next-page-key>]]]] | "
+                 "watch <timeout-ms>\n";
 }
 
 }  // namespace
@@ -119,7 +138,8 @@ int wmain(const int argc, wchar_t** argv) {
         std::cout << "saved generation=" << saved.generation << '\n';
         return 0;
     }
-    if (command == L"set-all" && (argc == 7 || argc == 13 || argc == 14 || argc == 15)) {
+    if (command == L"set-all" &&
+        (argc == 7 || argc == 13 || argc == 14 || argc == 15 || argc == 23)) {
         owo::config::ConfigStore store;
         const auto loaded = store.load(path);
         if (!loaded.success) return 3;
@@ -136,7 +156,16 @@ int wmain(const int argc, wchar_t** argv) {
               !apply(value, L"raw_input_shortcut_enabled", argv[11]) ||
               !apply(value, L"raw_input_shortcut", argv[12]))) ||
             (argc >= 14 && !apply(value, L"candidate_wrap_length", argv[13])) ||
-            (argc == 15 && !apply(value, L"user_learning_sensitivity", argv[14]))) {
+            (argc >= 15 && !apply(value, L"user_learning_sensitivity", argv[14])) ||
+            (argc == 23 &&
+             (!apply(value, L"cursor_left_shortcut_enabled", argv[15]) ||
+              !apply(value, L"cursor_left_shortcut", argv[16]) ||
+              !apply(value, L"cursor_right_shortcut_enabled", argv[17]) ||
+              !apply(value, L"cursor_right_shortcut", argv[18]) ||
+              !apply(value, L"previous_page_shortcut_enabled", argv[19]) ||
+              !apply(value, L"previous_page_shortcut", argv[20]) ||
+              !apply(value, L"next_page_shortcut_enabled", argv[21]) ||
+              !apply(value, L"next_page_shortcut", argv[22])))) {
             std::cerr << "invalid configuration value type\n";
             return 4;
         }

@@ -162,7 +162,11 @@ ConfigValidationResult validate_config(const AppConfig& value) {
         return {false, "model_timeout_ms must be between 5 and 500"};
     if (!valid_shortcut(value.correction_shortcut) ||
         !valid_shortcut(value.language_shortcut) ||
-        !valid_shortcut(value.raw_input_shortcut))
+        !valid_shortcut(value.raw_input_shortcut) ||
+        !valid_shortcut(value.cursor_left_shortcut) ||
+        !valid_shortcut(value.cursor_right_shortcut) ||
+        !valid_shortcut(value.previous_page_shortcut) ||
+        !valid_shortcut(value.next_page_shortcut))
         return {false, "shortcut must be a canonical key or modifier combination"};
     std::set<std::string_view> enabled_shortcuts;
     const auto unique_if_enabled = [&enabled_shortcuts](const bool enabled,
@@ -171,7 +175,13 @@ ConfigValidationResult validate_config(const AppConfig& value) {
     };
     if (!unique_if_enabled(value.correction_shortcut_enabled, value.correction_shortcut) ||
         !unique_if_enabled(value.language_shortcut_enabled, value.language_shortcut) ||
-        !unique_if_enabled(value.raw_input_shortcut_enabled, value.raw_input_shortcut))
+        !unique_if_enabled(value.raw_input_shortcut_enabled, value.raw_input_shortcut) ||
+        !unique_if_enabled(value.cursor_left_shortcut_enabled, value.cursor_left_shortcut) ||
+        !unique_if_enabled(value.cursor_right_shortcut_enabled, value.cursor_right_shortcut) ||
+        !unique_if_enabled(value.previous_page_shortcut_enabled,
+                           value.previous_page_shortcut) ||
+        !unique_if_enabled(value.next_page_shortcut_enabled,
+                           value.next_page_shortcut))
         return {false, "enabled shortcuts must be unique"};
     return {true, {}};
 }
@@ -213,10 +223,16 @@ ConfigParseResult parse_config(const std::string_view utf8) {
         "raw_input_shortcut_enabled", "raw_input_shortcut"};
     constexpr std::string_view wrap_required[]{"candidate_wrap_length"};
     constexpr std::string_view learning_required[]{"user_learning_sensitivity"};
+    constexpr std::string_view navigation_required[]{
+        "cursor_left_shortcut_enabled", "cursor_left_shortcut",
+        "cursor_right_shortcut_enabled", "cursor_right_shortcut",
+        "previous_page_shortcut_enabled", "previous_page_shortcut",
+        "next_page_shortcut_enabled", "next_page_shortcut"};
     const auto expected_size = std::size(base_required) +
                                (version >= 2 ? std::size(shortcut_required) : 0) +
                                (version >= 3 ? std::size(wrap_required) : 0) +
-                               (version >= 4 ? std::size(learning_required) : 0);
+                               (version >= 4 ? std::size(learning_required) : 0) +
+                               (version >= 5 ? std::size(navigation_required) : 0);
     if (fields.size() != expected_size)
         return {false, {}, "configuration fields are missing or unknown"};
     for (const auto key : base_required)
@@ -231,6 +247,11 @@ ConfigParseResult parse_config(const std::string_view utf8) {
         return {false, {}, "configuration fields are missing or unknown"};
     if (version >= 4 && !fields.contains("user_learning_sensitivity"))
         return {false, {}, "configuration fields are missing or unknown"};
+    if (version >= 5) {
+        for (const auto key : navigation_required)
+            if (!fields.contains(std::string(key)))
+                return {false, {}, "configuration fields are missing or unknown"};
+    }
     AppConfig value;
     if (!parse_u32(fields["candidate_page_size"], value.candidate_page_size) ||
         !parse_bool(fields["user_learning_enabled"], value.user_learning_enabled) ||
@@ -255,6 +276,21 @@ ConfigParseResult parse_config(const std::string_view utf8) {
     if (version >= 4 &&
         !parse_u32(fields["user_learning_sensitivity"], value.user_learning_sensitivity))
         return {false, {}, "configuration field type is invalid"};
+    if (version >= 5) {
+        if (!parse_bool(fields["cursor_left_shortcut_enabled"],
+                        value.cursor_left_shortcut_enabled) ||
+            !parse_bool(fields["cursor_right_shortcut_enabled"],
+                        value.cursor_right_shortcut_enabled) ||
+            !parse_bool(fields["previous_page_shortcut_enabled"],
+                        value.previous_page_shortcut_enabled) ||
+            !parse_bool(fields["next_page_shortcut_enabled"],
+                        value.next_page_shortcut_enabled))
+            return {false, {}, "configuration field type is invalid"};
+        value.cursor_left_shortcut = fields["cursor_left_shortcut"];
+        value.cursor_right_shortcut = fields["cursor_right_shortcut"];
+        value.previous_page_shortcut = fields["previous_page_shortcut"];
+        value.next_page_shortcut = fields["next_page_shortcut"];
+    }
     const auto validation = validate_config(value);
     if (!validation.ok) return {false, {}, validation.diagnostic};
     return {true, value, {}};
@@ -278,7 +314,19 @@ std::string serialize_config(const AppConfig& value) {
            "\nlanguage_shortcut=" + value.language_shortcut +
            "\nraw_input_shortcut_enabled=" +
                (value.raw_input_shortcut_enabled ? std::string("true") : "false") +
-           "\nraw_input_shortcut=" + value.raw_input_shortcut + "\n";
+           "\nraw_input_shortcut=" + value.raw_input_shortcut +
+           "\ncursor_left_shortcut_enabled=" +
+               (value.cursor_left_shortcut_enabled ? std::string("true") : "false") +
+           "\ncursor_left_shortcut=" + value.cursor_left_shortcut +
+           "\ncursor_right_shortcut_enabled=" +
+               (value.cursor_right_shortcut_enabled ? std::string("true") : "false") +
+           "\ncursor_right_shortcut=" + value.cursor_right_shortcut +
+           "\nprevious_page_shortcut_enabled=" +
+               (value.previous_page_shortcut_enabled ? std::string("true") : "false") +
+           "\nprevious_page_shortcut=" + value.previous_page_shortcut +
+           "\nnext_page_shortcut_enabled=" +
+               (value.next_page_shortcut_enabled ? std::string("true") : "false") +
+           "\nnext_page_shortcut=" + value.next_page_shortcut + "\n";
 }
 
 ConfigIoResult ConfigStore::load(const std::filesystem::path& path) {
