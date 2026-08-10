@@ -12,13 +12,14 @@
 namespace owo::engine::detail {
 
 inline std::optional<std::vector<std::string>> mixed_abbreviation_segments(
-    const std::span<const std::string> syllables, const std::string_view input) {
+    const std::span<const std::string_view> syllables, const std::string_view input) {
     if (syllables.size() < 2 || input.size() < 3 ||
         input.find('\'') != std::string_view::npos ||
         !input.starts_with(syllables.front()) || input.size() <= syllables.front().size())
         return std::nullopt;
 
-    std::vector<std::string> segments{syllables.front()};
+    std::vector<std::string> segments;
+    segments.emplace_back(syllables.front());
     const auto visit = [&](const auto& self, const std::size_t syllable_index,
                            const std::size_t input_offset,
                            const bool abbreviated) -> bool {
@@ -42,6 +43,14 @@ inline std::optional<std::vector<std::string>> mixed_abbreviation_segments(
     };
     if (!visit(visit, 1, syllables.front().size(), false)) return std::nullopt;
     return segments;
+}
+
+inline std::optional<std::vector<std::string>> mixed_abbreviation_segments(
+    const std::span<const std::string> syllables, const std::string_view input) {
+    std::vector<std::string_view> views;
+    views.reserve(syllables.size());
+    for (const auto& syllable : syllables) views.push_back(syllable);
+    return mixed_abbreviation_segments(std::span<const std::string_view>(views), input);
 }
 
 inline void retain_best_mixed_matches(std::vector<AbbreviatedLexiconMatch>& matches,

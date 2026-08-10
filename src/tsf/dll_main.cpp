@@ -4,9 +4,10 @@
 #include <msctf.h>
 #include <objbase.h>
 
+#include <array>
+#include <iterator>
 #include <new>
 #include <string>
-#include <iterator>
 
 namespace {
 HMODULE module_handle = nullptr;
@@ -142,30 +143,42 @@ HRESULT register_profile() {
     return result;
 }
 
+bool category_exists(ITfCategoryMgr* categories, const GUID& category) {
+    if (categories == nullptr) return false;
+    IEnumGUID* enumeration = nullptr;
+    if (FAILED(categories->EnumItemsInCategory(category, &enumeration)) ||
+        enumeration == nullptr) return false;
+    bool found = false;
+    GUID item{};
+    ULONG fetched = 0;
+    while (enumeration->Next(1, &item, &fetched) == S_OK) {
+        if (item == owo::tsf::kTextServiceClsid) {
+            found = true;
+            break;
+        }
+    }
+    enumeration->Release();
+    return found;
+}
+
 HRESULT register_categories() {
     ITfCategoryMgr* categories = nullptr;
     HRESULT result = CoCreateInstance(CLSID_TF_CategoryMgr, nullptr,
                                       CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&categories));
     if (FAILED(result)) return result;
-    bool existing_category = false;
-    IEnumGUID* enumeration = nullptr;
-    if (SUCCEEDED(categories->EnumItemsInCategory(GUID_TFCAT_TIP_KEYBOARD,
-                                                   &enumeration)) &&
-        enumeration != nullptr) {
-        GUID item{};
-        ULONG fetched = 0;
-        while (enumeration->Next(1, &item, &fetched) == S_OK) {
-            if (item == owo::tsf::kTextServiceClsid) {
-                existing_category = true;
-                break;
-            }
-        }
-        enumeration->Release();
+    const std::array capabilities{
+        GUID_TFCAT_TIP_KEYBOARD,
+        GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+        GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+    };
+    for (const auto& capability : capabilities) {
+        const bool existing = category_exists(categories, capability);
+        result = categories->RegisterCategory(owo::tsf::kTextServiceClsid,
+                                              capability,
+                                              owo::tsf::kTextServiceClsid);
+        if (FAILED(result) && existing) result = S_OK;
+        if (FAILED(result)) break;
     }
-    result = categories->RegisterCategory(owo::tsf::kTextServiceClsid,
-                                          GUID_TFCAT_TIP_KEYBOARD,
-                                          owo::tsf::kTextServiceClsid);
-    if (FAILED(result) && existing_category) result = S_OK;
     categories->Release();
     return result;
 }
@@ -174,9 +187,16 @@ void unregister_categories() {
     ITfCategoryMgr* categories = nullptr;
     if (SUCCEEDED(CoCreateInstance(CLSID_TF_CategoryMgr, nullptr,
                                    CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&categories)))) {
-        categories->UnregisterCategory(owo::tsf::kTextServiceClsid,
-                                       GUID_TFCAT_TIP_KEYBOARD,
-                                       owo::tsf::kTextServiceClsid);
+        const std::array capabilities{
+            GUID_TFCAT_TIP_KEYBOARD,
+            GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+            GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+        };
+        for (const auto& capability : capabilities) {
+            categories->UnregisterCategory(owo::tsf::kTextServiceClsid,
+                                           capability,
+                                           owo::tsf::kTextServiceClsid);
+        }
         categories->Release();
     }
 }

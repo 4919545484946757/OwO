@@ -33,6 +33,8 @@ struct Message {
     bool expanded{};
     std::uint64_t page_size{};
     bool correction_enabled{true};
+    std::string input;
+    std::string context;
 };
 
 struct DecodeResult {

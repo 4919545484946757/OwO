@@ -5,6 +5,8 @@
 #include <Windows.h>
 #include <msctf.h>
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -23,6 +25,8 @@ struct IDWriteTextFormat;
 
 namespace owo::tsf {
 
+class LanguageBarItem;
+
 inline constexpr CLSID kTextServiceClsid{
     0x6d31c9b1, 0x8978, 0x4f49, {0x89, 0xb4, 0x66, 0xeb, 0x1e, 0x74, 0x15, 0x91}};
 inline constexpr GUID kLanguageProfileGuid{
@@ -34,7 +38,8 @@ inline constexpr LANGID kSimplifiedChinese = 0x0804;
 class TextService final : public ITfTextInputProcessorEx,
                           public ITfKeyEventSink,
                           public ITfThreadMgrEventSink,
-                          public ITfThreadFocusSink {
+                          public ITfThreadFocusSink,
+                          public ITfCompartmentEventSink {
 public:
     TextService() noexcept;
 
@@ -79,7 +84,10 @@ public:
     HRESULT STDMETHODCALLTYPE OnSetThreadFocus() override;
     HRESULT STDMETHODCALLTYPE OnKillThreadFocus() override;
 
+    HRESULT STDMETHODCALLTYPE OnChange(REFGUID guid) override;
+
 private:
+    friend class LanguageBarItem;
     struct CandidateResult {
         std::uint64_t request_id{};
         std::uint64_t generation{};
@@ -102,6 +110,9 @@ private:
         std::wstring input;
         bool expanded{};
         bool correction_enabled{true};
+        std::wstring feedback_input;
+        std::wstring language_context;
+        std::chrono::steady_clock::time_point queued_at{std::chrono::steady_clock::now()};
     };
     enum class HitKind : std::uint8_t {
         candidate,
@@ -122,6 +133,7 @@ private:
 
     virtual ~TextService();
     static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
+    static LRESULT CALLBACK keyboard_hook_proc(int code, WPARAM key, LPARAM flags);
     HRESULT initialize_windows();
     void destroy_windows() noexcept;
     HRESULT initialize_rendering();
@@ -134,10 +146,19 @@ private:
     void worker_loop(std::stop_token stop_token);
     void queue_candidate_request();
     void schedule_candidate_request(bool reset_retry);
-    void queue_commit_feedback(std::wstring candidate);
+    void queue_commit_feedback(std::wstring candidate, std::wstring input,
+                               std::wstring context);
+    void append_language_context(std::wstring_view text);
     void refresh_shortcut_config(bool force = false);
     void sync_preserved_language_key();
     void clear_preserved_language_key() noexcept;
+    void initialize_language_compartment();
+    void uninitialize_language_compartment() noexcept;
+    [[nodiscard]] std::optional<bool> system_language_mode() const;
+    HRESULT apply_language_mode(bool chinese, ITfContext* context);
+    void initialize_language_bar();
+    void uninitialize_language_bar() noexcept;
+    void update_language_bar() noexcept;
     [[nodiscard]] bool shortcut_matches(std::string_view shortcut, WPARAM key) const;
     void handle_candidate_result(CandidateResult* result);
     void update_candidate_window();
@@ -154,14 +175,19 @@ private:
     HRESULT commit_raw_input(ITfContext* context);
     HRESULT commit_candidate_from_window(std::size_t index);
     HRESULT toggle_language_mode(ITfContext* context);
+    HRESULT toggle_language_mode_from_window();
 
     LONG references_{1};
     ITfThreadMgr* thread_manager_{nullptr};
     TfClientId client_id_{TF_CLIENTID_NULL};
     DWORD thread_manager_event_sink_cookie_{TF_INVALID_COOKIE};
     DWORD thread_focus_sink_cookie_{TF_INVALID_COOKIE};
+    DWORD language_compartment_sink_cookie_{TF_INVALID_COOKIE};
     HWND message_window_{nullptr};
     HWND candidate_window_{nullptr};
+    HHOOK keyboard_hook_{nullptr};
+    bool language_space_key_suppressed_{false};
+    LanguageBarItem* language_bar_item_{nullptr};
     ID2D1Factory* d2d_factory_{nullptr};
     IDWriteFactory* dwrite_factory_{nullptr};
     IDWriteTextFormat* input_text_format_{nullptr};
@@ -176,6 +202,7 @@ private:
     ID2D1SolidColorBrush* highlight_brush_{nullptr};
     ID2D1SolidColorBrush* strict_accent_brush_{nullptr};
     std::wstring input_buffer_;
+    std::wstring recent_language_context_;
     std::wstring segmented_input_;
     std::vector<std::wstring> candidates_;
     std::vector<std::uint64_t> candidate_consumed_;
@@ -188,6 +215,9 @@ private:
     std::uint64_t context_generation_{0};
     std::uint64_t next_request_id_{1};
     std::uint64_t active_candidate_request_id_{0};
+    std::atomic<std::uint64_t> latest_candidate_request_id_{0};
+    HANDLE candidate_cancellation_event_{nullptr};
+    std::vector<HANDLE> retired_cancellation_events_;
     std::uint64_t candidate_page_{0};
     std::uint64_t candidate_page_size_{5};
     bool has_more_candidates_{false};

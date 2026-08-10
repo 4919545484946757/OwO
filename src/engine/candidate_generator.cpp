@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <string_view>
 #include <unordered_map>
 
@@ -30,6 +31,22 @@ constexpr std::int64_t kCorrectionPenalty = 6'000;
 constexpr std::int64_t kAbbreviationBasePenalty = 8'000;
 constexpr std::int64_t kMixedAbbreviationPhraseBonus = 8'000;
 constexpr std::int64_t kPreferredInitialBonus = 6'000;
+constexpr std::int64_t kCommonInitialSeedBonus = 100'000;
+
+std::int64_t common_initial_seed_bonus(const char initial,
+                                       const std::string_view text) {
+    // Raw dictionary counts mix several corpora and otherwise put 大/多 ahead
+    // of the conventional high-utility d shortcuts. Keep a very small seed
+    // list for the default single-initial experience; all remaining characters
+    // still follow learned and dictionary frequency.
+    if (initial != 'd') return 0;
+    constexpr std::array<std::string_view, 6> seeds{
+        "的", "都", "对", "等", "到", "但"};
+    const auto found = std::find(seeds.begin(), seeds.end(), text);
+    if (found == seeds.end()) return 0;
+    return kCommonInitialSeedBonus -
+           static_cast<std::int64_t>(found - seeds.begin()) * 10'000;
+}
 
 std::string_view preferred_initial_syllable(const char initial) {
     switch (initial) {
@@ -73,6 +90,18 @@ void prune(std::vector<SearchState>& states, const std::size_t width) {
         return left.text < right.text;
     });
     if (states.size() > width) states.resize(width);
+}
+
+void retain_frequent_entries(std::vector<LexiconEntry>& entries,
+                             const std::size_t limit) {
+    if (entries.size() <= limit) return;
+    const auto better = [](const LexiconEntry& left, const LexiconEntry& right) {
+        if (left.frequency != right.frequency) return left.frequency > right.frequency;
+        return left.text < right.text;
+    };
+    std::nth_element(entries.begin(), entries.begin() + limit, entries.end(), better);
+    entries.resize(limit);
+    std::sort(entries.begin(), entries.end(), better);
 }
 
 std::vector<std::string> source_segments(const ParseResult& parsed,
@@ -166,9 +195,79 @@ void prioritize_two_character_words(std::vector<Candidate>& candidates) {
 }  // namespace
 
 std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
-                                                    const std::size_t limit) const {
+                                                    const std::size_t limit,
+                                                    const bool contextual_ranking,
+                                                    const std::string_view language_context,
+                                                    CandidateGenerationMetrics* const metrics,
+                                                    const std::function<bool()>& cancelled) const {
     if (!parsed.valid || limit == 0) return {};
-    const auto search_limit = std::max<std::size_t>(32, limit);
+    // A normal first page needs only page_size + one look-ahead candidate.
+    // Keeping a small quality margin avoids the former 32-result floor, which
+    // expanded every beam to at least 128 states even when only five results
+    // were visible.
+    constexpr std::size_t kMinimumSearchLimit = 12;
+    const auto search_limit = std::max(kMinimumSearchLimit, limit);
+
+    // A lone consonant is a request for common characters across every valid
+    // final, not for the first parser completion bucket (da, dai, dan, ...).
+    // The lexicon's prebuilt initial index is globally frequency ordered, so
+    // use it directly and retain only single-syllable, single-character
+    // entries. This gives d -> 的/都/对/等/到/但... instead of allowing one
+    // completion path to fill the whole result budget.
+    constexpr std::string_view vowels = "aeiouv";
+    const bool single_initial = parsed.normalized_input.size() == 1 &&
+        parsed.normalized_input.front() >= 'a' &&
+        parsed.normalized_input.front() <= 'z' &&
+        vowels.find(parsed.normalized_input.front()) == std::string_view::npos;
+    if (single_initial) {
+        const auto lookup_started = std::chrono::steady_clock::now();
+        auto entries = lexicon_.lookup_initial(
+            parsed.normalized_input.front(), std::max<std::size_t>(256, search_limit * 16));
+        if (metrics != nullptr) {
+            metrics->lexicon_lookup_us += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - lookup_started).count());
+            ++metrics->lexicon_lookup_count;
+        }
+        std::unordered_map<std::string, Candidate> initial_candidates;
+        for (const auto& entry : entries) {
+            if (cancelled && cancelled()) return {};
+            if (entry.syllables.size() != 1 || utf8_character_count(entry.text) != 1)
+                continue;
+            auto score = unigram_score(entry.frequency) +
+                         common_initial_seed_bonus(parsed.normalized_input.front(),
+                                                   entry.text);
+            if (user_frequency_ != nullptr) {
+                score += user_frequency_->score(entry.text);
+                if (contextual_ranking)
+                    score += user_frequency_->contextual_score(
+                        parsed.normalized_input, entry.text);
+                if (contextual_ranking && !language_context.empty())
+                    score += user_frequency_->language_context_score(
+                        language_context, parsed.normalized_input, entry.text);
+            }
+            Candidate candidate{entry.text, entry.syllables, score,
+                                InputMatchKind::incomplete_completion,
+                                {parsed.normalized_input}, 1};
+            const auto found = initial_candidates.find(candidate.text);
+            if (found == initial_candidates.end() ||
+                candidate_better(candidate, found->second))
+                initial_candidates.insert_or_assign(candidate.text,
+                                                    std::move(candidate));
+        }
+        std::vector<Candidate> candidates;
+        candidates.reserve(initial_candidates.size());
+        for (auto& [text, candidate] : initial_candidates)
+            candidates.push_back(std::move(candidate));
+        const auto sort_started = std::chrono::steady_clock::now();
+        std::sort(candidates.begin(), candidates.end(), score_less);
+        if (candidates.size() > limit) candidates.resize(limit);
+        if (metrics != nullptr)
+            metrics->sort_us += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - sort_started).count());
+        return candidates;
+    }
 
     std::unordered_map<std::string, Candidate> unique;
     const auto store_candidate = [&unique](Candidate candidate) {
@@ -192,6 +291,7 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
                static_cast<std::size_t>(InputMatchKind::abbreviated_completion) + 1>
         evaluated_paths{};
     for (const auto* path_pointer : ordered_paths) {
+        if (cancelled && cancelled()) return {};
         const auto& path = *path_pointer;
         // Corrections are a fallback for spellings not covered by the lexicon.
         // Prefix completions remain available beside exact candidates.
@@ -213,6 +313,7 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
         const std::size_t beam_width = std::max<std::size_t>(16, search_limit * 4);
         const std::size_t maximum_reading_length = lexicon_.maximum_reading_length();
         for (std::size_t begin = 0; begin < path.syllables.size(); ++begin) {
+            if (cancelled && cancelled()) return {};
             if (chart[begin].empty()) continue;
             prune(chart[begin], beam_width);
             const auto maximum_end = std::min(path.syllables.size(),
@@ -222,7 +323,15 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
                 reading.reserve(end - begin);
                 for (std::size_t index = begin; index < end; ++index)
                     reading.push_back(path.syllables[index].text);
-                const auto entries = lexicon_.lookup(reading);
+                const auto lookup_started = std::chrono::steady_clock::now();
+                auto entries = lexicon_.lookup(reading);
+                if (metrics != nullptr) {
+                    metrics->lexicon_lookup_us += static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - lookup_started).count());
+                    ++metrics->lexicon_lookup_count;
+                }
+                retain_frequent_entries(entries, beam_width);
                 for (const auto& state : chart[begin]) {
                     for (const auto& entry : entries) {
                         SearchState next = state;
@@ -242,7 +351,15 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
         }
 
         for (auto& state : chart.back()) {
-            if (user_frequency_ != nullptr) state.score += user_frequency_->score(state.text);
+            if (user_frequency_ != nullptr) {
+                state.score += user_frequency_->score(state.text);
+                if (contextual_ranking)
+                    state.score += user_frequency_->contextual_score(
+                        parsed.normalized_input, state.text);
+                if (contextual_ranking && !language_context.empty())
+                    state.score += user_frequency_->language_context_score(
+                        language_context, parsed.normalized_input, state.text);
+            }
             Candidate candidate{std::move(state.text), std::move(state.syllables), state.score,
                                 path.match_kind, raw_segments,
                                 path.syllables.back().end};
@@ -260,10 +377,30 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
             reading.reserve(end);
             for (std::size_t index = 0; index < end; ++index)
                 reading.push_back(path.syllables[index].text);
-            for (const auto& entry : lexicon_.lookup(reading)) {
+            const auto lookup_started = std::chrono::steady_clock::now();
+            auto prefix_entries = lexicon_.lookup(reading);
+            if (metrics != nullptr) {
+                metrics->lexicon_lookup_us += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - lookup_started).count());
+                ++metrics->lexicon_lookup_count;
+            }
+            retain_frequent_entries(prefix_entries, search_limit);
+            for (const auto& entry : prefix_entries) {
                 auto score = unigram_score(entry.frequency) - input_match_penalty(path) +
                              source_initial_bonus(parsed, path);
-                if (user_frequency_ != nullptr) score += user_frequency_->score(entry.text);
+                if (user_frequency_ != nullptr) {
+                    score += user_frequency_->score(entry.text);
+                    if (contextual_ranking)
+                        score += user_frequency_->contextual_score(
+                            std::string_view(parsed.normalized_input).substr(
+                                0, path.syllables[end - 1].end), entry.text);
+                    if (contextual_ranking && !language_context.empty())
+                        score += user_frequency_->language_context_score(
+                            language_context,
+                            std::string_view(parsed.normalized_input).substr(
+                                0, path.syllables[end - 1].end), entry.text);
+                }
                 store_candidate(Candidate{entry.text, entry.syllables, score,
                                           path.match_kind, raw_segments,
                                           path.syllables[end - 1].end});
@@ -274,14 +411,16 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
         // exact full-input path has already supplied the requested number of
         // candidates, evaluating every lower-priority segmentation only adds
         // latency and cannot improve paging capacity.
-        if (exact_candidate_found && unique.size() >= search_limit) break;
+        if ((exact_candidate_found ||
+             path.match_kind == InputMatchKind::incomplete_completion) &&
+            unique.size() >= search_limit)
+            break;
     }
 
     // A string such as "nm" is technically parseable as two interjection
     // syllables, but users normally intend one abbreviated character per
     // consonant. This lexicon-aware fallback avoids spending the parser's
     // bounded path budget on every possible syllable completion.
-    constexpr std::string_view vowels = "aeiouv";
     const bool pure_initial_sequence = parsed.normalized_input.size() >= 2 &&
         parsed.normalized_input.size() <= 256 &&
         std::all_of(parsed.normalized_input.begin(), parsed.normalized_input.end(),
@@ -294,21 +433,21 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
         for (const char initial : parsed.normalized_input)
             raw_segments.emplace_back(1, initial);
 
-        const auto beam_width = std::max<std::size_t>(16, search_limit * 4);
+        const auto beam_width = std::max<std::size_t>(16, search_limit * 2);
         std::vector<std::vector<SearchState>> chart(parsed.normalized_input.size() + 1);
         SearchState initial;
         initial.score = -kAbbreviationBasePenalty;
         chart.front().push_back(std::move(initial));
         for (std::size_t offset = 0; offset < parsed.normalized_input.size(); ++offset) {
-            auto entries = lexicon_.lookup_initial(parsed.normalized_input[offset]);
-            std::sort(entries.begin(), entries.end(), [](const LexiconEntry& left,
-                                                         const LexiconEntry& right) {
-                if (left.frequency != right.frequency) return left.frequency > right.frequency;
-                if (left.syllables.front().size() != right.syllables.front().size())
-                    return left.syllables.front().size() < right.syllables.front().size();
-                return left.text < right.text;
-            });
-            if (entries.size() > beam_width) entries.resize(beam_width);
+            if (cancelled && cancelled()) return {};
+            const auto lookup_started = std::chrono::steady_clock::now();
+            auto entries = lexicon_.lookup_initial(parsed.normalized_input[offset], beam_width);
+            if (metrics != nullptr) {
+                metrics->lexicon_lookup_us += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - lookup_started).count());
+                ++metrics->lexicon_lookup_count;
+            }
             for (const auto& state : chart[offset]) {
                 for (const auto& entry : entries) {
                     SearchState next = state;
@@ -331,7 +470,18 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
         }
         for (std::size_t consumed = 1; consumed < chart.size(); ++consumed) {
             for (auto state : chart[consumed]) {
-                if (user_frequency_ != nullptr) state.score += user_frequency_->score(state.text);
+                if (user_frequency_ != nullptr) {
+                    state.score += user_frequency_->score(state.text);
+                    if (contextual_ranking)
+                        state.score += user_frequency_->contextual_score(
+                            std::string_view(parsed.normalized_input).substr(0, consumed),
+                            state.text);
+                    if (contextual_ranking && !language_context.empty())
+                        state.score += user_frequency_->language_context_score(
+                            language_context,
+                            std::string_view(parsed.normalized_input).substr(0, consumed),
+                            state.text);
+                }
                 store_candidate(Candidate{std::move(state.text), std::move(state.syllables),
                                           state.score,
                                           InputMatchKind::abbreviated_completion,
@@ -346,11 +496,28 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
     // g*/d* parser combinations before dictionary evidence is available.
     const auto mixed_limit = search_limit > 32 ? std::size_t{256}
                                                : std::max<std::size_t>(64, search_limit * 8);
-    const auto mixed_matches = exact_candidate_found
+    const bool has_stable_strict_prefix = std::any_of(
+        parsed.paths.begin(), parsed.paths.end(), [](const ParsePath& path) {
+            if (path.match_kind != InputMatchKind::exact || path.syllables.size() < 2 ||
+                path.syllables.back().complete)
+                return false;
+            return std::all_of(path.syllables.begin(), path.syllables.end() - 1,
+                               [](const Syllable& syllable) { return syllable.complete; });
+        });
+    if (cancelled && cancelled()) return {};
+    const auto mixed_lookup_started = std::chrono::steady_clock::now();
+    const auto mixed_matches = exact_candidate_found || has_stable_strict_prefix
                                    ? std::vector<AbbreviatedLexiconMatch>{}
                                    : lexicon_.lookup_mixed_abbreviation(
                                          parsed.normalized_input, mixed_limit);
+    if (metrics != nullptr && !exact_candidate_found && !has_stable_strict_prefix) {
+        metrics->lexicon_lookup_us += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - mixed_lookup_started).count());
+        ++metrics->lexicon_lookup_count;
+    }
     for (auto match : mixed_matches) {
+        if (cancelled && cancelled()) return {};
         std::size_t abbreviated_segments = 0;
         for (std::size_t index = 0; index < match.entry.syllables.size(); ++index) {
             if (match.source_segments[index].size() < match.entry.syllables[index].size())
@@ -360,7 +527,15 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
         auto score = unigram_score(match.entry.frequency) + kMixedAbbreviationPhraseBonus -
                      static_cast<std::int64_t>(abbreviated_segments) *
                          kIncompleteCharacterPenalty;
-        if (user_frequency_ != nullptr) score += user_frequency_->score(match.entry.text);
+        if (user_frequency_ != nullptr) {
+            score += user_frequency_->score(match.entry.text);
+            if (contextual_ranking)
+                score += user_frequency_->contextual_score(
+                    parsed.normalized_input, match.entry.text);
+            if (contextual_ranking && !language_context.empty())
+                score += user_frequency_->language_context_score(
+                    language_context, parsed.normalized_input, match.entry.text);
+        }
         store_candidate(Candidate{std::move(match.entry.text),
                                   std::move(match.entry.syllables), score,
                                   InputMatchKind::abbreviated_completion,
@@ -371,6 +546,7 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
     std::vector<Candidate> candidates;
     candidates.reserve(unique.size());
     for (auto& [text, candidate] : unique) candidates.push_back(std::move(candidate));
+    const auto sort_started = std::chrono::steady_clock::now();
     const auto full_input_bytes = parsed.normalized_input.size();
     std::vector<Candidate> full;
     std::vector<Candidate> prefixes;
@@ -403,6 +579,10 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
     for (auto& candidate : full) ordered.push_back(std::move(candidate));
     prioritize_two_character_words(ordered);
     if (ordered.size() > limit) ordered.resize(limit);
+    if (metrics != nullptr)
+        metrics->sort_us += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - sort_started).count());
     return ordered;
 }
 

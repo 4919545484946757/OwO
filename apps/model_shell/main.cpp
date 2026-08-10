@@ -27,21 +27,29 @@ int wmain(int argc, wchar_t** argv) {
     request.request_id = 1;
     request.status = owo::model::ModelStatus::success;
     int input_index = 1;
-    if (argc >= 4 && std::wstring_view(argv[1]) == L"--model-id") {
-        request.model_id = utf8(argv[2]);
-        input_index = 3;
+    while (input_index + 1 < argc) {
+        const std::wstring_view option(argv[input_index]);
+        if (option == L"--model-id") {
+            request.model_id = utf8(argv[input_index + 1]);
+            input_index += 2;
+        } else if (option == L"--context") {
+            request.context = utf8(argv[input_index + 1]);
+            input_index += 2;
+        } else {
+            break;
+        }
     }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--shutdown") {
         request.type = owo::model::ModelMessageType::shutdown_request;
     } else if (argc - input_index >= 2) {
         request.type = owo::model::ModelMessageType::rank_request;
         request.timeout_ms = 100;
-        if (request.model_id.empty()) request.model_id = "owo.mock.rank.v1";
         request.input = utf8(argv[input_index]);
         for (int index = input_index + 1; index < argc; ++index)
             request.candidates.push_back(utf8(argv[index]));
     } else {
-        std::cerr << "usage: owo_model_shell [--model-id <id>] <input> <candidate> [...] | --shutdown\n";
+        std::cerr << "usage: owo_model_shell [--model-id <id>] [--context <text>] "
+                     "<input> <candidate> [...] | --shutdown\n";
         return 2;
     }
     const auto exchanged = owo::ipc::exchange(

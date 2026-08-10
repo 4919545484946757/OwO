@@ -11,6 +11,8 @@ public sealed partial class MainPage : Page
     private readonly ConfigShellClient _client = new();
     private readonly PluginShellClient _pluginClient = new();
     private Button? _shortcutCaptureTarget;
+    private IntPtr _shortcutCaptureHook;
+    private readonly LowLevelKeyboardProc _shortcutCaptureHookProc;
     private string _correctionShortcut = "Alt";
     private string _languageShortcut = "Ctrl+Space";
     private string _rawInputShortcut = "Enter";
@@ -18,8 +20,25 @@ public sealed partial class MainPage : Page
     [DllImport("user32.dll")]
     private static extern short GetKeyState(int virtualKey);
 
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
+
+    private delegate IntPtr LowLevelKeyboardProc(int code, IntPtr message, IntPtr data);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int hook, LowLevelKeyboardProc callback,
+                                                  IntPtr module, uint threadId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hook);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr message, IntPtr data);
+
     public MainPage()
     {
+        _shortcutCaptureHookProc = ShortcutCaptureHook;
         InitializeComponent();
         ConfigPath.Text = _client.ConfigPath;
         PluginPath.Text = _pluginClient.StorePath;
@@ -27,6 +46,7 @@ public sealed partial class MainPage : Page
             await LoadConfigAsync();
             await LoadPluginsAsync();
         };
+        Unloaded += (_, _) => StopShortcutCaptureHook();
     }
 
     private async Task LoadConfigAsync()
@@ -36,6 +56,7 @@ public sealed partial class MainPage : Page
             var value = await _client.LoadAsync();
             CandidatePageSize.Value = value.CandidatePageSize;
             CandidateWrapLength.Value = value.CandidateWrapLength;
+            UserLearningSensitivity.Value = value.UserLearningSensitivity;
             UserLearning.IsOn = value.UserLearningEnabled;
             ModelRanking.IsOn = value.ModelRankingEnabled;
             ModelTimeout.Value = value.ModelTimeoutMs;
@@ -61,6 +82,7 @@ public sealed partial class MainPage : Page
             ValidateShortcutConflicts();
             var value = new SettingsSnapshot((uint)CandidatePageSize.Value,
                 (uint)CandidateWrapLength.Value,
+                (uint)UserLearningSensitivity.Value,
                 UserLearning.IsOn, ModelRanking.IsOn, (uint)ModelTimeout.Value,
                 CorrectionShortcutEnabled.IsOn, _correctionShortcut,
                 LanguageShortcutEnabled.IsOn, _languageShortcut,
@@ -81,6 +103,7 @@ public sealed partial class MainPage : Page
     {
         if (sender is not Button button) return;
         _shortcutCaptureTarget = button;
+        StartShortcutCaptureHook();
         button.Content = "请按新的快捷键…";
         button.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
     }
@@ -132,6 +155,7 @@ public sealed partial class MainPage : Page
             case "raw": _rawInputShortcut = shortcut; break;
         }
         _shortcutCaptureTarget = null;
+        StopShortcutCaptureHook();
         UpdateShortcutButtons();
         ShowStatus($"快捷键已改为 {shortcut}，点击“保存”后生效。", InfoBarSeverity.Informational);
     }
@@ -147,6 +171,11 @@ public sealed partial class MainPage : Page
         var control = code is 0x11 or 0xA2 or 0xA3 || IsDown(controlKey);
         var alt = code is 0x12 or 0xA4 or 0xA5 || IsDown(altKey);
         var shift = code is 0x10 or 0xA0 or 0xA1 || IsDown(shiftKey);
+        return ShortcutForKeyCode(code, control, alt, shift);
+    }
+
+    private static string? ShortcutForKeyCode(int code, bool control, bool alt, bool shift)
+    {
         var parts = new List<string>();
         if (control) parts.Add("Ctrl");
         if (alt) parts.Add("Alt");
@@ -157,6 +186,45 @@ public sealed partial class MainPage : Page
             parts.Add(primary);
         }
         return parts.Count == 0 ? null : string.Join('+', parts);
+    }
+
+    private void StartShortcutCaptureHook()
+    {
+        StopShortcutCaptureHook();
+        // A managed callback is represented by a runtime thunk rather than code in the
+        // WinUI executable image. Passing the EXE module handle makes Windows reject the
+        // low-level hook on some systems; a null module is correct for this in-process hook.
+        _shortcutCaptureHook = SetWindowsHookEx(13, _shortcutCaptureHookProc,
+                                                IntPtr.Zero, 0);
+        if (_shortcutCaptureHook == IntPtr.Zero)
+            ShowStatus($"无法启动快捷键捕获（Win32 {Marshal.GetLastWin32Error()}）。",
+                       InfoBarSeverity.Error);
+    }
+
+    private void StopShortcutCaptureHook()
+    {
+        if (_shortcutCaptureHook == IntPtr.Zero) return;
+        UnhookWindowsHookEx(_shortcutCaptureHook);
+        _shortcutCaptureHook = IntPtr.Zero;
+    }
+
+    private IntPtr ShortcutCaptureHook(int code, IntPtr message, IntPtr data)
+    {
+        const int space = 0x20;
+        const int keyDown = 0x0100;
+        const int systemKeyDown = 0x0104;
+        if (code >= 0 && _shortcutCaptureTarget is not null &&
+            ((int)message == keyDown || (int)message == systemKeyDown) &&
+            Marshal.ReadInt32(data) == space) {
+            var shortcut = ShortcutForKeyCode(space,
+                (GetAsyncKeyState(0x11) & 0x8000) != 0,
+                (GetAsyncKeyState(0x12) & 0x8000) != 0,
+                (GetAsyncKeyState(0x10) & 0x8000) != 0);
+            if (shortcut is not null)
+                DispatcherQueue.TryEnqueue(() => CommitCapturedShortcut(shortcut));
+            return new IntPtr(1);
+        }
+        return CallNextHookEx(_shortcutCaptureHook, code, message, data);
     }
 
     private static string? PrimaryKeyName(int key)

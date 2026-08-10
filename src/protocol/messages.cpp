@@ -163,13 +163,34 @@ bool valid_candidate_layout(const Message& message) {
     return !message.expanded && message.page_size == 0;
 }
 
+bool valid_feedback_input(const Message& message) {
+    if (message.type != MessageType::candidate_committed) return message.input.empty();
+    if (message.input.size() > 4096) return false;
+    return std::all_of(message.input.begin(), message.input.end(), [](const char value) {
+        return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+               value == '\'';
+    });
+}
+
+bool valid_language_context(const Message& message) {
+    if (message.type != MessageType::candidate_request &&
+        message.type != MessageType::candidate_committed)
+        return message.context.empty();
+    return message.context.size() <= 256;
+}
+
 }  // namespace
 
 std::string encode_message(const Message& message) {
     if (!valid_syllables(message.syllables) || !valid_candidate_consumed(message) ||
-        !valid_candidate_layout(message)) return {};
+        !valid_candidate_layout(message) || !valid_feedback_input(message) ||
+        !valid_language_context(message)) return {};
     const auto escaped = escape_json(message.text);
     if (!message.text.empty() && escaped.empty()) return {};
+    const auto escaped_input = escape_json(message.input);
+    if (!message.input.empty() && escaped_input.empty()) return {};
+    const auto escaped_context = escape_json(message.context);
+    if (!message.context.empty() && escaped_context.empty()) return {};
     std::string encoded_candidates = "[";
     for (std::size_t index = 0; index < message.candidates.size(); ++index) {
         const auto candidate = escape_json(message.candidates[index]);
@@ -205,7 +226,9 @@ std::string encode_message(const Message& message) {
            ",\"expanded\":" + (message.expanded ? "true" : "false") +
            ",\"page_size\":" + std::to_string(message.page_size) +
            ",\"correction_enabled\":" +
-               (message.correction_enabled ? "true" : "false") + "}";
+               (message.correction_enabled ? "true" : "false") +
+           ",\"input\":\"" + escaped_input +
+           "\",\"context\":\"" + escaped_context + "\"}";
 }
 
 DecodeResult decode_message(const std::string_view json) {
@@ -304,9 +327,23 @@ DecodeResult decode_message(const std::string_view json) {
         if (!value) goto invalid;
         output.message.correction_enabled = *value;
     }
+    if (!consume(json, offset, ",\"input\":")) goto invalid;
+    {
+        const auto value = parse_string(json, offset);
+        if (!value) goto invalid;
+        output.message.input = *value;
+    }
+    if (!consume(json, offset, ",\"context\":")) goto invalid;
+    {
+        const auto value = parse_string(json, offset);
+        if (!value) goto invalid;
+        output.message.context = *value;
+    }
     if (!consume(json, offset, "}") || offset != json.size()) goto invalid;
     if (!valid_candidate_consumed(output.message) ||
-        !valid_candidate_layout(output.message)) goto invalid;
+        !valid_candidate_layout(output.message) ||
+        !valid_feedback_input(output.message) ||
+        !valid_language_context(output.message)) goto invalid;
     output.validation = {};
     return output;
 

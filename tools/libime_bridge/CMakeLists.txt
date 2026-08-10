@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.25)
+
+project(OwOLibimeBridge VERSION 0.1.0 LANGUAGES CXX)
+
+if(NOT WIN32)
+    message(FATAL_ERROR "The first OwO libime bridge supports Windows only")
+endif()
+
+set(OWO_LIBIME_SOURCE_DIR "" CACHE PATH "Pinned libime source directory")
+if(OWO_LIBIME_SOURCE_DIR)
+    set(ENABLE_DATA OFF CACHE BOOL "" FORCE)
+    set(ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
+    set(ENABLE_TEST OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+    add_subdirectory("${OWO_LIBIME_SOURCE_DIR}" "libime-build" EXCLUDE_FROM_ALL)
+else()
+    find_package(LibIMECore 1.1.15 CONFIG REQUIRED)
+endif()
+
+add_library(owo_libime_bridge SHARED libime_bridge.cpp)
+target_compile_features(owo_libime_bridge PRIVATE cxx_std_20)
+target_compile_definitions(owo_libime_bridge PRIVATE OWO_LIBIME_BRIDGE_EXPORTS)
+target_include_directories(owo_libime_bridge PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../include")
+target_link_libraries(owo_libime_bridge PRIVATE LibIME::Core)
+set_target_properties(owo_libime_bridge PROPERTIES PREFIX "" OUTPUT_NAME "owo_libime_bridge")

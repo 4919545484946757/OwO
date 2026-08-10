@@ -10,7 +10,7 @@
 
 namespace owo::model {
 
-inline constexpr std::uint32_t kModelProtocolVersion = 1;
+inline constexpr std::uint32_t kModelProtocolVersion = 2;
 
 enum class ModelMessageType : std::uint8_t {
     rank_request = 1,
@@ -27,6 +27,7 @@ struct ModelMessage {
     ModelStatus status{ModelStatus::backend_error};
     std::string model_id;
     std::string input;
+    std::string context;
     std::vector<std::string> candidates;
     std::string diagnostic;
 };

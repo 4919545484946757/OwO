@@ -11,19 +11,80 @@
 #include "owo/protocol/messages.h"
 
 #include <Windows.h>
+#include <sddl.h>
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <condition_variable>
 #include <cstdint>
-#include <limits>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <iostream>
+#include <list>
+#include <limits>
+#include <mutex>
+#include <numeric>
+#include <optional>
+#include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace owo::ipc {
 namespace {
+
+class CurrentUserPipeSecurity final {
+public:
+    CurrentUserPipeSecurity() {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return;
+        DWORD bytes = 0;
+        GetTokenInformation(token, TokenUser, nullptr, 0, &bytes);
+        std::vector<std::byte> storage(bytes);
+        if (bytes == 0 || !GetTokenInformation(token, TokenUser, storage.data(), bytes, &bytes)) {
+            CloseHandle(token);
+            return;
+        }
+        const auto* user = reinterpret_cast<const TOKEN_USER*>(storage.data());
+        LPWSTR sid_text = nullptr;
+        if (!ConvertSidToStringSidW(user->User.Sid, &sid_text)) {
+            CloseHandle(token);
+            return;
+        }
+        CloseHandle(token);
+
+        // Restrict the pipe to this Windows user, SYSTEM and administrators.
+        // The low mandatory label is intentional: Core may be launched once by
+        // the elevated installer, while TSF clients normally run at medium or
+        // low integrity in browsers and other sandboxed text hosts.
+        const std::wstring sddl = L"D:P(A;;GA;;;" + std::wstring(sid_text) +
+            L")(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NW;;;LW)";
+        LocalFree(sid_text);
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.c_str(), SDDL_REVISION_1, &descriptor_, nullptr)) return;
+        attributes_.nLength = sizeof(attributes_);
+        attributes_.lpSecurityDescriptor = descriptor_;
+        attributes_.bInheritHandle = FALSE;
+    }
+
+    CurrentUserPipeSecurity(const CurrentUserPipeSecurity&) = delete;
+    CurrentUserPipeSecurity& operator=(const CurrentUserPipeSecurity&) = delete;
+    ~CurrentUserPipeSecurity() {
+        if (descriptor_ != nullptr) LocalFree(descriptor_);
+    }
+
+    [[nodiscard]] SECURITY_ATTRIBUTES* get() noexcept {
+        return descriptor_ == nullptr ? nullptr : &attributes_;
+    }
+    [[nodiscard]] explicit operator bool() const noexcept { return descriptor_ != nullptr; }
+
+private:
+    PSECURITY_DESCRIPTOR descriptor_{};
+    SECURITY_ATTRIBUTES attributes_{};
+};
 
 protocol::ValidationResult io_error(const char* operation) {
     const DWORD error = GetLastError();
@@ -174,33 +235,288 @@ std::string read_frame(const HANDLE pipe) {
     return payload;
 }
 
+std::size_t utf8_character_count(const std::string_view text) {
+    return static_cast<std::size_t>(std::count_if(
+        text.begin(), text.end(), [](const unsigned char byte) {
+            return (byte & 0xc0U) != 0x80U;
+        }));
+}
+
+// Context scoring is allowed to choose between candidates with the same
+// structural usefulness, but it must not demote a whole-input sentence below
+// a prefix word, or a prefix word below a single-character fallback.
+void apply_model_order_with_candidate_tiers(
+    const std::vector<std::string>& model_order,
+    const std::size_t full_input_bytes,
+    const std::vector<std::string>& original_candidates,
+    const std::vector<std::uint64_t>& original_consumed,
+    std::vector<std::string>& ordered_candidates,
+    std::vector<std::uint64_t>& ordered_consumed) {
+    if (original_candidates.size() != original_consumed.size()) return;
+
+    const auto model_rank = [&model_order](const std::string& candidate) {
+        const auto found = std::find(model_order.begin(), model_order.end(), candidate);
+        return found == model_order.end()
+                   ? model_order.size()
+                   : static_cast<std::size_t>(found - model_order.begin());
+    };
+    const auto tier = [full_input_bytes](const std::string& candidate,
+                                         const std::uint64_t consumed) {
+        if (consumed == full_input_bytes) return 0;
+        if (utf8_character_count(candidate) >= 2) return 1;
+        return 2;
+    };
+
+    std::vector<std::size_t> indices(original_candidates.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::stable_sort(indices.begin(), indices.end(), [&](const std::size_t left,
+                                                         const std::size_t right) {
+        const auto left_tier = tier(original_candidates[left], original_consumed[left]);
+        const auto right_tier = tier(original_candidates[right], original_consumed[right]);
+        if (left_tier != right_tier) return left_tier < right_tier;
+        if (left_tier == 1 && original_consumed[left] != original_consumed[right])
+            return original_consumed[left] > original_consumed[right];
+        return model_rank(original_candidates[left]) < model_rank(original_candidates[right]);
+    });
+
+    ordered_candidates.clear();
+    ordered_consumed.clear();
+    ordered_candidates.reserve(indices.size());
+    ordered_consumed.reserve(indices.size());
+    for (const auto index : indices) {
+        ordered_candidates.push_back(original_candidates[index]);
+        ordered_consumed.push_back(original_consumed[index]);
+    }
+}
+
+std::vector<std::string> preferred_source_segmentation(
+    const engine::ParseResult& parsed,
+    const std::vector<std::string>& candidate_segments,
+    const bool correction_enabled) {
+    const auto source_segments = [&parsed](const engine::ParsePath& path) {
+        std::vector<std::string> segments;
+        segments.reserve(path.syllables.size());
+        for (const auto& syllable : path.syllables) {
+            if (syllable.begin >= syllable.end ||
+                syllable.end > parsed.normalized_input.size()) return std::vector<std::string>{};
+            const auto source = std::string_view(parsed.normalized_input).substr(
+                syllable.begin, syllable.end - syllable.begin);
+            if (source.empty() || source.find('\'') != std::string_view::npos)
+                return std::vector<std::string>{};
+            segments.emplace_back(source);
+        }
+        return segments;
+    };
+    const auto raw_segments = [&parsed] {
+        std::vector<std::string> segments;
+        std::size_t begin = 0;
+        while (begin < parsed.normalized_input.size()) {
+            const auto end = parsed.normalized_input.find('\'', begin);
+            const auto length = end == std::string::npos
+                                    ? parsed.normalized_input.size() - begin
+                                    : end - begin;
+            if (length != 0) segments.push_back(parsed.normalized_input.substr(begin, length));
+            if (end == std::string::npos) break;
+            begin = end + 1;
+        }
+        return segments;
+    };
+    const auto exact = std::find_if(
+        parsed.paths.begin(), parsed.paths.end(), [](const engine::ParsePath& path) {
+            return path.match_kind == engine::InputMatchKind::exact && !path.syllables.empty();
+        });
+    if (!correction_enabled)
+        return exact != parsed.paths.end() ? source_segments(*exact) : raw_segments();
+
+    const auto preferred = std::find_if(
+        parsed.paths.begin(), parsed.paths.end(), [](const engine::ParsePath& path) {
+            return path.match_kind == engine::InputMatchKind::exact &&
+                   !path.syllables.empty() &&
+                   std::any_of(path.syllables.begin(), path.syllables.end(),
+                               [](const engine::Syllable& syllable) {
+                                   return !syllable.complete;
+                               });
+        });
+    if (preferred == parsed.paths.end())
+        return candidate_segments.empty() ? raw_segments() : std::vector<std::string>{};
+
+    auto segments = source_segments(*preferred);
+    if (segments.empty()) return {};
+    if (candidate_segments.empty()) return segments;
+
+    std::size_t divergence = 0;
+    while (divergence < segments.size() && divergence < candidate_segments.size() &&
+           segments[divergence] == candidate_segments[divergence])
+        ++divergence;
+    if (divergence == segments.size() && divergence == candidate_segments.size()) return {};
+    if (divergence >= preferred->syllables.size() ||
+        !preferred->syllables[divergence].complete ||
+        segments[divergence].size() < 2)
+        return {};
+    return segments;
+}
+
+// Model ranking is latency-sensitive but never worth an unbounded thread per
+// keystroke. Keep at most one queued task; a newer composition supersedes a
+// task that has not started yet. One already-running model IPC can finish, but
+// its result is discarded by the generation/request map below.
+class LatestModelTaskQueue {
+public:
+    using Task = std::function<model::ModelMessage()>;
+
+    LatestModelTaskQueue()
+        : worker_([this](const std::stop_token stop) { run(stop); }) {}
+
+    ~LatestModelTaskQueue() {
+        worker_.request_stop();
+        ready_.notify_all();
+    }
+
+    std::future<model::ModelMessage> submit(Task task) {
+        Job next{std::move(task), {}};
+        auto future = next.completion.get_future();
+        {
+            std::lock_guard lock(mutex_);
+            if (pending_) pending_->completion.set_value({});
+            pending_ = std::move(next);
+        }
+        ready_.notify_one();
+        return future;
+    }
+
+private:
+    struct Job {
+        Task task;
+        std::promise<model::ModelMessage> completion;
+    };
+
+    void run(const std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            std::optional<Job> job;
+            {
+                std::unique_lock lock(mutex_);
+                ready_.wait(lock, stop, [this] { return pending_.has_value(); });
+                if (stop.stop_requested()) break;
+                job = std::move(pending_);
+                pending_.reset();
+            }
+            try {
+                job->completion.set_value(job->task());
+            } catch (...) {
+                job->completion.set_value({});
+            }
+        }
+        std::lock_guard lock(mutex_);
+        if (pending_) {
+            pending_->completion.set_value({});
+            pending_.reset();
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable_any ready_;
+    std::optional<Job> pending_;
+    std::jthread worker_;
+};
+
+struct CandidateCacheKey {
+    std::string input;
+    std::string context;
+    std::uint64_t config_generation{};
+    std::uint64_t learning_generation{};
+    std::size_t result_limit{};
+    std::size_t parse_path_limit{};
+    bool correction_enabled{};
+    bool contextual_ranking{};
+
+    bool operator==(const CandidateCacheKey&) const = default;
+};
+
+struct CandidateCacheKeyHash {
+    std::size_t operator()(const CandidateCacheKey& key) const noexcept {
+        auto value = std::hash<std::string>{}(key.input);
+        const auto combine = [&value](const std::size_t next) {
+            value ^= next + 0x9e3779b9U + (value << 6U) + (value >> 2U);
+        };
+        combine(std::hash<std::string>{}(key.context));
+        combine(std::hash<std::uint64_t>{}(key.config_generation));
+        combine(std::hash<std::uint64_t>{}(key.learning_generation));
+        combine(key.result_limit);
+        combine(key.parse_path_limit);
+        combine(key.correction_enabled);
+        combine(key.contextual_ranking);
+        return value;
+    }
+};
+
+struct CachedCandidateResult {
+    engine::ParseResult parsed;
+    std::vector<engine::Candidate> candidates;
+};
+
+class CandidateResultCache {
+public:
+    [[nodiscard]] std::optional<CachedCandidateResult> get(
+        const CandidateCacheKey& key) {
+        const auto found = entries_.find(key);
+        if (found == entries_.end()) return std::nullopt;
+        values_.splice(values_.begin(), values_, found->second);
+        return found->second->second;
+    }
+
+    void put(CandidateCacheKey key, CachedCandidateResult value) {
+        if (const auto found = entries_.find(key); found != entries_.end()) {
+            found->second->second = std::move(value);
+            values_.splice(values_.begin(), values_, found->second);
+            return;
+        }
+        values_.emplace_front(std::move(key), std::move(value));
+        entries_.emplace(values_.front().first, values_.begin());
+        if (values_.size() <= kCapacity) return;
+        entries_.erase(values_.back().first);
+        values_.pop_back();
+    }
+
+private:
+    static constexpr std::size_t kCapacity = 128;
+    using ValueList = std::list<std::pair<CandidateCacheKey, CachedCandidateResult>>;
+    ValueList values_;
+    std::unordered_map<CandidateCacheKey, ValueList::iterator,
+                       CandidateCacheKeyHash> entries_;
+};
+
+HANDLE open_pipe_with_deadline(const wchar_t* pipe_name,
+                               const std::chrono::steady_clock::time_point deadline) {
+    for (;;) {
+        const DWORD remaining = remaining_milliseconds(deadline);
+        if (remaining == 0) {
+            SetLastError(ERROR_SEM_TIMEOUT);
+            return INVALID_HANDLE_VALUE;
+        }
+        if (!WaitNamedPipeW(pipe_name, remaining)) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND) return INVALID_HANDLE_VALUE;
+            Sleep((std::min)(remaining, 2UL));
+            continue;
+        }
+        const HANDLE pipe = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                        OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE) return pipe;
+        const DWORD error = GetLastError();
+        if (error != ERROR_PIPE_BUSY && error != ERROR_FILE_NOT_FOUND)
+            return INVALID_HANDLE_VALUE;
+        Sleep((std::min)(remaining, 2UL));
+    }
+}
+
 }  // namespace
 
 ExchangeResult exchange(const wchar_t* pipe_name,
                         const std::string_view request,
                         const std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    for (;;) {
-        const DWORD remaining = remaining_milliseconds(deadline);
-        if (remaining == 0) {
-            SetLastError(ERROR_SEM_TIMEOUT);
-            return {io_error("WaitNamedPipeW"), {}};
-        }
-        if (!WaitNamedPipeW(pipe_name, remaining)) {
-            const DWORD error = GetLastError();
-            if (error != ERROR_FILE_NOT_FOUND) return {io_error("WaitNamedPipeW"), {}};
-            Sleep((std::min)(remaining, 2UL));
-            continue;
-        }
-        pipe = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                           OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-        if (pipe != INVALID_HANDLE_VALUE) break;
-        const DWORD error = GetLastError();
-        if (error != ERROR_PIPE_BUSY && error != ERROR_FILE_NOT_FOUND)
-            return {io_error("CreateFileW"), {}};
-        Sleep((std::min)(remaining, 2UL));
-    }
+    const HANDLE pipe = open_pipe_with_deadline(pipe_name, deadline);
+    if (pipe == INVALID_HANDLE_VALUE) return {io_error("CreateFileW"), {}};
 
     if (request.empty() || request.size() > protocol::kMaximumPayloadBytes ||
         !write_all_with_deadline(pipe, protocol::frame(request), deadline)) {
@@ -218,6 +534,41 @@ ExchangeResult exchange(const wchar_t* pipe_name,
     return {{}, std::move(response)};
 }
 
+PersistentPipeClient::PersistentPipeClient(std::wstring pipe_name)
+    : pipe_name_(std::move(pipe_name)) {}
+
+PersistentPipeClient::~PersistentPipeClient() { reset(); }
+
+void PersistentPipeClient::reset() noexcept {
+    if (pipe_ == nullptr) return;
+    CloseHandle(static_cast<HANDLE>(pipe_));
+    pipe_ = nullptr;
+}
+
+ExchangeResult PersistentPipeClient::exchange(
+    const std::string_view request, const std::chrono::milliseconds timeout) {
+    if (request.empty() || request.size() > protocol::kMaximumPayloadBytes)
+        return {{protocol::ErrorCode::invalid_payload, "invalid request size"}, {}};
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (pipe_ == nullptr) {
+            const HANDLE opened = open_pipe_with_deadline(pipe_name_.c_str(), deadline);
+            if (opened == INVALID_HANDLE_VALUE) return {io_error("CreateFileW"), {}};
+            pipe_ = opened;
+        }
+        const HANDLE pipe = static_cast<HANDLE>(pipe_);
+        if (write_all_with_deadline(pipe, protocol::frame(request), deadline)) {
+            auto response = read_frame_with_deadline(pipe, deadline);
+            if (!response.empty()) return {{}, std::move(response)};
+        }
+        const auto status = io_error("persistent pipe exchange");
+        reset();
+        if (attempt != 0 || remaining_milliseconds(deadline) == 0)
+            return {status, {}};
+    }
+    return {io_error("persistent pipe exchange"), {}};
+}
+
 int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                     engine::UserFrequencyStore* user_frequency,
                     const wchar_t* model_pipe_name,
@@ -232,17 +583,36 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
         std::chrono::steady_clock::time_point created;
         std::vector<std::string> candidates;
         std::vector<std::uint64_t> candidate_consumed;
+        std::size_t full_input_bytes{};
     };
     std::unordered_map<std::string, PendingModelRequest> model_requests;
+    LatestModelTaskQueue model_queue;
+    CandidateResultCache candidate_cache;
+    engine::FullPinyinIncrementalState incremental_parse_state;
+    std::uint64_t learning_generation = 0;
     const auto model_key = [](const std::uint64_t request_id, const std::uint64_t generation) {
         return std::to_string(request_id) + ':' + std::to_string(generation);
     };
+    CurrentUserPipeSecurity pipe_security;
+    if (!pipe_security) return 2;
+    const HANDLE ready_event = std::wstring_view(pipe_name) == kCorePipeName
+                                   ? CreateEventW(nullptr, TRUE, FALSE,
+                                                  L"Local\\OwO.InputMethod.Core.Ready.P1")
+                                   : nullptr;
+    bool ready_signalled = false;
     while (running) {
         const HANDLE pipe = CreateNamedPipeW(
             pipe_name, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             1, protocol::kMaximumPayloadBytes + 4U, protocol::kMaximumPayloadBytes + 4U,
-            5000, nullptr);
-        if (pipe == INVALID_HANDLE_VALUE) return 2;
+            5000, pipe_security.get());
+        if (pipe == INVALID_HANDLE_VALUE) {
+            if (ready_event != nullptr) CloseHandle(ready_event);
+            return 2;
+        }
+        if (!ready_signalled) {
+            if (ready_event != nullptr) SetEvent(ready_event);
+            ready_signalled = true;
+        }
 
         const BOOL connected = ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
         if (!connected) {
@@ -250,7 +620,9 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
             continue;
         }
 
+        while (running) {
         const auto request_json = read_frame(pipe);
+        if (request_json.empty()) break;
         const auto decoded = protocol::decode_message(request_json);
         const auto now = std::chrono::steady_clock::now();
         for (auto pending = model_requests.begin(); pending != model_requests.end();) {
@@ -271,10 +643,15 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
             const auto runtime_config = config_monitor != nullptr
                                             ? config_monitor->snapshot()
                                             : std::shared_ptr<const config::AppConfig>{};
-            const bool model_ranking_enabled = model_pipe_name != nullptr &&
+            const bool adaptive_ranking_enabled = runtime_config != nullptr &&
+                runtime_config->model_ranking_enabled;
+            const bool external_model_ranking_enabled = model_pipe_name != nullptr &&
                 (runtime_config == nullptr || runtime_config->model_ranking_enabled);
             const bool user_learning_enabled = runtime_config == nullptr ||
                 runtime_config->user_learning_enabled;
+            if (user_frequency != nullptr)
+                user_frequency->set_sensitivity(runtime_config != nullptr
+                    ? runtime_config->user_learning_sensitivity : 7U);
             const auto model_timeout = runtime_config != nullptr
                                            ? runtime_config->model_timeout_ms
                                            : 50U;
@@ -303,7 +680,7 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                 running = false;
             } else if (decoded.message.type == protocol::MessageType::candidate_update_request) {
                 response.type = protocol::MessageType::candidate_update_response;
-                if (!model_ranking_enabled) {
+                if (!external_model_ranking_enabled) {
                     const auto key = model_key(decoded.message.request_id,
                                                decoded.message.context_generation);
                     const auto found = model_requests.find(key);
@@ -318,6 +695,15 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                 if (found != model_requests.end() &&
                     found->second.future.wait_for(std::chrono::milliseconds(0)) !=
                         std::future_status::ready) {
+                    // Consolidate the former sequence of short TSF polls into
+                    // one bounded update wait. Base candidates were already
+                    // returned by candidate_response.
+                    found->second.future.wait_for(std::chrono::milliseconds(
+                        std::min<std::uint32_t>(model_timeout, 60U)));
+                }
+                if (found != model_requests.end() &&
+                    found->second.future.wait_for(std::chrono::milliseconds(0)) !=
+                        std::future_status::ready) {
                     response.model_pending = true;
                 } else if (found != model_requests.end()) {
                     auto pending = std::move(found->second);
@@ -325,26 +711,28 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                     auto update = pending.future.get();
                     if (update.type == model::ModelMessageType::rank_response &&
                         update.status == model::ModelStatus::success) {
-                        for (auto& candidate : update.candidates) {
-                            const auto original = std::find(
-                                pending.candidates.begin(), pending.candidates.end(), candidate);
-                            if (original == pending.candidates.end()) continue;
-                            const auto index = static_cast<std::size_t>(
-                                original - pending.candidates.begin());
-                            response.candidates.push_back(std::move(candidate));
-                            response.candidate_consumed.push_back(
-                                pending.candidate_consumed[index]);
-                        }
+                        apply_model_order_with_candidate_tiers(
+                            update.candidates, pending.full_input_bytes,
+                            pending.candidates, pending.candidate_consumed,
+                            response.candidates, response.candidate_consumed);
                     }
                 }
                 }
             } else if (decoded.message.type == protocol::MessageType::candidate_request) {
-                std::clog << R"({"process":"core_service","module":"candidate","level":"info","event_id":"candidate_requested","request_id":)"
-                          << decoded.message.request_id << "}\n";
+                const auto request_started = std::chrono::steady_clock::now();
+                const auto cancellation_name = candidate_cancellation_event_name(
+                    decoded.message.request_id, decoded.message.context_generation);
+                const HANDLE cancellation_event = CreateEventW(
+                    nullptr, TRUE, FALSE, cancellation_name.c_str());
+                const auto cancelled = [cancellation_event] {
+                    return cancellation_event != nullptr &&
+                           WaitForSingleObject(cancellation_event, 0) == WAIT_OBJECT_0;
+                };
                 response.type = protocol::MessageType::candidate_response;
                 constexpr std::uint64_t maximum_page = 100;
                 constexpr std::size_t maximum_expanded_pages = 8;
                 constexpr std::size_t maximum_expanded_candidates = 64;
+                std::size_t full_input_bytes = 0;
                 if (decoded.message.page > maximum_page ||
                     (decoded.message.expanded && decoded.message.page != 0)) {
                     response.type = protocol::MessageType::error_response;
@@ -360,17 +748,143 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                                  ? page_size * expanded_pages
                                                  : page_size;
                     const auto begin = decoded.message.expanded ? 0 : page * page_size;
-                    const auto parsed = schema.parse(decoded.message.text, 32,
-                                                     decoded.message.correction_enabled);
-                    const auto candidates = generator.generate(parsed, begin + result_size + 1);
+                    std::uint64_t parse_phase_us = 0;
+                    std::uint64_t generation_phase_us = 0;
+                    const auto parse_path_limit = decoded.message.expanded
+                                                      ? std::size_t{32}
+                                                      : std::size_t{16};
+                    engine::FullPinyinParseMetrics parse_metrics;
+                    engine::CandidateGenerationMetrics generation_metrics;
+                    const auto result_limit = begin + result_size + 1;
+                    CandidateCacheKey cache_key{
+                        decoded.message.text,
+                        decoded.message.context,
+                        config_monitor != nullptr ? config_monitor->generation() : 0,
+                        learning_generation,
+                        result_limit,
+                        parse_path_limit,
+                        decoded.message.correction_enabled,
+                        adaptive_ranking_enabled};
+                    auto cached = candidate_cache.get(cache_key);
+                    const bool cache_hit = cached.has_value();
+                    engine::ParseResult parsed;
+                    std::vector<engine::Candidate> candidates;
+                    bool correction_fallback = false;
+                    bool incremental_reused = false;
+                    if (cached) {
+                        parsed = std::move(cached->parsed);
+                        candidates = std::move(cached->candidates);
+                    } else {
+                        const auto strict_parse_started = std::chrono::steady_clock::now();
+                        const auto strict_path_limit = decoded.message.expanded
+                                                           ? std::size_t{16}
+                                                           : std::size_t{8};
+                        parsed = schema.parse_incremental(
+                            decoded.message.text, strict_path_limit,
+                            incremental_parse_state, &parse_metrics, cancelled,
+                            &incremental_reused);
+                        parse_phase_us += static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - strict_parse_started).count());
+                        const auto strict_generation_started = std::chrono::steady_clock::now();
+                        candidates = generator.generate(
+                            parsed, result_limit, adaptive_ranking_enabled,
+                            decoded.message.context, &generation_metrics, cancelled);
+                        generation_phase_us += static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() -
+                                strict_generation_started).count());
+                        const auto strict_evidence = std::any_of(
+                            candidates.begin(), candidates.end(),
+                            [&parsed](const auto& candidate) {
+                                if (candidate.consumed_input_bytes !=
+                                    parsed.normalized_input.size()) return false;
+                                if (candidate.match_kind == engine::InputMatchKind::exact)
+                                    return true;
+                                std::size_t abbreviated_segments = 0;
+                                const auto shared = std::min(
+                                    candidate.source_segments.size(),
+                                    candidate.syllables.size());
+                                for (std::size_t index = 0; index < shared; ++index) {
+                                    if (candidate.source_segments[index].size() <
+                                        candidate.syllables[index].size())
+                                        ++abbreviated_segments;
+                                }
+                                // A short trailing prefix (nih -> ni+hao) is
+                                // already useful. Longer compact forms require
+                                // at least two independent abbreviation matches
+                                // (bugd -> bu+gan+dang) before they suppress typo
+                                // correction such as niaho -> ni+hao.
+                                return candidate.source_segments.size() <= 2 ||
+                                       abbreviated_segments >= 2;
+                            });
+                        correction_fallback = decoded.message.correction_enabled &&
+                                              (candidates.size() < result_size ||
+                                               !strict_evidence) &&
+                                              !cancelled();
+                        if (correction_fallback) {
+                            engine::FullPinyinParseMetrics corrected_parse_metrics;
+                            engine::CandidateGenerationMetrics corrected_generation_metrics;
+                            const auto corrected_parse_started =
+                                std::chrono::steady_clock::now();
+                            auto corrected = schema.parse(
+                                decoded.message.text, parse_path_limit, true,
+                                &corrected_parse_metrics, cancelled);
+                            parse_phase_us += static_cast<std::uint64_t>(
+                                std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() -
+                                    corrected_parse_started).count());
+                            const auto corrected_generation_started =
+                                std::chrono::steady_clock::now();
+                            auto corrected_candidates = generator.generate(
+                                corrected, result_limit, adaptive_ranking_enabled,
+                                decoded.message.context, &corrected_generation_metrics,
+                                cancelled);
+                            generation_phase_us += static_cast<std::uint64_t>(
+                                std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() -
+                                    corrected_generation_started).count());
+                            parse_metrics.normalization_us +=
+                                corrected_parse_metrics.normalization_us;
+                            parse_metrics.segmentation_us +=
+                                corrected_parse_metrics.segmentation_us;
+                            parse_metrics.correction_us +=
+                                corrected_parse_metrics.correction_us;
+                            generation_metrics.lexicon_lookup_us +=
+                                corrected_generation_metrics.lexicon_lookup_us;
+                            generation_metrics.lexicon_lookup_count +=
+                                corrected_generation_metrics.lexicon_lookup_count;
+                            generation_metrics.sort_us +=
+                                corrected_generation_metrics.sort_us;
+                            if (!corrected_candidates.empty()) {
+                                parsed = std::move(corrected);
+                                candidates = std::move(corrected_candidates);
+                            }
+                        }
+                        if (!cancelled())
+                            candidate_cache.put(cache_key, {parsed, candidates});
+                    }
+                    full_input_bytes = parsed.normalized_input.size();
+                    const auto generation_finished = std::chrono::steady_clock::now();
                     const auto end = std::min(candidates.size(), begin + result_size);
                     response.page = decoded.message.expanded ? 0 : decoded.message.page;
                     response.expanded = decoded.message.expanded;
                     response.page_size = candidate_page_size;
                     response.correction_enabled = decoded.message.correction_enabled;
                     response.has_more = candidates.size() > end;
-                    if (!candidates.empty())
-                        response.syllables = candidates.front().source_segments;
+                    // Preview the parser's preferred source structure. Auxiliary
+                    // abbreviation/correction paths may generate candidates, but
+                    // must not rewrite xing+b as xin+g+b or xing+ba+f as xing+baf.
+                    const auto request_cancelled = cancelled();
+                    if (!request_cancelled) {
+                        const auto candidate_segments = candidates.empty()
+                                                            ? std::vector<std::string>{}
+                                                            : candidates.front().source_segments;
+                        response.syllables = preferred_source_segmentation(
+                            parsed, candidate_segments, decoded.message.correction_enabled);
+                        if (response.syllables.empty())
+                            response.syllables = candidate_segments;
+                    }
                     if (begin < candidates.size()) {
                         response.candidates.reserve(end - begin);
                         response.candidate_consumed.reserve(end - begin);
@@ -380,28 +894,64 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                 candidates[index].consumed_input_bytes);
                         }
                     }
+                    const auto parse_us = parse_phase_us;
+                    const auto generation_us = generation_phase_us;
+                    const auto total_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        generation_finished - request_started).count();
+                    std::clog
+                        << R"({"process":"core_service","module":"candidate","level":"info","event_id":"candidate_generated","request_id":)"
+                        << decoded.message.request_id
+                        << R"(,"generation":)" << decoded.message.context_generation
+                        << R"(,"input_bytes":)" << decoded.message.text.size()
+                        << R"(,"parse_paths":)" << parsed.paths.size()
+                        << R"(,"candidate_count":)" << candidates.size()
+                        << R"(,"parse_us":)" << parse_us
+                        << R"(,"normalization_us":)" << parse_metrics.normalization_us
+                        << R"(,"segmentation_us":)" << parse_metrics.segmentation_us
+                        << R"(,"correction_us":)" << parse_metrics.correction_us
+                        << R"(,"generation_us":)" << generation_us
+                        << R"(,"lexicon_lookup_us":)" << generation_metrics.lexicon_lookup_us
+                        << R"(,"lexicon_lookup_count":)" << generation_metrics.lexicon_lookup_count
+                        << R"(,"sort_us":)" << generation_metrics.sort_us
+                        << R"(,"total_us":)" << total_us
+                        << R"(,"correction_enabled":)"
+                        << (decoded.message.correction_enabled ? "true" : "false")
+                        << R"(,"expanded":)" << (decoded.message.expanded ? "true" : "false")
+                        << R"(,"cancelled":)" << (request_cancelled ? "true" : "false")
+                        << R"(,"cache_hit":)" << (cache_hit ? "true" : "false")
+                        << R"(,"correction_fallback":)"
+                        << (correction_fallback ? "true" : "false")
+                        << R"(,"incremental_reused":)"
+                        << (incremental_reused ? "true" : "false")
+                        << "}\n";
                 }
                 // Transitional compatibility for the P1 TSF consumer. It is removed when
                 // TSF owns a paged candidate list later in P2.1.
                 if (!response.candidates.empty()) response.text = response.candidates.front();
-                if (model_ranking_enabled && !decoded.message.expanded &&
-                    !response.candidates.empty() &&
+                if (external_model_ranking_enabled && !response.candidates.empty() &&
                     model_requests.size() < 128) {
                     model::ModelMessage model_request;
                     model_request.type = model::ModelMessageType::rank_request;
                     model_request.status = model::ModelStatus::success;
                     model_request.request_id = decoded.message.request_id;
                     model_request.timeout_ms = model_timeout;
-                    model_request.model_id = "owo.mock.rank.v1";
+                    // An empty identifier selects the active ModelHost backend. Explicit
+                    // identifiers remain available to diagnostic clients.
+                    model_request.model_id.clear();
                     model_request.input = decoded.message.text;
+                    model_request.context = decoded.message.context;
                     model_request.candidates = response.candidates;
                     const auto original_candidates = response.candidates;
                     const auto original_consumed = response.candidate_consumed;
                     const std::wstring model_pipe(model_pipe_name);
+                    // Only the newest composition can affect the active TSF
+                    // window. Drop mappings for older generations before the
+                    // latest-only worker accepts the new ranking task.
+                    model_requests.clear();
                     model_requests.insert_or_assign(
                         model_key(decoded.message.request_id,
                                   decoded.message.context_generation),
-                        PendingModelRequest{std::async(std::launch::async,
+                        PendingModelRequest{model_queue.submit(
                                    [model_pipe, request = std::move(model_request), model_timeout] {
                             const auto exchanged = exchange(
                                 model_pipe.c_str(), model::encode_model_message(request),
@@ -412,15 +962,23 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                             return decoded_model.validation ? decoded_model.message
                                                             : model::ModelMessage{};
                         }), std::chrono::steady_clock::now(), original_candidates,
-                            original_consumed});
+                            original_consumed, full_input_bytes});
                     response.model_pending = true;
                 }
+                if (cancellation_event != nullptr) CloseHandle(cancellation_event);
             } else if (decoded.message.type == protocol::MessageType::candidate_committed) {
                 response.type = protocol::MessageType::acknowledgement;
                 response.text = "commit_ack";
                 if (user_frequency != nullptr && user_learning_enabled &&
                     !decoded.message.text.empty()) {
-                    user_frequency->record(decoded.message.text);
+                    const auto feedback = schema.parse(decoded.message.input, 1, false);
+                    if (feedback.valid)
+                        user_frequency->record(decoded.message.context,
+                                               feedback.normalized_input,
+                                               decoded.message.text);
+                    else
+                        user_frequency->record(decoded.message.text);
+                    ++learning_generation;
                     ++unflushed_selections;
                 }
                 if (unflushed_selections >= 32) {
@@ -440,9 +998,11 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
         const auto encoded = protocol::encode_message(response);
         if (!encoded.empty()) write_frame(pipe, encoded);
         FlushFileBuffers(pipe);
+        }
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
     }
+    if (ready_event != nullptr) CloseHandle(ready_event);
     return exit_code;
 }
 
@@ -474,19 +1034,30 @@ int run_core_server(const wchar_t* pipe_name) {
 
 int run_model_server(const wchar_t* pipe_name, model::IModelBackend& backend) {
     bool running = true;
+    bool ready_logged = false;
+    CurrentUserPipeSecurity pipe_security;
+    if (!pipe_security) return 2;
     while (running) {
         const HANDLE pipe = CreateNamedPipeW(
             pipe_name, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             1, protocol::kMaximumPayloadBytes + 4U, protocol::kMaximumPayloadBytes + 4U,
-            5000, nullptr);
+            5000, pipe_security.get());
         if (pipe == INVALID_HANDLE_VALUE) return 2;
+        if (!ready_logged) {
+            std::clog << R"({"process":"model_host","module":"startup","level":"info","event_id":"model_pipe_ready"})"
+                      << '\n';
+            ready_logged = true;
+        }
         const BOOL connected = ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
         if (!connected) {
             CloseHandle(pipe);
             continue;
         }
 
-        const auto decoded = model::decode_model_message(read_frame(pipe));
+        while (running) {
+        const auto request_json = read_frame(pipe);
+        if (request_json.empty()) break;
+        const auto decoded = model::decode_model_message(request_json);
         model::ModelMessage response;
         if (!decoded.validation) {
             response.type = model::ModelMessageType::error_response;
@@ -499,18 +1070,32 @@ int run_model_server(const wchar_t* pipe_name, model::IModelBackend& backend) {
                 response.status = model::ModelStatus::success;
                 running = false;
             } else if (decoded.message.type == model::ModelMessageType::rank_request) {
-                if (decoded.message.model_id != backend.id()) {
+                if (!decoded.message.model_id.empty() &&
+                    decoded.message.model_id != backend.id()) {
                     response.type = model::ModelMessageType::error_response;
                     response.status = model::ModelStatus::backend_error;
                     response.diagnostic = "model backend is unavailable";
                 } else {
+                    const auto rank_started = std::chrono::steady_clock::now();
                     model::ModelRequest request;
                     request.request_id = decoded.message.request_id;
-                    request.model_id = decoded.message.model_id;
+                    request.model_id = decoded.message.model_id.empty()
+                                           ? std::string(backend.id())
+                                           : decoded.message.model_id;
                     request.input = decoded.message.input;
+                    request.context = decoded.message.context;
                     request.candidates = decoded.message.candidates;
                     request.timeout = std::chrono::milliseconds(decoded.message.timeout_ms);
                     auto result = backend.rank(request, {});
+                    const auto rank_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - rank_started).count();
+                    std::clog
+                        << R"({"process":"model_host","module":"ranking","level":"info","event_id":"candidates_ranked","request_id":)"
+                        << decoded.message.request_id
+                        << R"(,"candidate_count":)" << decoded.message.candidates.size()
+                        << R"(,"rank_us":)" << rank_us
+                        << R"(,"status":)" << static_cast<unsigned>(result.status)
+                        << "}\n";
                     response.type = model::ModelMessageType::rank_response;
                     response.status = result.status;
                     response.candidates = std::move(result.candidates);
@@ -525,6 +1110,7 @@ int run_model_server(const wchar_t* pipe_name, model::IModelBackend& backend) {
         const auto encoded = model::encode_model_message(response);
         if (!encoded.empty()) write_frame(pipe, encoded);
         FlushFileBuffers(pipe);
+        }
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
     }

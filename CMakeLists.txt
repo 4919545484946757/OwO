@@ -4,6 +4,15 @@ project(OwOInputMethod VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
 
+# OwO.TSF.dll is an in-process COM server loaded into arbitrary applications.
+# A dynamically linked MSVC runtime can bind to an older private copy shipped
+# beside the host executable (QQNT, for example), mixing that runtime with the
+# toolset used to build OwO. Keep the native dependency closure self-contained
+# so host applications cannot substitute MSVCP/VCRUNTIME DLLs.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 option(OWO_ENABLE_ONNXRUNTIME "Enable ONNX Runtime only in ModelHost" OFF)
 set(OWO_ONNXRUNTIME_ROOT "" CACHE PATH "Extracted ONNX Runtime SDK root")
 option(OWO_ENABLE_ZLIB "Enable audited raw Deflate extraction in the plugin installer" OFF)
@@ -82,6 +91,7 @@ else()
 endif()
 
 add_library(owo_model STATIC
+    src/model/libime_backend.cpp
     src/model/model_assets.cpp
     src/model/model_backend.cpp
     src/model/model_inference.cpp
@@ -189,6 +199,7 @@ if(WIN32)
     add_library(owo_ipc STATIC src/ipc/named_pipe.cpp)
     target_include_directories(owo_ipc PUBLIC include)
     target_link_libraries(owo_ipc PUBLIC owo_protocol owo_engine owo_model owo_config)
+    target_link_libraries(owo_ipc PRIVATE advapi32)
     target_compile_features(owo_ipc PUBLIC cxx_std_20)
     target_compile_definitions(owo_ipc PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     if(MSVC)
@@ -200,6 +211,14 @@ if(WIN32)
     target_compile_features(owo_core_service PRIVATE cxx_std_20)
     if(MSVC)
         target_compile_options(owo_core_service PRIVATE /W4 /permissive- /utf-8 /EHsc)
+    endif()
+
+    add_executable(owo_runtime_launcher WIN32 apps/runtime_launcher/main.cpp)
+    target_compile_features(owo_runtime_launcher PRIVATE cxx_std_20)
+    target_compile_definitions(owo_runtime_launcher PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+                                                           UNICODE _UNICODE)
+    if(MSVC)
+        target_compile_options(owo_runtime_launcher PRIVATE /W4 /permissive- /utf-8 /EHsc)
     endif()
 
     add_executable(owo_ipc_shell apps/ipc_shell/main.cpp)
@@ -264,8 +283,8 @@ if(WIN32)
     target_include_directories(owo_tsf PRIVATE include src/tsf)
     target_compile_features(owo_tsf PRIVATE cxx_std_20)
     target_compile_definitions(owo_tsf PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
-    target_link_libraries(owo_tsf PRIVATE owo_ipc ole32 advapi32 uuid user32
-                                             d2d1 dwrite dwmapi)
+    target_link_libraries(owo_tsf PRIVATE owo_ipc ole32 oleaut32 advapi32 uuid user32
+                                             gdi32 d2d1 dwrite dwmapi)
     set_target_properties(owo_tsf PROPERTIES OUTPUT_NAME "OwO.TSF")
     if(MSVC)
         target_compile_options(owo_tsf PRIVATE /W4 /permissive- /utf-8)
@@ -438,6 +457,14 @@ if(BUILD_TESTING)
     target_link_libraries(owo_model_backend_tests PRIVATE owo_model)
     target_compile_features(owo_model_backend_tests PRIVATE cxx_std_20)
     add_test(NAME owo.model.backend COMMAND owo_model_backend_tests)
+    if(WIN32)
+        add_executable(owo_libime_context_tests tests/model/libime_context_tests.cpp)
+        target_link_libraries(owo_libime_context_tests PRIVATE owo_model)
+        target_compile_features(owo_libime_context_tests PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(owo_libime_context_tests PRIVATE /W4 /permissive- /utf-8)
+        endif()
+    endif()
     add_executable(owo_model_inference_tests tests/model/model_inference_tests.cpp)
     target_link_libraries(owo_model_inference_tests PRIVATE owo_model)
     target_compile_features(owo_model_inference_tests PRIVATE cxx_std_20)

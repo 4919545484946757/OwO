@@ -7,6 +7,10 @@
 using namespace std::chrono_literals;
 
 int main() {
+    const auto missing_libime =
+        owo::model::load_libime_backend("missing-owo-libime-bridge.dll", "missing.zh_CN.lm");
+    if (missing_libime || missing_libime.diagnostic.empty()) return 1;
+
     auto backend = std::make_shared<owo::model::MockModelBackend>();
     owo::model::AsyncModelScheduler scheduler(backend);
     auto success = scheduler.submit({1, "owo.mock.rank.v1", "sensitive-input", {"泥号", "你好"}, 100ms});

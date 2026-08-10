@@ -37,6 +37,8 @@ bool apply(owo::config::AppConfig& config, const std::wstring_view field,
         return parse_u32(value, config.candidate_page_size);
     if (field == L"candidate_wrap_length")
         return parse_u32(value, config.candidate_wrap_length);
+    if (field == L"user_learning_sensitivity")
+        return parse_u32(value, config.user_learning_sensitivity);
     if (field == L"model_timeout_ms") return parse_u32(value, config.model_timeout_ms);
     if (field == L"correction_shortcut")
         return parse_ascii(value, config.correction_shortcut);
@@ -63,7 +65,8 @@ void usage() {
     std::cerr << "usage: owo_config_shell <path> show | repair | set <field> <value> | "
                  "set-all <page-size> <learning> <ranking> <timeout-ms> "
                  "[<correction-enabled> <correction-key> <language-enabled> <language-key> "
-                 "<raw-enabled> <raw-key> [<candidate-wrap-length>]] | watch <timeout-ms>\n";
+                 "<raw-enabled> <raw-key> [<candidate-wrap-length> "
+                 "[<learning-sensitivity>]]] | watch <timeout-ms>\n";
 }
 
 }  // namespace
@@ -116,7 +119,7 @@ int wmain(const int argc, wchar_t** argv) {
         std::cout << "saved generation=" << saved.generation << '\n';
         return 0;
     }
-    if (command == L"set-all" && (argc == 7 || argc == 13 || argc == 14)) {
+    if (command == L"set-all" && (argc == 7 || argc == 13 || argc == 14 || argc == 15)) {
         owo::config::ConfigStore store;
         const auto loaded = store.load(path);
         if (!loaded.success) return 3;
@@ -132,7 +135,8 @@ int wmain(const int argc, wchar_t** argv) {
               !apply(value, L"language_shortcut", argv[10]) ||
               !apply(value, L"raw_input_shortcut_enabled", argv[11]) ||
               !apply(value, L"raw_input_shortcut", argv[12]))) ||
-            (argc == 14 && !apply(value, L"candidate_wrap_length", argv[13]))) {
+            (argc >= 14 && !apply(value, L"candidate_wrap_length", argv[13])) ||
+            (argc == 15 && !apply(value, L"user_learning_sensitivity", argv[14]))) {
             std::cerr << "invalid configuration value type\n";
             return 4;
         }

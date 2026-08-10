@@ -156,6 +156,8 @@ ConfigValidationResult validate_config(const AppConfig& value) {
         return {false, "candidate_page_size must be between 1 and 9"};
     if (value.candidate_wrap_length < 4 || value.candidate_wrap_length > 64)
         return {false, "candidate_wrap_length must be between 4 and 64"};
+    if (value.user_learning_sensitivity < 1 || value.user_learning_sensitivity > 10)
+        return {false, "user_learning_sensitivity must be between 1 and 10"};
     if (value.model_timeout_ms < 5 || value.model_timeout_ms > 500)
         return {false, "model_timeout_ms must be between 5 and 500"};
     if (!valid_shortcut(value.correction_shortcut) ||
@@ -210,9 +212,11 @@ ConfigParseResult parse_config(const std::string_view utf8) {
         "correction_shortcut", "language_shortcut_enabled", "language_shortcut",
         "raw_input_shortcut_enabled", "raw_input_shortcut"};
     constexpr std::string_view wrap_required[]{"candidate_wrap_length"};
+    constexpr std::string_view learning_required[]{"user_learning_sensitivity"};
     const auto expected_size = std::size(base_required) +
                                (version >= 2 ? std::size(shortcut_required) : 0) +
-                               (version >= 3 ? std::size(wrap_required) : 0);
+                               (version >= 3 ? std::size(wrap_required) : 0) +
+                               (version >= 4 ? std::size(learning_required) : 0);
     if (fields.size() != expected_size)
         return {false, {}, "configuration fields are missing or unknown"};
     for (const auto key : base_required)
@@ -224,6 +228,8 @@ ConfigParseResult parse_config(const std::string_view utf8) {
                 return {false, {}, "configuration fields are missing or unknown"};
     }
     if (version >= 3 && !fields.contains("candidate_wrap_length"))
+        return {false, {}, "configuration fields are missing or unknown"};
+    if (version >= 4 && !fields.contains("user_learning_sensitivity"))
         return {false, {}, "configuration fields are missing or unknown"};
     AppConfig value;
     if (!parse_u32(fields["candidate_page_size"], value.candidate_page_size) ||
@@ -246,6 +252,9 @@ ConfigParseResult parse_config(const std::string_view utf8) {
     if (version >= 3 &&
         !parse_u32(fields["candidate_wrap_length"], value.candidate_wrap_length))
         return {false, {}, "configuration field type is invalid"};
+    if (version >= 4 &&
+        !parse_u32(fields["user_learning_sensitivity"], value.user_learning_sensitivity))
+        return {false, {}, "configuration field type is invalid"};
     const auto validation = validate_config(value);
     if (!validation.ok) return {false, {}, validation.diagnostic};
     return {true, value, {}};
@@ -257,6 +266,8 @@ std::string serialize_config(const AppConfig& value) {
            "\ncandidate_page_size=" + std::to_string(value.candidate_page_size) +
            "\ncandidate_wrap_length=" + std::to_string(value.candidate_wrap_length) +
            "\nuser_learning_enabled=" + (value.user_learning_enabled ? std::string("true") : "false") +
+           "\nuser_learning_sensitivity=" +
+               std::to_string(value.user_learning_sensitivity) +
            "\nmodel_ranking_enabled=" + (value.model_ranking_enabled ? std::string("true") : "false") +
            "\nmodel_timeout_ms=" + std::to_string(value.model_timeout_ms) +
            "\ncorrection_shortcut_enabled=" +

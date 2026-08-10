@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <functional>
 #include <iterator>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace owo::engine {
@@ -93,6 +95,26 @@ struct ChunkPath {
     bool incomplete{};
 };
 
+std::size_t internal_vowel_initials(const ChunkPath& path) {
+    constexpr std::string_view vowels = "aeiouv";
+    std::size_t count = 0;
+    for (std::size_t index = 1; index < path.syllables.size(); ++index) {
+        const auto& text = path.syllables[index].text;
+        if (!text.empty() && vowels.find(text.front()) != std::string_view::npos) ++count;
+    }
+    return count;
+}
+
+bool chunk_path_less(const ChunkPath& left, const ChunkPath& right) {
+    if (left.incomplete != right.incomplete) return !left.incomplete;
+    if (left.syllables.size() != right.syllables.size())
+        return left.syllables.size() < right.syllables.size();
+    const auto left_vowels = internal_vowel_initials(left);
+    const auto right_vowels = internal_vowel_initials(right);
+    if (left_vowels != right_vowels) return left_vowels < right_vowels;
+    return false;
+}
+
 bool assisted_path_less(const ParsePath& left, const ParsePath& right) {
     if (left.syllables.size() != right.syllables.size())
         return left.syllables.size() < right.syllables.size();
@@ -136,45 +158,19 @@ bool substitution_allowed(const char expected, const char actual) {
            std::abs(left->column - right->column) <= 2;
 }
 
-enum class EditRelation { none, exact, corrected };
-
-EditRelation one_edit_relation(const std::string_view expected,
-                               const std::string_view actual) {
-    if (expected == actual) return EditRelation::exact;
-    if (expected.size() == actual.size()) {
-        std::array<std::size_t, 2> mismatch{};
-        std::size_t count = 0;
-        for (std::size_t index = 0; index < expected.size(); ++index) {
-            if (expected[index] == actual[index]) continue;
-            if (count == mismatch.size()) return EditRelation::none;
-            mismatch[count++] = index;
+const std::vector<std::string_view>& syllable_prefix_matches(
+    const std::string_view prefix) {
+    static const auto table = [] {
+        std::unordered_map<std::string, std::vector<std::string_view>> result;
+        for (const auto syllable : kSyllables) {
+            for (std::size_t size = 1; size <= syllable.size(); ++size)
+                result[std::string(syllable.substr(0, size))].push_back(syllable);
         }
-        if (count == 1 && substitution_allowed(expected[mismatch[0]], actual[mismatch[0]]))
-            return EditRelation::corrected;
-        if (count == 2 && mismatch[1] == mismatch[0] + 1 &&
-            expected[mismatch[0]] == actual[mismatch[1]] &&
-            expected[mismatch[1]] == actual[mismatch[0]]) return EditRelation::corrected;
-        return EditRelation::none;
-    }
-    if (expected.size() + 1 != actual.size() && actual.size() + 1 != expected.size())
-        return EditRelation::none;
-    const auto longer = expected.size() > actual.size() ? expected : actual;
-    const auto shorter = expected.size() > actual.size() ? actual : expected;
-    std::size_t long_index = 0;
-    std::size_t short_index = 0;
-    bool skipped = false;
-    while (long_index < longer.size() && short_index < shorter.size()) {
-        if (longer[long_index] == shorter[short_index]) {
-            ++long_index;
-            ++short_index;
-        } else if (!skipped) {
-            skipped = true;
-            ++long_index;
-        } else {
-            return EditRelation::none;
-        }
-    }
-    return EditRelation::corrected;
+        return result;
+    }();
+    static const std::vector<std::string_view> empty;
+    const auto found = table.find(std::string(prefix));
+    return found == table.end() ? empty : found->second;
 }
 
 void append_incomplete_completions(const std::vector<ParsePath>& base_paths,
@@ -201,8 +197,8 @@ void append_incomplete_completions(const std::vector<ParsePath>& base_paths,
             }
             const auto index = incomplete[position];
             const auto prefix = base.syllables[index].text;
-            for (const auto syllable : kSyllables) {
-                if (syllable.size() <= prefix.size() || !syllable.starts_with(prefix)) continue;
+            for (const auto syllable : syllable_prefix_matches(prefix)) {
+                if (syllable.size() <= prefix.size()) continue;
                 current.syllables[index].text = std::string(syllable);
                 current.syllables[index].complete = true;
                 current.completion_characters +=
@@ -269,8 +265,7 @@ void append_abbreviated_completions(const std::string_view normalized,
             const auto maximum = std::min<std::size_t>(6, normalized.size() - offset);
             for (std::size_t consumed = maximum; consumed > 0; --consumed) {
                 const auto prefix = normalized.substr(offset, consumed);
-                for (const auto syllable : kSyllables) {
-                    if (syllable.size() < prefix.size() || !syllable.starts_with(prefix)) continue;
+                for (const auto syllable : syllable_prefix_matches(prefix)) {
                     ParsePath next = state;
                     next.syllables.push_back({std::string(syllable), offset,
                                               offset + consumed, true});
@@ -299,78 +294,165 @@ struct FuzzyToken {
     bool corrected{};
 };
 
+const std::unordered_map<std::string, std::vector<FuzzyToken>>& fuzzy_token_table() {
+    static const auto table = [] {
+        std::unordered_map<std::string, std::vector<FuzzyToken>> result;
+        const auto add = [&result](std::string source, const std::string_view syllable,
+                                   const bool corrected) {
+            if (source.empty()) return;
+            result[std::move(source)].push_back(
+                {syllable, 0, corrected});
+        };
+        for (const auto syllable : kSyllables) {
+            add(std::string(syllable), syllable, false);
+            for (std::size_t index = 0; index < syllable.size(); ++index) {
+                auto deleted = std::string(syllable);
+                deleted.erase(index, 1);
+                add(std::move(deleted), syllable, true);
+                for (char actual = 'a'; actual <= 'z'; ++actual) {
+                    if (actual == syllable[index] ||
+                        !substitution_allowed(syllable[index], actual)) continue;
+                    auto substituted = std::string(syllable);
+                    substituted[index] = actual;
+                    add(std::move(substituted), syllable, true);
+                }
+                if (index + 1 < syllable.size() &&
+                    syllable[index] != syllable[index + 1]) {
+                    auto transposed = std::string(syllable);
+                    std::swap(transposed[index], transposed[index + 1]);
+                    add(std::move(transposed), syllable, true);
+                }
+            }
+            for (std::size_t index = 0; index <= syllable.size(); ++index) {
+                for (char inserted = 'a'; inserted <= 'z'; ++inserted) {
+                    auto source = std::string(syllable);
+                    source.insert(source.begin() + static_cast<std::ptrdiff_t>(index), inserted);
+                    add(std::move(source), syllable, true);
+                }
+            }
+        }
+        for (auto& [source, matches] : result) {
+            for (auto& match : matches) match.consumed = source.size();
+            std::sort(matches.begin(), matches.end(), [](const auto& left, const auto& right) {
+                if (left.corrected != right.corrected) return !left.corrected;
+                return left.syllable < right.syllable;
+            });
+            matches.erase(std::unique(matches.begin(), matches.end(), [](const auto& left,
+                                                                         const auto& right) {
+                return left.syllable == right.syllable &&
+                       left.corrected == right.corrected;
+            }), matches.end());
+        }
+        return result;
+    }();
+    return table;
+}
+
 std::vector<FuzzyToken> fuzzy_tokens(const std::string_view input,
                                      const std::size_t offset) {
     std::vector<FuzzyToken> matches;
     const auto remaining = input.size() - offset;
-    for (const auto syllable : kSyllables) {
-        const auto minimum = syllable.size() > 1 ? syllable.size() - 1 : 1;
-        const auto maximum = syllable.size() + 1;
-        for (std::size_t consumed = minimum; consumed <= maximum && consumed <= remaining;
-             ++consumed) {
-            const auto relation = one_edit_relation(syllable, input.substr(offset, consumed));
-            if (relation == EditRelation::none) continue;
-            matches.push_back({syllable, consumed, relation == EditRelation::corrected});
-        }
+    const auto& table = fuzzy_token_table();
+    const auto maximum = std::min<std::size_t>(7, remaining);
+    for (std::size_t consumed = maximum; consumed > 0; --consumed) {
+        const auto found = table.find(std::string(input.substr(offset, consumed)));
+        if (found == table.end()) continue;
+        matches.insert(matches.end(), found->second.begin(), found->second.end());
     }
-    std::sort(matches.begin(), matches.end(), [](const FuzzyToken& left, const FuzzyToken& right) {
-        // The exact parser already preserves every unmodified path. Within the
-        // correction search, consuming more source text first avoids spending
-        // the bounded path budget on variants that keep a stray tail syllable.
-        if (left.consumed != right.consumed) return left.consumed > right.consumed;
-        if (left.corrected != right.corrected) return !left.corrected;
-        return left.syllable < right.syllable;
-    });
-    matches.erase(std::unique(matches.begin(), matches.end(), [](const auto& left, const auto& right) {
-        return left.syllable == right.syllable && left.consumed == right.consumed &&
-               left.corrected == right.corrected;
-    }), matches.end());
     return matches;
 }
 
 void append_corrected_paths(const std::string_view normalized,
                             std::vector<ParsePath>& paths,
                             const std::size_t max_paths,
-                            const std::size_t exclusive_syllable_limit) {
+                            const std::size_t exclusive_syllable_limit,
+                            const std::function<bool()>& cancelled) {
     constexpr std::size_t kMaximumCorrectedInputBytes = 128;
     constexpr std::size_t kMinimumCorrectedInputBytes = 3;
     if (normalized.size() < kMinimumCorrectedInputBytes ||
         normalized.size() > kMaximumCorrectedInputBytes ||
         normalized.find('\'') != std::string_view::npos || paths.size() >= max_paths ||
         exclusive_syllable_limit <= 1) return;
-    ParsePath current;
-    current.match_kind = InputMatchKind::corrected;
-    current.edit_count = 1;
-    std::function<void(std::size_t, bool)> visit = [&](const std::size_t offset,
-                                                       const bool already_corrected) {
-        if (paths.size() >= max_paths) return;
-        if (offset == normalized.size()) {
-            if (already_corrected && current.syllables.size() < exclusive_syllable_limit)
-                paths.push_back(current);
-            return;
-        }
-        if (current.syllables.size() + 1 >= exclusive_syllable_limit) return;
-        for (const auto& token : fuzzy_tokens(normalized, offset)) {
-            if (already_corrected && token.corrected) continue;
-            current.syllables.push_back({std::string(token.syllable), offset,
-                                         offset + token.consumed, true});
-            visit(offset + token.consumed, already_corrected || token.corrected);
-            current.syllables.pop_back();
-            if (paths.size() >= max_paths) break;
-        }
+    // Fuzzy token discovery depends only on the source offset. Cache it and
+    // use a bounded chart rather than recursively enumerating every exact
+    // segmentation before the single corrected token. Long inputs otherwise
+    // become exponential even though only a handful of paths are returned.
+    std::vector<std::optional<std::vector<FuzzyToken>>> token_cache(normalized.size());
+    const auto tokens_at = [&](const std::size_t offset) -> const std::vector<FuzzyToken>& {
+        auto& cached = token_cache[offset];
+        if (!cached.has_value()) cached = fuzzy_tokens(normalized, offset);
+        return *cached;
     };
-    visit(0, false);
+    struct CorrectionState {
+        ParsePath path;
+        bool corrected{};
+    };
+    const auto beam_width = std::max<std::size_t>(
+        8, std::min<std::size_t>(32, std::min<std::size_t>(max_paths, 16) * 2));
+    const auto prune_states = [beam_width](std::vector<CorrectionState>& states) {
+        std::stable_sort(states.begin(), states.end(), [](const auto& left, const auto& right) {
+            if (left.path.syllables.size() != right.path.syllables.size())
+                return left.path.syllables.size() < right.path.syllables.size();
+            return assisted_reading_key(left.path) < assisted_reading_key(right.path);
+        });
+        std::vector<CorrectionState> retained;
+        retained.reserve(std::min(states.size(), beam_width * 2));
+        std::unordered_set<std::string> seen;
+        std::array<std::size_t, 2> counts{};
+        for (auto& state : states) {
+            const auto bucket = state.corrected ? 1U : 0U;
+            if (counts[bucket] >= beam_width) continue;
+            auto key = assisted_reading_key(state.path);
+            key.push_back(state.corrected ? '1' : '0');
+            if (!seen.insert(std::move(key)).second) continue;
+            ++counts[bucket];
+            retained.push_back(std::move(state));
+        }
+        states = std::move(retained);
+    };
+
+    std::vector<std::vector<CorrectionState>> chart(normalized.size() + 1);
+    ParsePath initial;
+    initial.match_kind = InputMatchKind::corrected;
+    initial.edit_count = 1;
+    chart[0].push_back({std::move(initial), false});
+    for (std::size_t offset = 0; offset < normalized.size(); ++offset) {
+        if ((cancelled && cancelled()) || chart[offset].empty()) continue;
+        prune_states(chart[offset]);
+        for (const auto& state : chart[offset]) {
+            if (state.path.syllables.size() + 1 >= exclusive_syllable_limit) continue;
+            for (const auto& token : tokens_at(offset)) {
+                if (state.corrected && token.corrected) continue;
+                CorrectionState next = state;
+                next.corrected = state.corrected || token.corrected;
+                next.path.syllables.push_back({std::string(token.syllable), offset,
+                                               offset + token.consumed, true});
+                auto& destination = chart[offset + token.consumed];
+                destination.push_back(std::move(next));
+                if (destination.size() >= beam_width * 8) prune_states(destination);
+            }
+        }
+    }
+    auto& completed = chart.back();
+    prune_states(completed);
+    for (auto& state : completed) {
+        if (!state.corrected || state.path.syllables.size() >= exclusive_syllable_limit)
+            continue;
+        paths.push_back(std::move(state.path));
+        if (paths.size() >= max_paths) break;
+    }
 }
 
 std::vector<ChunkPath> parse_chunk(const std::string_view normalized,
                                    const std::size_t begin,
                                    const std::size_t end,
                                    const std::size_t max_paths,
-                                   const bool allow_incomplete) {
+                                   const bool allow_incomplete,
+                                   const std::function<bool()>& cancelled) {
     std::vector<ChunkPath> paths;
     std::vector<Syllable> current;
     std::function<void(std::size_t)> visit = [&](const std::size_t offset) {
-        if (paths.size() >= max_paths) return;
+        if ((cancelled && cancelled()) || paths.size() >= max_paths) return;
         if (offset == end) {
             paths.push_back({current, false});
             return;
@@ -396,10 +478,126 @@ std::vector<ChunkPath> parse_chunk(const std::string_view normalized,
         }
     };
     visit(begin);
+
+    // Without an explicit apostrophe, prefer the complete interpretation that
+    // uses the fewest syllables. Thus "lan" remains lan instead of la+n and
+    // "duo" remains duo instead of du+o. Keep incomplete paths only when they
+    // use the same number of source segments: this retains zhong+gu ->
+    // zhong+guo without reintroducing la+n prefix candidates.
+    const auto complete = std::min_element(paths.begin(), paths.end(), chunk_path_less);
+    if (complete != paths.end() && !complete->incomplete) {
+        const auto minimum = complete->syllables.size();
+        const bool explicit_single_syllable = minimum == 1 && end - begin > 1;
+        std::erase_if(paths, [minimum, explicit_single_syllable](const ChunkPath& path) {
+            // A complete one-syllable input is an explicit reading, not an
+            // unfinished prefix: lin must not reserve candidate slots for
+            // ling, nor bin for bing. Multi-syllable trailing completion is
+            // still useful (for example zhong+gu -> zhong+guo).
+            return path.syllables.size() > minimum ||
+                   (explicit_single_syllable && path.incomplete);
+        });
+    }
+    std::stable_sort(paths.begin(), paths.end(), chunk_path_less);
     return paths;
 }
 
 }  // namespace
+
+FullPinyinSchema::FullPinyinSchema() {
+    // Pay the immutable prefix/edit-table construction cost at service startup
+    // instead of on the first user typo.
+    static_cast<void>(syllable_prefix_matches("a"));
+    static_cast<void>(fuzzy_token_table());
+}
+
+ParseResult FullPinyinSchema::parse_incremental(
+    const std::string_view input, const std::size_t max_paths,
+    FullPinyinIncrementalState& state, FullPinyinParseMetrics* const metrics,
+    const std::function<bool()>& cancelled, bool* const reused) const {
+    if (reused != nullptr) *reused = false;
+    std::string normalized;
+    normalized.reserve(input.size());
+    for (const unsigned char character : input) {
+        if (character == '\'' || (character >= 'a' && character <= 'z'))
+            normalized.push_back(static_cast<char>(character));
+        else if (character >= 'A' && character <= 'Z')
+            normalized.push_back(static_cast<char>(std::tolower(character)));
+        else {
+            auto result = parse(input, max_paths, false, metrics, cancelled);
+            state = {std::string(input), result, max_paths};
+            return result;
+        }
+    }
+
+    const auto& previous = state.result;
+    bool eligible = max_paths != 0 && state.max_paths == max_paths &&
+                    previous.valid && !previous.paths.empty() &&
+                    normalized.size() == previous.normalized_input.size() + 1 &&
+                    normalized.starts_with(previous.normalized_input) &&
+                    normalized.find('\'') == std::string::npos;
+    std::vector<Syllable> stable_prefix;
+    if (eligible) {
+        const auto& preferred = previous.paths.front().syllables;
+        for (std::size_t index = 0; index < preferred.size(); ++index) {
+            const auto& syllable = preferred[index];
+            if (!syllable.complete || syllable.end >= previous.normalized_input.size()) break;
+            const bool common = std::all_of(
+                previous.paths.begin() + 1, previous.paths.end(),
+                [index, &syllable](const ParsePath& path) {
+                    return index < path.syllables.size() &&
+                           path.syllables[index] == syllable;
+                });
+            if (!common) break;
+            stable_prefix.push_back(syllable);
+        }
+        eligible = !stable_prefix.empty();
+    }
+
+    const auto boundary = stable_prefix.empty() ? 0 : stable_prefix.back().end;
+    if (eligible) {
+        // Appending a character may turn text immediately before the reused
+        // boundary into a longer legal syllable. In that case the old prefix
+        // is not stable and a complete parse is required.
+        const auto earliest = boundary > 5 ? boundary - 5 : 0;
+        for (std::size_t begin = earliest; begin < boundary && eligible; ++begin) {
+            const auto maximum_end = std::min(normalized.size(), begin + 6);
+            for (std::size_t end = boundary + 1; end <= maximum_end; ++end) {
+                const auto token = std::string_view(normalized).substr(begin, end - begin);
+                if (is_complete(token) || is_prefix(token)) {
+                    eligible = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    ParseResult result;
+    if (eligible && !(cancelled && cancelled())) {
+        auto suffix = parse(std::string_view(normalized).substr(boundary), max_paths,
+                            false, metrics, cancelled);
+        if (suffix.valid) {
+            result.normalized_input = normalized;
+            result.has_incomplete_syllable = suffix.has_incomplete_syllable;
+            result.paths.reserve(suffix.paths.size());
+            for (auto& suffix_path : suffix.paths) {
+                for (auto& syllable : suffix_path.syllables) {
+                    syllable.begin += boundary;
+                    syllable.end += boundary;
+                }
+                ParsePath combined = suffix_path;
+                combined.syllables.insert(combined.syllables.begin(),
+                                          stable_prefix.begin(), stable_prefix.end());
+                result.paths.push_back(std::move(combined));
+            }
+            result.valid = !result.paths.empty();
+            if (result.valid && reused != nullptr) *reused = true;
+        }
+    }
+    if (!result.valid)
+        result = parse(input, max_paths, false, metrics, cancelled);
+    state = {std::string(input), result, max_paths};
+    return result;
+}
 
 ParseResult FullPinyinSchema::parse(const std::string_view input,
                                     const std::size_t max_paths) const {
@@ -409,6 +607,15 @@ ParseResult FullPinyinSchema::parse(const std::string_view input,
 ParseResult FullPinyinSchema::parse(const std::string_view input,
                                     const std::size_t max_paths,
                                     const bool correction_enabled) const {
+    return parse(input, max_paths, correction_enabled, nullptr);
+}
+
+ParseResult FullPinyinSchema::parse(const std::string_view input,
+                                    const std::size_t max_paths,
+                                    const bool correction_enabled,
+                                    FullPinyinParseMetrics* const metrics,
+                                    const std::function<bool()>& cancelled) const {
+    const auto normalization_started = std::chrono::steady_clock::now();
     ParseResult result;
     if (input.empty() || max_paths == 0) return result;
 
@@ -424,16 +631,18 @@ ParseResult FullPinyinSchema::parse(const std::string_view input,
     }
     if (result.normalized_input.front() == '\'' || result.normalized_input.back() == '\'' ||
         result.normalized_input.find("''") != std::string::npos) return result;
+    const auto normalization_finished = std::chrono::steady_clock::now();
 
     std::vector<ParsePath> combined(1);
     bool any_incomplete = false;
     bool base_valid = true;
     std::size_t chunk_begin = 0;
     while (chunk_begin < result.normalized_input.size()) {
+        if (cancelled && cancelled()) return result;
         const auto separator = result.normalized_input.find('\'', chunk_begin);
         const auto chunk_end = separator == std::string::npos ? result.normalized_input.size() : separator;
         auto chunk_paths = parse_chunk(result.normalized_input, chunk_begin, chunk_end,
-                                       max_paths, true);
+                                       max_paths, true, cancelled);
         if (separator != std::string::npos &&
             std::any_of(chunk_paths.begin(), chunk_paths.end(),
                         [](const ChunkPath& path) { return !path.incomplete; })) {
@@ -461,9 +670,22 @@ ParseResult FullPinyinSchema::parse(const std::string_view input,
         if (separator == std::string::npos) break;
         chunk_begin = separator + 1;
     }
+    const auto segmentation_finished = std::chrono::steady_clock::now();
 
     if (base_valid) result.paths = std::move(combined);
     const auto base_paths = result.paths;
+    const bool long_stable_trailing_prefix = result.normalized_input.size() >= 12 &&
+        std::any_of(base_paths.begin(), base_paths.end(), [](const ParsePath& path) {
+            if (path.syllables.size() < 3 || path.syllables.back().complete) return false;
+            constexpr std::string_view vowels = "aeiouv";
+            for (std::size_t index = 0; index + 1 < path.syllables.size(); ++index) {
+                const auto& syllable = path.syllables[index];
+                if (!syllable.complete || syllable.text.empty()) return false;
+                if (index != 0 && vowels.find(syllable.text.front()) != std::string_view::npos)
+                    return false;
+            }
+            return true;
+        });
     std::size_t corrected_syllable_limit = std::numeric_limits<std::size_t>::max();
     for (const auto& path : base_paths) {
         if (std::any_of(path.syllables.begin(), path.syllables.end(),
@@ -480,16 +702,22 @@ ParseResult FullPinyinSchema::parse(const std::string_view input,
         }
     } else {
         std::vector<ParsePath> abbreviated_paths;
-        append_abbreviated_completions(result.normalized_input, abbreviated_paths, max_paths);
+        if (!long_stable_trailing_prefix)
+            append_abbreviated_completions(result.normalized_input, abbreviated_paths, max_paths);
         incomplete_paths.insert(incomplete_paths.end(),
                                 std::make_move_iterator(abbreviated_paths.begin()),
                                 std::make_move_iterator(abbreviated_paths.end()));
         prune_assisted_paths(incomplete_paths, max_paths, true);
 
         std::vector<ParsePath> corrected_paths;
-        if (correction_enabled)
+        const auto correction_started = std::chrono::steady_clock::now();
+        if (correction_enabled && !long_stable_trailing_prefix)
             append_corrected_paths(result.normalized_input, corrected_paths, max_paths,
-                                   corrected_syllable_limit);
+                                   corrected_syllable_limit, cancelled);
+        if (metrics != nullptr)
+            metrics->correction_us += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - correction_started).count());
 
         // Raw incomplete paths cannot produce candidates. Retain one for
         // diagnostics, then reserve a bounded correction slice so a broad
@@ -534,7 +762,12 @@ ParseResult FullPinyinSchema::parse(const std::string_view input,
         result.paths.push_back(std::move(initials));
         any_incomplete = true;
     }
-    if (result.paths.empty() && result.normalized_input.size() <= 256) {
+    // An explicit apostrophe is a user-authored syllable boundary. If one of
+    // its chunks is invalid, do not discard that boundary and reinterpret the
+    // entire input as unrelated single-letter readings (for example,
+    // quan'loi must not become q'u'a'n'l'o'i when correction is disabled).
+    if (result.paths.empty() && result.normalized_input.size() <= 256 &&
+        result.normalized_input.find('\'') == std::string::npos) {
         ParsePath fallback;
         fallback.match_kind = InputMatchKind::abbreviated_completion;
         fallback.syllables.reserve(result.normalized_input.size());
@@ -555,6 +788,14 @@ ParseResult FullPinyinSchema::parse(const std::string_view input,
     }
     result.valid = !result.paths.empty();
     result.has_incomplete_syllable = any_incomplete;
+    if (metrics != nullptr) {
+        metrics->normalization_us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                normalization_finished - normalization_started).count());
+        metrics->segmentation_us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                segmentation_finished - normalization_finished).count());
+    }
     return result;
 }
 

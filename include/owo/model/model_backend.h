@@ -19,6 +19,7 @@ struct ModelRequest {
     std::string input;
     std::vector<std::string> candidates;
     std::chrono::milliseconds timeout{100};
+    std::string context;
 };
 
 struct ModelResult {
@@ -72,6 +73,16 @@ public:
 private:
     MockBackendOptions options_;
 };
+
+struct LibimeBackendLoadResult {
+    std::unique_ptr<IModelBackend> backend;
+    std::string diagnostic;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return backend != nullptr; }
+};
+
+[[nodiscard]] LibimeBackendLoadResult load_libime_backend(std::string_view bridge_path,
+                                                          std::string_view model_path);
 
 class AsyncModelScheduler final : public IModelScheduler {
 public:

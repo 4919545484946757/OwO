@@ -71,17 +71,40 @@ int main() {
     std::jthread server([&server_exit, &lexicon, &user_frequency, &pipe_name] {
         server_exit = owo::ipc::run_core_server(pipe_name.c_str(), lexicon, &user_frequency);
     });
-    const auto first = send_request(pipe_name, {owo::protocol::MessageType::candidate_request, 101, 7, "nihao"});
-    const auto second = send_request(pipe_name, {owo::protocol::MessageType::candidate_request, 102, 8, "nihao"});
+    owo::ipc::PersistentPipeClient persistent(pipe_name);
+    const auto first = owo::protocol::decode_message(persistent.exchange(
+        owo::protocol::encode_message({owo::protocol::MessageType::candidate_request,
+                                       101, 7, "nihao"}),
+        std::chrono::seconds(2)).response);
+    const auto second = owo::protocol::decode_message(persistent.exchange(
+        owo::protocol::encode_message({owo::protocol::MessageType::candidate_request,
+                                       102, 8, "nihao"}),
+        std::chrono::seconds(2)).response);
+    persistent.reset();
     const auto nihao_ranged = send_request(
         pipe_name, {owo::protocol::MessageType::candidate_request,
                     108, 8, "ni'hao'shi'jie"});
     const auto corrected = send_request(
         pipe_name, {owo::protocol::MessageType::candidate_request, 110, 8, "niaho"});
+    const auto stable_xingb = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 112, 8, "xingb"});
+    const auto stable_xingbaf = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 113, 8, "xingbaf"});
+    const auto stable_mingd = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 116, 8, "mingd"});
+    const auto stable_kenengd = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 117, 8, "kenengd"});
     owo::protocol::Message correction_disabled_request{
         owo::protocol::MessageType::candidate_request, 111, 8, "niaho"};
     correction_disabled_request.correction_enabled = false;
     const auto correction_disabled = send_request(pipe_name, correction_disabled_request);
+    owo::protocol::Message separated_correction_disabled_request{
+        owo::protocol::MessageType::candidate_request, 114, 8, "quan'loi"};
+    separated_correction_disabled_request.correction_enabled = false;
+    const auto separated_correction_disabled = send_request(
+        pipe_name, separated_correction_disabled_request);
+    const auto separated_correction_enabled = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 115, 8, "quan'loi"});
     bool commits_ok = true;
     for (std::uint64_t request = 0; request < 5; ++request) {
         const auto committed = send_request(pipe_name, {owo::protocol::MessageType::candidate_committed,
@@ -119,10 +142,34 @@ int main() {
         nihao_ranged.message.candidate_consumed !=
             std::vector<std::uint64_t>{14, 6, 6, 14} ||
         !valid_response(corrected, 110, 8, {"你好", "你号"}, {"ni", "aho"}) ||
+        !stable_xingb.validation ||
+        stable_xingb.message.syllables != std::vector<std::string>{"xing", "b"} ||
+        !stable_xingbaf.validation ||
+        stable_xingbaf.message.syllables !=
+            std::vector<std::string>{"xing", "ba", "f"} ||
+        !stable_mingd.validation ||
+        stable_mingd.message.syllables != std::vector<std::string>{"ming", "d"} ||
+        !stable_kenengd.validation ||
+        stable_kenengd.message.syllables !=
+            std::vector<std::string>{"ke", "neng", "d"} ||
         !correction_disabled.validation ||
         correction_disabled.message.type != owo::protocol::MessageType::candidate_response ||
         correction_disabled.message.correction_enabled ||
         !correction_disabled.message.candidates.empty() ||
+        !separated_correction_disabled.validation ||
+        separated_correction_disabled.message.type !=
+            owo::protocol::MessageType::candidate_response ||
+        separated_correction_disabled.message.correction_enabled ||
+        !separated_correction_disabled.message.candidates.empty() ||
+        separated_correction_disabled.message.syllables !=
+            std::vector<std::string>{"quan", "loi"} ||
+        !separated_correction_enabled.validation ||
+        separated_correction_enabled.message.type !=
+            owo::protocol::MessageType::candidate_response ||
+        !separated_correction_enabled.message.correction_enabled ||
+        !separated_correction_enabled.message.candidates.empty() ||
+        separated_correction_enabled.message.syllables !=
+            std::vector<std::string>{"quan", "loi"} ||
         !valid_response(first_page, 106, 8,
                         {"测试一", "测试二", "测试三", "测试四", "测试五"},
                         {"ce", "shi"}) ||

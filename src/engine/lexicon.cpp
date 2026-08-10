@@ -27,13 +27,21 @@ std::vector<LexiconEntry> MemoryLexicon::lookup(
     return matches;
 }
 
-std::vector<LexiconEntry> MemoryLexicon::lookup_initial(const char initial) const {
+std::vector<LexiconEntry> MemoryLexicon::lookup_initial(const char initial,
+                                                        const std::size_t limit) const {
     std::vector<LexiconEntry> matches;
     for (const auto& entry : entries_) {
         if (entry.syllables.size() == 1 && !entry.syllables.front().empty() &&
             entry.syllables.front().front() == initial)
             matches.push_back(entry);
     }
+    std::sort(matches.begin(), matches.end(), [](const auto& left, const auto& right) {
+        if (left.frequency != right.frequency) return left.frequency > right.frequency;
+        if (left.syllables.front().size() != right.syllables.front().size())
+            return left.syllables.front().size() < right.syllables.front().size();
+        return left.text < right.text;
+    });
+    if (matches.size() > limit) matches.resize(limit);
     return matches;
 }
 

@@ -2,8 +2,8 @@
 <Page x:Class="OwO_Settings.MainPage"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-      KeyDown="Page_KeyDown"
-      KeyUp="Page_KeyUp">
+      PreviewKeyDown="Page_KeyDown"
+      PreviewKeyUp="Page_KeyUp">
     <ScrollViewer>
         <StackPanel MaxWidth="720" Padding="32" Spacing="20" HorizontalAlignment="Left">
             <TextBlock Text="OwO 输入法设置" Style="{StaticResource TitleTextBlockStyle}" />
@@ -17,7 +17,7 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="每页候选数" VerticalAlignment="Center" />
                 <NumberBox x:Name="CandidatePageSize" Grid.Row="0" Grid.Column="1"
@@ -27,12 +27,18 @@
                            Minimum="4" Maximum="64" SpinButtonPlacementMode="Inline" />
                 <TextBlock Grid.Row="2" Text="用户词频学习" VerticalAlignment="Center" />
                 <ToggleSwitch x:Name="UserLearning" Grid.Row="2" Grid.Column="1" />
-                <TextBlock Grid.Row="3" Text="智能模型排序" VerticalAlignment="Center" />
-                <ToggleSwitch x:Name="ModelRanking" Grid.Row="3" Grid.Column="1" />
-                <TextBlock Grid.Row="4" Text="模型预算（毫秒）" VerticalAlignment="Center" />
-                <NumberBox x:Name="ModelTimeout" Grid.Row="4" Grid.Column="1"
+                <TextBlock Grid.Row="3" Text="词频学习灵敏度（1–10）" VerticalAlignment="Center" />
+                <NumberBox x:Name="UserLearningSensitivity" Grid.Row="3" Grid.Column="1"
+                           Minimum="1" Maximum="10" SpinButtonPlacementMode="Inline" />
+                <TextBlock Grid.Row="4" Text="智能排序（本地自适应）" VerticalAlignment="Center" />
+                <ToggleSwitch x:Name="ModelRanking" Grid.Row="4" Grid.Column="1" />
+                <TextBlock Grid.Row="5" Text="外部模型预算（毫秒）" VerticalAlignment="Center" />
+                <NumberBox x:Name="ModelTimeout" Grid.Row="5" Grid.Column="1"
                            Minimum="5" Maximum="500" SpinButtonPlacementMode="Inline" />
             </Grid>
+            <TextBlock Text="智能排序开启后，会在本机学习“当前拼音 → 所选候选”以及最近一次 OwO 上屏片段（最多 16 个字符）的短语关系；切换焦点时清空短期前文，不读取应用名称或窗口标题，也不会上传数据。基础候选不依赖模型，可随时关闭。"
+                       TextWrapping="Wrap"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
             <ContentControl x:Name="ShortcutSection" HorizontalContentAlignment="Stretch">
               <StackPanel Spacing="14">

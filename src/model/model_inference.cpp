@@ -71,7 +71,10 @@ ModelResult AssetCandidateRanker::rank(const ModelRequest& request, const std::s
     for (std::size_t row = 0; row < request.candidates.size(); ++row) {
         if (stop.stop_requested())
             return {request.request_id, ModelStatus::cancelled, {}, "cancelled"};
-        const auto encoded = tokenizer_.encode_pair(request.input, request.candidates[row],
+        std::string contextual_input = request.context;
+        if (!contextual_input.empty() && !request.input.empty()) contextual_input.push_back(' ');
+        contextual_input += request.input;
+        const auto encoded = tokenizer_.encode_pair(contextual_input, request.candidates[row],
                                                     batch.sequence_length);
         if (!encoded.ok)
             return {request.request_id, ModelStatus::backend_error, {}, encoded.diagnostic};

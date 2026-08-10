@@ -7,7 +7,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace owo::engine {
@@ -23,6 +25,12 @@ struct Candidate {
     bool operator==(const Candidate&) const = default;
 };
 
+struct CandidateGenerationMetrics {
+    std::uint64_t lexicon_lookup_us{};
+    std::uint64_t sort_us{};
+    std::uint64_t lexicon_lookup_count{};
+};
+
 class CandidateGenerator {
 public:
     explicit CandidateGenerator(const Lexicon& lexicon,
@@ -30,7 +38,11 @@ public:
                                 const UserFrequencyModel* user_frequency = nullptr)
         : lexicon_(lexicon), bigram_(bigram), user_frequency_(user_frequency) {}
     [[nodiscard]] std::vector<Candidate> generate(const ParseResult& parsed,
-                                                  std::size_t limit = 32) const;
+                                                  std::size_t limit = 32,
+                                                  bool contextual_ranking = false,
+                                                  std::string_view language_context = {},
+                                                  CandidateGenerationMetrics* metrics = nullptr,
+                                                  const std::function<bool()>& cancelled = {}) const;
 
 private:
     const Lexicon& lexicon_;

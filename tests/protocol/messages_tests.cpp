@@ -30,6 +30,20 @@ int main() {
         std::cerr << "message round trip failed\n";
         ++failures;
     }
+    Message feedback{MessageType::candidate_committed, 10, 5, "你好"};
+    feedback.input = "Ni'Hao";
+    feedback.context = "我说";
+    const auto decoded_feedback = decode_message(encode_message(feedback));
+    if (!decoded_feedback.validation || decoded_feedback.message.input != feedback.input ||
+        decoded_feedback.message.context != feedback.context) {
+        std::cerr << "commit feedback input round trip failed\n";
+        ++failures;
+    }
+    feedback.input = "ni hao";
+    if (!encode_message(feedback).empty()) {
+        std::cerr << "invalid commit feedback input was encoded\n";
+        ++failures;
+    }
     if (decode_message("{}").validation.error != ErrorCode::invalid_payload) {
         std::cerr << "invalid schema was accepted\n";
         ++failures;

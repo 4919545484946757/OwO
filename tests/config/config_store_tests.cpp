@@ -31,6 +31,7 @@ int main(const int argc, char** argv) {
     changed.candidate_page_size = 7;
     changed.candidate_wrap_length = 18;
     changed.user_learning_enabled = false;
+    changed.user_learning_sensitivity = 9;
     changed.model_ranking_enabled = true;
     changed.model_timeout_ms = 80;
     changed.correction_shortcut = "Ctrl+Alt+C";
@@ -79,6 +80,9 @@ int main(const int argc, char** argv) {
     invalid_value = fallback.snapshot();
     invalid_value.candidate_wrap_length = 3;
     if (fallback.save(invalid_value).success) return 23;
+    invalid_value = fallback.snapshot();
+    invalid_value.user_learning_sensitivity = 11;
+    if (fallback.save(invalid_value).success) return 29;
 
     if (owo::config::parse_config("schema_version=2\ncandidate_page_size=5\n"
             "user_learning_enabled=true\nmodel_ranking_enabled=false\nmodel_timeout_ms=50\n").ok) return 14;
@@ -97,7 +101,8 @@ int main(const int argc, char** argv) {
         legacy.value.correction_shortcut != "Alt" ||
         legacy.value.language_shortcut != "Ctrl+Space" ||
         legacy.value.raw_input_shortcut != "Enter" ||
-        legacy.value.candidate_wrap_length != 12) return 20;
+        legacy.value.candidate_wrap_length != 12 ||
+        legacy.value.user_learning_sensitivity != 7) return 20;
 
     const auto version_two = owo::config::parse_config(
         "schema_version=2\ncandidate_page_size=5\nuser_learning_enabled=true\n"
@@ -105,7 +110,8 @@ int main(const int argc, char** argv) {
         "correction_shortcut_enabled=true\ncorrection_shortcut=Alt\n"
         "language_shortcut_enabled=true\nlanguage_shortcut=Ctrl+Space\n"
         "raw_input_shortcut_enabled=true\nraw_input_shortcut=Enter\n");
-    if (!version_two.ok || version_two.value.candidate_wrap_length != 12) return 24;
+    if (!version_two.ok || version_two.value.candidate_wrap_length != 12 ||
+        version_two.value.user_learning_sensitivity != 7) return 24;
 
     auto duplicate_shortcuts = changed;
     duplicate_shortcuts.raw_input_shortcut_enabled = true;

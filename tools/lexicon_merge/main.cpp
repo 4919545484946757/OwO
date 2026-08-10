@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
             return 3;
         }
         merged.reserve(merged.size() + lexicon.size());
-        for (const auto& entry : lexicon.entries()) {
+        for (const auto& entry : lexicon.materialize_entries()) {
             std::string key;
             for (const auto& syllable : entry.syllables) key += syllable + '\0';
             key += entry.text;

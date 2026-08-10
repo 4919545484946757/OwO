@@ -64,7 +64,8 @@ std::string encode_model_message(const ModelMessage& message) {
     append_integer(output, message.request_id);
     append_integer(output, message.timeout_ms);
     append_integer(output, static_cast<std::uint32_t>(message.candidates.size()));
-    if (!append_string(output, message.model_id) || !append_string(output, message.input)) return {};
+    if (!append_string(output, message.model_id) || !append_string(output, message.input) ||
+        !append_string(output, message.context)) return {};
     for (const auto& candidate : message.candidates)
         if (!append_string(output, candidate)) return {};
     if (!append_string(output, message.diagnostic) ||
@@ -103,7 +104,8 @@ ModelDecodeResult decode_model_message(const std::string_view payload) {
         result.message.status = static_cast<ModelStatus>(status);
         if (!valid_type(result.message.type) || !valid_status(result.message.status) ||
             !read_string(payload, offset, result.message.model_id) ||
-            !read_string(payload, offset, result.message.input)) goto invalid;
+            !read_string(payload, offset, result.message.input) ||
+            !read_string(payload, offset, result.message.context)) goto invalid;
         result.message.candidates.reserve(count);
         for (std::uint32_t index = 0; index < count; ++index) {
             std::string candidate;

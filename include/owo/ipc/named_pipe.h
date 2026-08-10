@@ -3,6 +3,7 @@
 #include "owo/protocol/envelope.h"
 
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -24,9 +25,31 @@ namespace owo::ipc {
 inline constexpr wchar_t kCorePipeName[] = LR"(\\.\pipe\OwO.InputMethod.Core.P1)";
 inline constexpr wchar_t kModelHostPipeName[] = LR"(\\.\pipe\OwO.InputMethod.ModelHost.P3.v1)";
 
+[[nodiscard]] inline std::wstring candidate_cancellation_event_name(
+    const std::uint64_t request_id, const std::uint64_t generation) {
+    return L"Local\\OwO.InputMethod.CandidateCancel.v1." +
+           std::to_wstring(generation) + L"." + std::to_wstring(request_id);
+}
+
 struct ExchangeResult {
     protocol::ValidationResult status;
     std::string response;
+};
+
+class PersistentPipeClient final {
+public:
+    explicit PersistentPipeClient(std::wstring pipe_name);
+    PersistentPipeClient(const PersistentPipeClient&) = delete;
+    PersistentPipeClient& operator=(const PersistentPipeClient&) = delete;
+    ~PersistentPipeClient();
+
+    [[nodiscard]] ExchangeResult exchange(
+        std::string_view request, std::chrono::milliseconds timeout);
+    void reset() noexcept;
+
+private:
+    std::wstring pipe_name_;
+    void* pipe_{};
 };
 
 /// 通过命名管道发送单个请求并等待单个响应。

@@ -8,12 +8,16 @@
 #include <d2d1helper.h>
 #include <dwmapi.h>
 #include <dwrite.h>
+#include <ctfutb.h>
+#include <ctffunc.h>
+#include <olectl.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <chrono>
+#include <iostream>
 #include <memory>
 #include <new>
 #include <string_view>
@@ -26,6 +30,7 @@ LONG lock_count = 0;
 constexpr wchar_t kMessageClass[] = L"OwO.P1.MessageWindow";
 constexpr wchar_t kCandidateClass[] = L"OwO.P1.CandidateWindow";
 constexpr UINT kCandidateReady = WM_APP + 1;
+constexpr UINT kLanguageShortcutPressed = WM_APP + 2;
 constexpr float kCandidateWindowMinWidthDip = 240.0F;
 constexpr float kCandidateWindowMaxWidthDip = 1400.0F;
 constexpr float kHeaderHeightDip = 40.0F;
@@ -45,6 +50,17 @@ constexpr ULONGLONG kShortcutConfigRefreshIntervalMs = 500;
 constexpr auto kCandidateRequestBaseTimeout = std::chrono::milliseconds(900);
 constexpr auto kCandidateRequestMaximumTimeout = std::chrono::milliseconds(2500);
 constexpr auto kFeedbackRequestTimeout = std::chrono::milliseconds(100);
+thread_local TextService* keyboard_hook_service = nullptr;
+
+bool system_uses_light_theme() noexcept {
+    DWORD value = 1;
+    DWORD bytes = sizeof(value);
+    const LSTATUS status = RegGetValueW(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &bytes);
+    return status != ERROR_SUCCESS || value != 0;
+}
 
 std::wstring_view candidate_status_text(const bool pending, const bool failed,
                                         const std::wstring_view failure_detail) noexcept {
@@ -390,7 +406,167 @@ private:
 };
 }  // namespace
 
+class LanguageBarItem final : public ITfLangBarItemButton, public ITfSource {
+public:
+    explicit LanguageBarItem(TextService* owner) : owner_(owner) {
+        info_.clsidService = kTextServiceClsid;
+        // Windows 8 and later ignore input-mode items that use another GUID.
+        info_.guidItem = GUID_LBI_INPUTMODE;
+        info_.dwStyle = TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_TEXTCOLORICON;
+        info_.ulSort = 0;
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (object == nullptr) return E_POINTER;
+        *object = nullptr;
+        if (iid == IID_IUnknown || iid == IID_ITfLangBarItem ||
+            iid == IID_ITfLangBarItemButton) {
+            *object = static_cast<ITfLangBarItemButton*>(this);
+        } else if (iid == IID_ITfSource) {
+            *object = static_cast<ITfSource*>(this);
+        } else {
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return static_cast<ULONG>(InterlockedIncrement(&references_));
+    }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const auto remaining = InterlockedDecrement(&references_);
+        if (remaining == 0) delete this;
+        return static_cast<ULONG>(remaining);
+    }
+
+    HRESULT STDMETHODCALLTYPE GetInfo(TF_LANGBARITEMINFO* info) override {
+        if (info == nullptr) return E_INVALIDARG;
+        *info = info_;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetStatus(DWORD* status) override {
+        if (status == nullptr) return E_INVALIDARG;
+        *status = 0;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Show(BOOL) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetTooltipString(BSTR* text) override {
+        if (text == nullptr) return E_INVALIDARG;
+        *text = SysAllocString(owner_ != nullptr && owner_->chinese_mode_
+                                   ? L"OwO 中文输入"
+                                   : L"OwO 英文输入");
+        return *text == nullptr ? E_OUTOFMEMORY : S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnClick(TfLBIClick, POINT, const RECT*) override {
+        return owner_ == nullptr ? E_UNEXPECTED : owner_->toggle_language_mode_from_window();
+    }
+    HRESULT STDMETHODCALLTYPE InitMenu(ITfMenu*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnMenuSelect(UINT) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetIcon(HICON* icon) override {
+        if (icon == nullptr) return E_INVALIDARG;
+        *icon = create_mode_icon(owner_ != nullptr && owner_->chinese_mode_ ? L"中" : L"英");
+        return *icon == nullptr ? E_OUTOFMEMORY : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetText(BSTR* text) override {
+        if (text == nullptr) return E_INVALIDARG;
+        *text = SysAllocString(owner_ != nullptr && owner_->chinese_mode_ ? L"中" : L"英");
+        return *text == nullptr ? E_OUTOFMEMORY : S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE AdviseSink(REFIID iid, IUnknown* unknown,
+                                         DWORD* cookie) override {
+        if (cookie == nullptr || unknown == nullptr) return E_INVALIDARG;
+        *cookie = TF_INVALID_COOKIE;
+        if (iid != IID_ITfLangBarItemSink) return CONNECT_E_CANNOTCONNECT;
+        if (sink_ != nullptr) return CONNECT_E_ADVISELIMIT;
+        const HRESULT result = unknown->QueryInterface(IID_PPV_ARGS(&sink_));
+        if (FAILED(result)) return result;
+        *cookie = 1;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE UnadviseSink(DWORD cookie) override {
+        if (cookie != 1 || sink_ == nullptr) return CONNECT_E_NOCONNECTION;
+        sink_->Release();
+        sink_ = nullptr;
+        return S_OK;
+    }
+
+    void notify_mode_changed() noexcept {
+        if (sink_ != nullptr) sink_->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP);
+    }
+
+private:
+    ~LanguageBarItem() {
+        if (sink_ != nullptr) sink_->Release();
+    }
+
+    static HICON create_mode_icon(const wchar_t* label) {
+        constexpr int size = 20;
+        BITMAPV5HEADER header{};
+        header.bV5Size = sizeof(header);
+        header.bV5Width = size;
+        header.bV5Height = -size;
+        header.bV5Planes = 1;
+        header.bV5BitCount = 32;
+        header.bV5Compression = BI_BITFIELDS;
+        header.bV5RedMask = 0x00ff0000;
+        header.bV5GreenMask = 0x0000ff00;
+        header.bV5BlueMask = 0x000000ff;
+        header.bV5AlphaMask = 0xff000000;
+        void* raw_pixels = nullptr;
+        HDC screen = GetDC(nullptr);
+        HBITMAP color = CreateDIBSection(screen, reinterpret_cast<BITMAPINFO*>(&header),
+                                         DIB_RGB_COLORS, &raw_pixels, nullptr, 0);
+        ReleaseDC(nullptr, screen);
+        if (color == nullptr || raw_pixels == nullptr) return nullptr;
+        auto* pixels = static_cast<std::uint32_t*>(raw_pixels);
+        std::fill_n(pixels, size * size, 0x00000001U);
+
+        HDC memory = CreateCompatibleDC(nullptr);
+        HGDIOBJ old_bitmap = SelectObject(memory, color);
+        HFONT font = CreateFontW(-17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+        HGDIOBJ old_font = SelectObject(memory, font);
+        SetBkMode(memory, TRANSPARENT);
+        const COLORREF foreground = system_uses_light_theme()
+                                        ? RGB(0, 0, 0)
+                                        : RGB(255, 255, 255);
+        SetTextColor(memory, foreground);
+        RECT bounds{0, 0, size, size};
+        DrawTextW(memory, label, 1, &bounds,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(memory, old_font);
+        SelectObject(memory, old_bitmap);
+        DeleteObject(font);
+        DeleteDC(memory);
+
+        for (int index = 0; index < size * size; ++index) {
+            if (pixels[index] == 0x00000001U) pixels[index] = 0;
+            else pixels[index] |= 0xff000000U;
+        }
+        HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
+        ICONINFO icon_info{};
+        icon_info.fIcon = TRUE;
+        icon_info.hbmColor = color;
+        icon_info.hbmMask = mask;
+        HICON icon = CreateIconIndirect(&icon_info);
+        DeleteObject(mask);
+        DeleteObject(color);
+        return icon;
+    }
+
+    LONG references_{1};
+    TextService* owner_{};
+    TF_LANGBARITEMINFO info_{};
+    ITfLangBarItemSink* sink_{};
+};
+
 TextService::TextService() noexcept {
+    next_request_id_ = (static_cast<std::uint64_t>(GetCurrentProcessId()) << 32U) |
+                       (GetTickCount64() & 0xffffffffULL);
     InterlockedIncrement(&object_count);
 }
 
@@ -411,6 +587,8 @@ HRESULT TextService::QueryInterface(REFIID iid, void** object) {
         *object = static_cast<ITfThreadMgrEventSink*>(this);
     } else if (iid == IID_ITfThreadFocusSink) {
         *object = static_cast<ITfThreadFocusSink*>(this);
+    } else if (iid == IID_ITfCompartmentEventSink) {
+        *object = static_cast<ITfCompartmentEventSink*>(this);
     } else {
         return E_NOINTERFACE;
     }
@@ -474,6 +652,11 @@ HRESULT TextService::ActivateEx(ITfThreadMgr* thread_manager,
         return result;
     }
     refresh_shortcut_config(true);
+    initialize_language_compartment();
+    initialize_language_bar();
+    keyboard_hook_service = this;
+    keyboard_hook_ = SetWindowsHookExW(WH_KEYBOARD, keyboard_hook_proc, nullptr,
+                                       GetCurrentThreadId());
     worker_ = std::jthread([this](const std::stop_token token) { worker_loop(token); });
     return S_OK;
 }
@@ -484,15 +667,30 @@ HRESULT TextService::Deactivate() {
         request_ready_.notify_all();
         worker_.join();
     }
+    if (candidate_cancellation_event_ != nullptr) {
+        SetEvent(candidate_cancellation_event_);
+        CloseHandle(candidate_cancellation_event_);
+        candidate_cancellation_event_ = nullptr;
+    }
+    for (const auto event : retired_cancellation_events_) CloseHandle(event);
+    retired_cancellation_events_.clear();
     {
         std::lock_guard lock(request_mutex_);
         pending_request_.reset();
         feedback_requests_.clear();
     }
     clear_composition();
+    if (keyboard_hook_ != nullptr) {
+        UnhookWindowsHookEx(keyboard_hook_);
+        keyboard_hook_ = nullptr;
+    }
+    if (keyboard_hook_service == this) keyboard_hook_service = nullptr;
+    language_space_key_suppressed_ = false;
     destroy_windows();
     if (thread_manager_ != nullptr) {
         clear_preserved_language_key();
+        uninitialize_language_bar();
+        uninitialize_language_compartment();
         ITfSource* source = nullptr;
         if (SUCCEEDED(thread_manager_->QueryInterface(IID_PPV_ARGS(&source)))) {
             if (thread_focus_sink_cookie_ != TF_INVALID_COOKIE)
@@ -519,6 +717,7 @@ HRESULT TextService::OnSetFocus(const BOOL foreground) {
     foreground_focus_ = foreground != FALSE;
     if (!foreground_focus_) {
         clear_composition();
+        recent_language_context_.clear();
     } else if (!input_buffer_.empty()) {
         update_candidate_window();
     }
@@ -536,17 +735,20 @@ HRESULT TextService::OnUninitDocumentMgr(ITfDocumentMgr*) {
 HRESULT TextService::OnSetFocus(ITfDocumentMgr* document_manager,
                                 ITfDocumentMgr* previous_document_manager) {
     if (document_manager != previous_document_manager) clear_composition();
+    if (document_manager != previous_document_manager) recent_language_context_.clear();
     foreground_focus_ = document_manager != nullptr;
     return S_OK;
 }
 
 HRESULT TextService::OnPushContext(ITfContext*) {
     clear_composition();
+    recent_language_context_.clear();
     return S_OK;
 }
 
 HRESULT TextService::OnPopContext(ITfContext*) {
     clear_composition();
+    recent_language_context_.clear();
     return S_OK;
 }
 
@@ -559,7 +761,26 @@ HRESULT TextService::OnSetThreadFocus() {
 HRESULT TextService::OnKillThreadFocus() {
     foreground_focus_ = false;
     clear_composition();
+    recent_language_context_.clear();
     return S_OK;
+}
+
+HRESULT TextService::OnChange(REFGUID guid) {
+    if (!IsEqualGUID(guid, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)) return S_OK;
+    const auto mode = system_language_mode();
+    if (!mode.has_value() || *mode == chinese_mode_) return S_OK;
+
+    ITfDocumentMgr* document_manager = nullptr;
+    ITfContext* context = nullptr;
+    if (thread_manager_ != nullptr &&
+        SUCCEEDED(thread_manager_->GetFocus(&document_manager)) &&
+        document_manager != nullptr) {
+        document_manager->GetTop(&context);
+        document_manager->Release();
+    }
+    const HRESULT result = apply_language_mode(*mode, context);
+    if (context != nullptr) context->Release();
+    return result;
 }
 
 bool TextService::should_eat_key(const WPARAM key) const noexcept {
@@ -606,7 +827,10 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
         shortcut_matches(shortcut_config_.correction_shortcut, key)) {
         correction_enabled_ = !correction_enabled_;
         if (!input_buffer_.empty()) {
-            segmented_input_.clear();
+            // A mode change is intentional, so immediately discard any
+            // corrected preview from the previous mode. The response will
+            // replace this raw snapshot with the strict source segmentation.
+            segmented_input_ = input_buffer_;
             candidates_.clear();
             candidate_consumed_.clear();
             candidate_failure_detail_.clear();
@@ -628,8 +852,12 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
         const bool shift = key_down(VK_SHIFT);
         const bool caps_lock = (GetKeyState(VK_CAPITAL) & 1) != 0;
         const wchar_t base = shift != caps_lock ? L'A' : L'a';
-        input_buffer_.push_back(static_cast<wchar_t>(base + (key - 'A')));
-        segmented_input_.clear();
+        const wchar_t character = static_cast<wchar_t>(base + (key - 'A'));
+        input_buffer_.push_back(character);
+        // Keep the last confirmed segmentation visible until the new parse and
+        // candidates arrive together. Appending the raw character prevents the
+        // preview from briefly falling back to the completely unsegmented input.
+        if (!segmented_input_.empty()) segmented_input_.push_back(character);
         candidate_page_ = 0;
         has_more_candidates_ = false;
         candidates_expanded_ = false;
@@ -639,7 +867,8 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
                input_buffer_.back() != L'\'' &&
                input_buffer_.size() < kMaximumPinyinInputLength) {
         input_buffer_.push_back(L'\'');
-        segmented_input_.clear();
+        if (!segmented_input_.empty() && segmented_input_.back() != L'\'')
+            segmented_input_.push_back(L'\'');
         candidate_page_ = 0;
         has_more_candidates_ = false;
         candidates_expanded_ = false;
@@ -647,7 +876,13 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
         queue_candidate_request();
     } else if (key == VK_BACK) {
         if (!input_buffer_.empty()) input_buffer_.pop_back();
-        segmented_input_.clear();
+        if (!segmented_input_.empty()) {
+            while (!segmented_input_.empty() && segmented_input_.back() == L'\'')
+                segmented_input_.pop_back();
+            if (!segmented_input_.empty()) segmented_input_.pop_back();
+            while (!segmented_input_.empty() && segmented_input_.back() == L'\'')
+                segmented_input_.pop_back();
+        }
         candidate_page_ = 0;
         has_more_candidates_ = false;
         candidates_expanded_ = false;
@@ -1155,6 +1390,10 @@ LRESULT CALLBACK TextService::window_proc(HWND window, UINT message, WPARAM wpar
         service->handle_candidate_result(reinterpret_cast<CandidateResult*>(lparam));
         return 0;
     }
+    if (message == kLanguageShortcutPressed && service != nullptr) {
+        service->toggle_language_mode_from_window();
+        return 0;
+    }
     if (message == WM_PAINT && service != nullptr) {
         PAINTSTRUCT paint{};
         BeginPaint(window, &paint);
@@ -1249,10 +1488,13 @@ LRESULT CALLBACK TextService::window_proc(HWND window, UINT message, WPARAM wpar
         InvalidateRect(window, nullptr, FALSE);
         return 0;
     }
-    if ((message == WM_THEMECHANGED || message == WM_DWMCOLORIZATIONCOLORCHANGED) &&
-        service != nullptr && window == service->candidate_window_) {
-        service->apply_candidate_window_effects();
-        InvalidateRect(window, nullptr, FALSE);
+    if ((message == WM_THEMECHANGED || message == WM_SETTINGCHANGE ||
+         message == WM_DWMCOLORIZATIONCOLORCHANGED) && service != nullptr) {
+        service->update_language_bar();
+        if (window == service->candidate_window_) {
+            service->apply_candidate_window_effects();
+            InvalidateRect(window, nullptr, FALSE);
+        }
         return 0;
     }
     if (message == WM_DISPLAYCHANGE && service != nullptr &&
@@ -1262,6 +1504,32 @@ LRESULT CALLBACK TextService::window_proc(HWND window, UINT message, WPARAM wpar
         return 0;
     }
     return DefWindowProcW(window, message, wparam, lparam);
+}
+
+LRESULT CALLBACK TextService::keyboard_hook_proc(const int code, const WPARAM key,
+                                                  const LPARAM flags) {
+    auto* service = keyboard_hook_service;
+    if (code >= 0 && service != nullptr && key == VK_SPACE) {
+        const auto bits = static_cast<ULONG_PTR>(flags);
+        const bool released = (bits & (1ULL << 31)) != 0;
+        const bool repeated = (bits & (1ULL << 30)) != 0;
+        if (!released) {
+            service->refresh_shortcut_config();
+            if (service->shortcut_config_.language_shortcut_enabled &&
+                service->shortcut_matches(service->shortcut_config_.language_shortcut,
+                                           VK_SPACE)) {
+                service->language_space_key_suppressed_ = true;
+                if (!repeated && service->message_window_ != nullptr)
+                    PostMessageW(service->message_window_, kLanguageShortcutPressed, 0, 0);
+                return 1;
+            }
+        } else if (service->language_space_key_suppressed_) {
+            service->language_space_key_suppressed_ = false;
+            return 1;
+        }
+    }
+    return CallNextHookEx(service == nullptr ? nullptr : service->keyboard_hook_,
+                          code, key, flags);
 }
 
 void TextService::queue_candidate_request() {
@@ -1325,6 +1593,107 @@ void TextService::clear_preserved_language_key() noexcept {
     preserved_language_key_registered_ = false;
 }
 
+void TextService::initialize_language_compartment() {
+    if (thread_manager_ == nullptr ||
+        language_compartment_sink_cookie_ != TF_INVALID_COOKIE) return;
+    ITfCompartmentMgr* compartments = nullptr;
+    if (FAILED(thread_manager_->QueryInterface(IID_PPV_ARGS(&compartments)))) return;
+    ITfCompartment* compartment = nullptr;
+    const HRESULT found = compartments->GetCompartment(
+        GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, &compartment);
+    compartments->Release();
+    if (FAILED(found) || compartment == nullptr) return;
+
+    // OwO starts in Chinese mode whenever a new TSF instance is activated.
+    // Do not inherit a host process's stale closed value: applications often
+    // retain this compartment after another IME was last used in English.
+    VARIANT initial_mode{};
+    initial_mode.vt = VT_I4;
+    initial_mode.lVal = 1;
+    const HRESULT initialized = compartment->SetValue(client_id_, &initial_mode);
+    if (SUCCEEDED(initialized)) chinese_mode_ = true;
+
+    ITfSource* source = nullptr;
+    if (SUCCEEDED(compartment->QueryInterface(IID_PPV_ARGS(&source)))) {
+        source->AdviseSink(IID_ITfCompartmentEventSink,
+                           static_cast<ITfCompartmentEventSink*>(this),
+                           &language_compartment_sink_cookie_);
+        source->Release();
+    }
+    compartment->Release();
+    if (FAILED(initialized)) {
+        const auto mode = system_language_mode();
+        if (mode.has_value()) chinese_mode_ = *mode;
+    }
+}
+
+void TextService::uninitialize_language_compartment() noexcept {
+    if (thread_manager_ == nullptr ||
+        language_compartment_sink_cookie_ == TF_INVALID_COOKIE) return;
+    ITfCompartmentMgr* compartments = nullptr;
+    if (SUCCEEDED(thread_manager_->QueryInterface(IID_PPV_ARGS(&compartments)))) {
+        ITfCompartment* compartment = nullptr;
+        if (SUCCEEDED(compartments->GetCompartment(
+                GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, &compartment)) &&
+            compartment != nullptr) {
+            ITfSource* source = nullptr;
+            if (SUCCEEDED(compartment->QueryInterface(IID_PPV_ARGS(&source)))) {
+                source->UnadviseSink(language_compartment_sink_cookie_);
+                source->Release();
+            }
+            compartment->Release();
+        }
+        compartments->Release();
+    }
+    language_compartment_sink_cookie_ = TF_INVALID_COOKIE;
+}
+
+std::optional<bool> TextService::system_language_mode() const {
+    if (thread_manager_ == nullptr) return std::nullopt;
+    ITfCompartmentMgr* compartments = nullptr;
+    if (FAILED(thread_manager_->QueryInterface(IID_PPV_ARGS(&compartments))))
+        return std::nullopt;
+    ITfCompartment* compartment = nullptr;
+    const HRESULT found = compartments->GetCompartment(
+        GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, &compartment);
+    compartments->Release();
+    if (FAILED(found) || compartment == nullptr) return std::nullopt;
+    VARIANT value{};
+    const HRESULT read = compartment->GetValue(&value);
+    compartment->Release();
+    if (FAILED(read) || value.vt != VT_I4) return std::nullopt;
+    return value.lVal != 0;
+}
+
+void TextService::initialize_language_bar() {
+    if (thread_manager_ == nullptr || language_bar_item_ != nullptr) return;
+    ITfLangBarItemMgr* manager = nullptr;
+    if (FAILED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager)))) return;
+    auto* item = new (std::nothrow) LanguageBarItem(this);
+    if (item != nullptr) {
+        if (SUCCEEDED(manager->AddItem(item))) language_bar_item_ = item;
+        else item->Release();
+    }
+    manager->Release();
+}
+
+void TextService::uninitialize_language_bar() noexcept {
+    if (language_bar_item_ == nullptr) return;
+    if (thread_manager_ != nullptr) {
+        ITfLangBarItemMgr* manager = nullptr;
+        if (SUCCEEDED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager)))) {
+            manager->RemoveItem(language_bar_item_);
+            manager->Release();
+        }
+    }
+    language_bar_item_->Release();
+    language_bar_item_ = nullptr;
+}
+
+void TextService::update_language_bar() noexcept {
+    if (language_bar_item_ != nullptr) language_bar_item_->notify_mode_changed();
+}
+
 bool TextService::shortcut_matches(const std::string_view shortcut,
                                    const WPARAM key) const {
     return shortcut == shortcut_for_key_event(key);
@@ -1342,26 +1711,65 @@ void TextService::schedule_candidate_request(const bool reset_retry) {
     if (!candidates_expanded_) expanded_scroll_row_ = 0;
     {
         std::lock_guard lock(request_mutex_);
+        if (candidate_cancellation_event_ != nullptr) {
+            SetEvent(candidate_cancellation_event_);
+            retired_cancellation_events_.push_back(candidate_cancellation_event_);
+            candidate_cancellation_event_ = nullptr;
+            // The Core opens the event as soon as it receives the request. Keep
+            // a generous tail to cover startup/connection races without leaking
+            // one kernel handle per keystroke for the lifetime of the host app.
+            if (retired_cancellation_events_.size() > 32) {
+                CloseHandle(retired_cancellation_events_.front());
+                retired_cancellation_events_.erase(retired_cancellation_events_.begin());
+            }
+        }
         active_candidate_request_id_ = next_request_id_++;
+        latest_candidate_request_id_.store(active_candidate_request_id_,
+                                           std::memory_order_release);
+        const auto event_name = ipc::candidate_cancellation_event_name(
+            active_candidate_request_id_, context_generation_);
+        candidate_cancellation_event_ = CreateEventW(
+            nullptr, TRUE, FALSE, event_name.c_str());
         pending_request_ = PendingRequest{
             static_cast<std::uint8_t>(protocol::MessageType::candidate_request),
             active_candidate_request_id_, context_generation_, candidate_page_, input_buffer_,
-            candidates_expanded_, correction_enabled_};
+            candidates_expanded_, correction_enabled_, {}, recent_language_context_};
     }
     request_ready_.notify_one();
     update_candidate_window();
 }
 
-void TextService::queue_commit_feedback(std::wstring candidate) {
+void TextService::append_language_context(const std::wstring_view text) {
+    constexpr std::size_t maximum_context_units = 16;
+    recent_language_context_.assign(text);
+    if (recent_language_context_.size() <= maximum_context_units) return;
+    auto begin = recent_language_context_.size() - maximum_context_units;
+    if (begin < recent_language_context_.size() && begin > 0 &&
+        recent_language_context_[begin] >= 0xdc00 &&
+        recent_language_context_[begin] <= 0xdfff &&
+        recent_language_context_[begin - 1] >= 0xd800 &&
+        recent_language_context_[begin - 1] <= 0xdbff)
+        ++begin;
+    recent_language_context_.erase(0, begin);
+}
+
+void TextService::queue_commit_feedback(std::wstring candidate, std::wstring input,
+                                        std::wstring context) {
     std::lock_guard lock(request_mutex_);
     feedback_requests_.push_back(PendingRequest{
         static_cast<std::uint8_t>(protocol::MessageType::candidate_committed),
-        next_request_id_++, context_generation_, 0, std::move(candidate)});
+        next_request_id_++, context_generation_, 0, std::move(candidate), false, true,
+        std::move(input), std::move(context)});
     request_ready_.notify_one();
 }
 
 void TextService::worker_loop(const std::stop_token stop_token) {
+    ipc::PersistentPipeClient core_client(ipc::kCorePipeName);
     while (!stop_token.stop_requested()) {
+        // Keep one connection for the base response plus its model update, then
+        // release it before idling so another TSF host process is never starved
+        // by Core's serialized candidate state.
+        core_client.reset();
         PendingRequest request{};
         {
             std::unique_lock lock(request_mutex_);
@@ -1382,6 +1790,8 @@ void TextService::worker_loop(const std::stop_token stop_token) {
                                         request.request_id, request.generation,
                                         utf8_from_wide(request.input)};
         auto paged_message = message;
+        paged_message.input = utf8_from_wide(request.feedback_input);
+        paged_message.context = utf8_from_wide(request.language_context);
         paged_message.page = request.page;
         paged_message.expanded = request.expanded;
         paged_message.correction_enabled = request.correction_enabled;
@@ -1402,9 +1812,23 @@ void TextService::worker_loop(const std::stop_token stop_token) {
         const auto timeout = request_type == protocol::MessageType::candidate_request
                                  ? candidate_request_timeout(request.input.size())
                                  : kFeedbackRequestTimeout;
-        const auto exchanged = ipc::exchange(ipc::kCorePipeName,
-                                             protocol::encode_message(paged_message),
-                                             timeout);
+        const auto exchange_started = std::chrono::steady_clock::now();
+        const auto exchanged = core_client.exchange(
+            protocol::encode_message(paged_message), timeout);
+        const auto exchange_finished = std::chrono::steady_clock::now();
+        if (request_type == protocol::MessageType::candidate_request &&
+            latest_candidate_request_id_.load(std::memory_order_acquire) !=
+                request.request_id) {
+            std::clog
+                << R"({"process":"tsf","module":"candidate","level":"info","event_id":"candidate_request_superseded","request_id":)"
+                << request.request_id
+                << R"(,"generation":)" << request.generation
+                << R"(,"ipc_us":)"
+                << std::chrono::duration_cast<std::chrono::microseconds>(
+                       exchange_finished - exchange_started).count()
+                << "}\n";
+            continue;
+        }
         if (!exchanged.status || stop_token.stop_requested()) {
             if (!stop_token.stop_requested()) {
                 auto detail = exchanged.status.error == protocol::ErrorCode::timeout
@@ -1459,17 +1883,43 @@ void TextService::worker_loop(const std::stop_token stop_token) {
             result->candidate_consumed.push_back(
                 decoded.message.candidate_consumed[index]);
         }
-        if (PostMessageW(message_window_, kCandidateReady, 0,
-                         reinterpret_cast<LPARAM>(result.get()))) {
-            result.release();
+        const auto converted_at = std::chrono::steady_clock::now();
+        std::clog
+            << R"({"process":"tsf","module":"candidate","level":"info","event_id":"candidate_response_received","request_id":)"
+            << request.request_id
+            << R"(,"generation":)" << request.generation
+            << R"(,"queue_us":)"
+            << std::chrono::duration_cast<std::chrono::microseconds>(
+                   exchange_started - request.queued_at).count()
+            << R"(,"ipc_us":)"
+            << std::chrono::duration_cast<std::chrono::microseconds>(
+                   exchange_finished - exchange_started).count()
+            << R"(,"conversion_us":)"
+            << std::chrono::duration_cast<std::chrono::microseconds>(
+                   converted_at - exchange_finished).count()
+            << R"(,"candidate_count":)" << result->candidates.size()
+            << "}\n";
+        if (!decoded.message.model_pending) {
+            if (PostMessageW(message_window_, kCandidateReady, 0,
+                             reinterpret_cast<LPARAM>(result.get())))
+                result.release();
+            continue;
         }
-        if (!decoded.message.model_pending) continue;
 
-        for (int attempt = 0; attempt < 6 && !stop_token.stop_requested(); ++attempt) {
+        // Show deterministic base candidates immediately. A later model result
+        // is posted as a preserve-paging update, so it atomically replaces only
+        // candidate rows without clearing the reading or recreating the window.
+        // This removes the model timeout from first-candidate latency.
+        if (!PostMessageW(message_window_, kCandidateReady, 0,
+                          reinterpret_cast<LPARAM>(result.get())))
+            continue;
+        result.release();
+
+        for (int attempt = 0; attempt < 1 && !stop_token.stop_requested(); ++attempt) {
             {
                 std::unique_lock lock(request_mutex_);
                 const bool interrupted = request_ready_.wait_for(
-                    lock, stop_token, std::chrono::milliseconds(10), [this] {
+                    lock, stop_token, std::chrono::milliseconds(2), [this] {
                         return pending_request_.has_value() || !feedback_requests_.empty();
                     });
                 if (interrupted || stop_token.stop_requested()) break;
@@ -1477,9 +1927,8 @@ void TextService::worker_loop(const std::stop_token stop_token) {
             const protocol::Message update_request{
                 protocol::MessageType::candidate_update_request,
                 request.request_id, request.generation, {}};
-            const auto update_exchange = ipc::exchange(
-                ipc::kCorePipeName, protocol::encode_message(update_request),
-                std::chrono::milliseconds(25));
+            const auto update_exchange = core_client.exchange(
+                protocol::encode_message(update_request), std::chrono::milliseconds(90));
             if (!update_exchange.status) break;
             const auto update = protocol::decode_message(update_exchange.response);
             if (!update.validation ||
@@ -1488,23 +1937,29 @@ void TextService::worker_loop(const std::stop_token stop_token) {
                 update.message.context_generation != request.generation) break;
             if (update.message.model_pending) continue;
             if (update.message.candidates.empty()) break;
-            auto intelligent = std::make_unique<CandidateResult>();
-            intelligent->request_id = request.request_id;
-            intelligent->generation = request.generation;
-            intelligent->page = request.page;
-            intelligent->expanded = request.expanded;
-            intelligent->preserve_paging = true;
+            std::vector<std::wstring> intelligent_candidates;
+            std::vector<std::uint64_t> intelligent_consumed;
             for (std::size_t index = 0; index < update.message.candidates.size(); ++index) {
                 auto converted = wide_from_utf8(update.message.candidates[index]);
                 if (converted.empty()) continue;
-                intelligent->candidates.push_back(std::move(converted));
-                intelligent->candidate_consumed.push_back(
+                intelligent_candidates.push_back(std::move(converted));
+                intelligent_consumed.push_back(
                     update.message.candidate_consumed[index]);
             }
-            if (!intelligent->candidates.empty() &&
-                PostMessageW(message_window_, kCandidateReady, 0,
-                             reinterpret_cast<LPARAM>(intelligent.get())))
-                intelligent.release();
+            if (!intelligent_candidates.empty() &&
+                intelligent_candidates.size() == intelligent_consumed.size()) {
+                auto ranked = std::make_unique<CandidateResult>();
+                ranked->request_id = request.request_id;
+                ranked->generation = request.generation;
+                ranked->page = request.page;
+                ranked->expanded = request.expanded;
+                ranked->preserve_paging = true;
+                ranked->candidates = std::move(intelligent_candidates);
+                ranked->candidate_consumed = std::move(intelligent_consumed);
+                if (PostMessageW(message_window_, kCandidateReady, 0,
+                                 reinterpret_cast<LPARAM>(ranked.get())))
+                    ranked.release();
+            }
             break;
         }
     }
@@ -1563,7 +2018,18 @@ void TextService::handle_candidate_result(CandidateResult* raw_result) {
             selected_context->Release();
         }
     }
+    const auto render_started = std::chrono::steady_clock::now();
     update_candidate_window();
+    const auto render_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - render_started).count();
+    std::clog
+        << R"({"process":"tsf","module":"candidate","level":"info","event_id":"candidate_rendered","request_id":)"
+        << result->request_id
+        << R"(,"generation":)" << result->generation
+        << R"(,"render_us":)" << render_us
+        << R"(,"candidate_count":)" << candidates_.size()
+        << R"(,"model_update":)" << (result->preserve_paging ? "true" : "false")
+        << "}\n";
 }
 
 void TextService::update_candidate_window() {
@@ -1722,6 +2188,8 @@ void TextService::update_candidate_anchor(ITfContext* context) {
 
 void TextService::clear_composition() {
     ++context_generation_;
+    latest_candidate_request_id_.store(0, std::memory_order_release);
+    if (candidate_cancellation_event_ != nullptr) SetEvent(candidate_cancellation_event_);
     input_buffer_.clear();
     segmented_input_.clear();
     candidates_.clear();
@@ -1749,6 +2217,9 @@ HRESULT TextService::commit_candidate(ITfContext* context, const std::size_t ind
     const auto consumed = candidate_consumed_[index];
     if (consumed == 0 || consumed > input_buffer_.size()) return E_INVALIDARG;
     const std::wstring committed = candidates_[index];
+    const std::wstring previous_context = recent_language_context_;
+    std::wstring learned_input = input_buffer_.substr(0, static_cast<std::size_t>(consumed));
+    while (!learned_input.empty() && learned_input.back() == L'\'') learned_input.pop_back();
     auto* session = new (std::nothrow) CommitEditSession(context, committed);
     if (session == nullptr) return E_OUTOFMEMORY;
     HRESULT session_result = E_FAIL;
@@ -1756,6 +2227,7 @@ HRESULT TextService::commit_candidate(ITfContext* context, const std::size_t ind
         client_id_, session, TF_ES_SYNC | TF_ES_READWRITE, &session_result);
     session->Release();
     if (SUCCEEDED(request_result) && SUCCEEDED(session_result)) {
+        append_language_context(committed);
         if (consumed == input_buffer_.size()) {
             clear_composition();
         } else {
@@ -1777,7 +2249,7 @@ HRESULT TextService::commit_candidate(ITfContext* context, const std::size_t ind
                 queue_candidate_request();
             }
         }
-        queue_commit_feedback(committed);
+        queue_commit_feedback(committed, std::move(learned_input), previous_context);
     }
     return FAILED(request_result) ? request_result : session_result;
 }
@@ -1790,18 +2262,42 @@ HRESULT TextService::commit_raw_input(ITfContext* context) {
     const HRESULT request_result = context->RequestEditSession(
         client_id_, session, TF_ES_SYNC | TF_ES_READWRITE, &session_result);
     session->Release();
-    if (SUCCEEDED(request_result) && SUCCEEDED(session_result)) clear_composition();
+    if (SUCCEEDED(request_result) && SUCCEEDED(session_result)) {
+        clear_composition();
+        recent_language_context_.clear();
+    }
     return FAILED(request_result) ? request_result : session_result;
 }
 
 HRESULT TextService::toggle_language_mode(ITfContext* context) {
-    if (chinese_mode_ && !input_buffer_.empty()) {
+    return apply_language_mode(!chinese_mode_, context);
+}
+
+HRESULT TextService::toggle_language_mode_from_window() {
+    if (thread_manager_ == nullptr) return E_UNEXPECTED;
+    ITfDocumentMgr* document_manager = nullptr;
+    HRESULT result = thread_manager_->GetFocus(&document_manager);
+    if (FAILED(result) || document_manager == nullptr)
+        return FAILED(result) ? result : E_FAIL;
+    ITfContext* context = nullptr;
+    result = document_manager->GetTop(&context);
+    document_manager->Release();
+    if (FAILED(result) || context == nullptr) return FAILED(result) ? result : E_FAIL;
+    result = toggle_language_mode(context);
+    context->Release();
+    return result;
+}
+
+HRESULT TextService::apply_language_mode(const bool chinese, ITfContext* context) {
+    if (chinese == chinese_mode_) return S_OK;
+    if (!chinese && !input_buffer_.empty()) {
         if (context == nullptr) return E_UNEXPECTED;
         const HRESULT committed = commit_raw_input(context);
         if (FAILED(committed)) return committed;
     }
-    chinese_mode_ = !chinese_mode_;
+    chinese_mode_ = chinese;
     if (!chinese_mode_) clear_composition();
+    update_language_bar();
     return S_OK;
 }
 

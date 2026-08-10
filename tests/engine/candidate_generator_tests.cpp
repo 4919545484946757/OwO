@@ -34,6 +34,14 @@ int main() {
         {{"gou", "mai"}, "购买", 1600},
         {{"gou", "ma"}, "够吗", 1200},
         {{"nian", "hou"}, "年后", 10000},
+        {{"lan"}, "LAN", 100},
+        {{"la", "n"}, "LA-N", 100000},
+        {{"duo"}, "DUO", 100},
+        {{"du", "o"}, "DU-O", 100000},
+        {{"lin"}, "LIN", 1},
+        {{"ling"}, "LING", 1},
+        {{"bin"}, "BIN", 1},
+        {{"bing"}, "BING", 1},
     });
     const owo::engine::FullPinyinSchema schema;
     const owo::engine::CandidateGenerator generator(lexicon);
@@ -48,12 +56,35 @@ int main() {
         return fail("uppercase pinyin normalization failed");
 
     const auto xian = generator.generate(schema.parse("xian"));
-    if (xian.size() != 3 || xian[0].text != "西安" || xian[1].text != "先" ||
-        xian[2].text != "线") return fail("ambiguous reading ranking failed");
+    if (xian.size() != 2 || xian[0].text != "先" || xian[1].text != "线")
+        return fail("unseparated xian did not prefer the whole syllable");
 
     const auto separated = generator.generate(schema.parse("xi'an"));
     if (separated.size() != 1 || separated[0].text != "西安")
         return fail("explicit syllable boundary candidate failed");
+
+    const auto lan = generator.generate(schema.parse("lan"));
+    if (lan.empty() || lan[0].text != "LAN" ||
+        lan[0].source_segments != std::vector<std::string>{"lan"} ||
+        std::any_of(lan.begin(), lan.end(), [](const auto& value) {
+            return value.text == "LA-N";
+        })) return fail("lan candidate used la+n segmentation");
+    const auto duo = generator.generate(schema.parse("duo"));
+    if (duo.empty() || duo[0].text != "DUO" ||
+        duo[0].source_segments != std::vector<std::string>{"duo"} ||
+        std::any_of(duo.begin(), duo.end(), [](const auto& value) {
+            return value.text == "DU-O";
+        })) return fail("duo candidate used du+o segmentation");
+    const auto lin_candidates = generator.generate(schema.parse("lin"));
+    if (lin_candidates.empty() || lin_candidates[0].text != "LIN" ||
+        std::any_of(lin_candidates.begin(), lin_candidates.end(), [](const auto& value) {
+            return value.text == "LING";
+        })) return fail("lin candidates included ling completion");
+    const auto bin_candidates = generator.generate(schema.parse("bin"));
+    if (bin_candidates.empty() || bin_candidates[0].text != "BIN" ||
+        std::any_of(bin_candidates.begin(), bin_candidates.end(), [](const auto& value) {
+            return value.text == "BING";
+        })) return fail("bin candidates included bing completion");
 
     const auto incomplete = generator.generate(schema.parse("zhongg"));
     if (incomplete.empty() || incomplete[0].text != "中国" ||
@@ -68,6 +99,26 @@ int main() {
     const auto single_initial = generator.generate(schema.parse("b"));
     if (single_initial.empty() || single_initial[0].text != "把")
         return fail("single initial did not generate prefix candidates");
+
+    const owo::engine::MemoryLexicon varied_initial_lexicon({
+        {{"da"}, "答", 100},   {{"dai"}, "带", 700},
+        {{"dan"}, "但", 600},  {{"dao"}, "到", 650},
+        {{"de"}, "的", 1000},  {{"deng"}, "等", 800},
+        {{"di"}, "地", 500},   {{"dou"}, "都", 950},
+        {{"dui"}, "对", 900},  {{"da"}, "生僻", 100000},
+    });
+    const owo::engine::CandidateGenerator varied_initial_generator(
+        varied_initial_lexicon);
+    const auto varied_initial = varied_initial_generator.generate(schema.parse("d"));
+    const std::vector<std::string> expected_initial{
+        "的", "都", "对", "等", "到", "但", "带", "地", "答"};
+    if (varied_initial.size() != expected_initial.size() ||
+        !std::equal(varied_initial.begin(), varied_initial.end(),
+                    expected_initial.begin(),
+                    [](const auto& candidate, const auto& expected) {
+                        return candidate.text == expected;
+                    }))
+        return fail("single initial was grouped by parser completion order");
 
     const auto abbreviated = generator.generate(schema.parse("wq"));
     if (abbreviated.empty() || abbreviated[0].text != "我去" ||
@@ -170,6 +221,16 @@ int main() {
     if (learned.empty() || learned[0].text != "泥号")
         return fail("user frequency ranking failed");
 
+    owo::engine::UserFrequencyStore language_frequency;
+    language_frequency.set_sensitivity(10);
+    language_frequency.record("我说", "nihao", "泥号");
+    const owo::engine::CandidateGenerator language_personalized(
+        compositional, nullptr, &language_frequency);
+    const auto language_learned = language_personalized.generate(
+        schema.parse("nihao"), 32, true, "我说");
+    if (language_learned.empty() || language_learned[0].text != "泥号")
+        return fail("language context ranking failed");
+
     const owo::engine::MemoryLexicon long_lexicon({
         {{"ni"}, "N", 1000},
         {{"ni", "hao"}, "NH", 2000},
@@ -234,5 +295,10 @@ int main() {
                         return candidate.text == expected;
                     }))
         return fail("two-character word priority bands failed");
+
+    const auto cancelled_generation = word_priority_generator.generate(
+        schema.parse("shi"), 32, false, {}, nullptr, [] { return true; });
+    if (!cancelled_generation.empty())
+        return fail("cancelled candidate generation continued producing candidates");
     return 0;
 }

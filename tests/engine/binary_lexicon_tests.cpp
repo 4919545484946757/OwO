@@ -37,6 +37,8 @@ int main() {
             std::vector<std::string>{"bu", "g", "d"}) return 1;
 
     auto corrupted = left_bytes;
+    // Without an installer-created validation cache, V2 verifies its payload
+    // checksum and rejects content corruption.
     corrupted.back() ^= 1;
     { std::ofstream output(second, std::ios::binary | std::ios::trunc); output.write(corrupted.data(), static_cast<std::streamsize>(corrupted.size())); }
     owo::engine::BinaryLexicon rejected;

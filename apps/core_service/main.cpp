@@ -6,11 +6,19 @@
 #include "owo/engine/user_frequency.h"
 
 #include <iostream>
+#include <chrono>
 #include <string_view>
 #include <utility>
 
 int wmain(int argc, wchar_t** argv) {
-    std::cout << "OwO Core Service is ready.\n";
+    const auto process_started = std::chrono::steady_clock::now();
+    const auto startup_log = [](const std::string_view phase,
+                                const std::chrono::steady_clock::time_point started) {
+        const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        std::clog << R"({"process":"core_service","module":"startup","level":"info","event_id":")"
+                  << phase << R"(","duration_us":)" << duration << "}\n";
+    };
     const wchar_t* lexicon_path = nullptr;
     const wchar_t* user_frequency_path = nullptr;
     const wchar_t* model_pipe_name = nullptr;
@@ -74,6 +82,7 @@ int wmain(int argc, wchar_t** argv) {
     owo::config::ConfigMonitor config_monitor;
     const owo::config::ConfigMonitor* config_monitor_ptr = nullptr;
     if (config_path != nullptr) {
+        const auto phase_started = std::chrono::steady_clock::now();
         const auto loaded = config_monitor.start(config_path);
         if (!loaded.success) {
             std::cerr << "config_start_failed: " << loaded.diagnostic << '\n';
@@ -82,24 +91,30 @@ int wmain(int argc, wchar_t** argv) {
         if (!loaded.diagnostic.empty())
             std::clog << "config_diagnostic: " << loaded.diagnostic << '\n';
         config_monitor_ptr = &config_monitor;
+        startup_log("config_loaded", phase_started);
     }
     owo::engine::UserFrequencyStore user_frequency;
     owo::engine::UserFrequencyStore* user_frequency_ptr = nullptr;
     if (user_frequency_path != nullptr) {
+        const auto phase_started = std::chrono::steady_clock::now();
         const auto loaded = user_frequency.load(user_frequency_path);
         if (!loaded.success) {
             std::cerr << "user_frequency_load_failed: " << loaded.error << '\n';
             return 3;
         }
         user_frequency_ptr = &user_frequency;
+        startup_log("user_frequency_loaded", phase_started);
     }
     if (lexicon_path != nullptr) {
         owo::engine::BinaryLexicon lexicon;
+        const auto phase_started = std::chrono::steady_clock::now();
         const auto loaded = lexicon.load(lexicon_path);
         if (!loaded.success) {
             std::cerr << "lexicon_load_failed: " << loaded.error << '\n';
             return 3;
         }
+        startup_log("lexicon_mapped", phase_started);
+        startup_log("core_initialized", process_started);
         return owo::ipc::run_core_server(owo::ipc::kCorePipeName, lexicon,
                                          user_frequency_ptr, model_pipe_name,
                                          config_monitor_ptr);

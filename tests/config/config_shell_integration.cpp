@@ -92,13 +92,22 @@ int wmain(const int argc, wchar_t** argv) {
         shortcut_bytes.find("language_shortcut=Ctrl+Shift+Space\n") == std::string::npos ||
         shortcut_bytes.find("raw_input_shortcut=Enter\n") == std::string::npos ||
         shortcut_bytes.find("candidate_wrap_length=18\n") == std::string::npos) return 18;
+    PROCESS_INFORMATION sensitivity{};
+    if (!launch(executable + L" " + config +
+                L" set-all 4 true true 40 true Ctrl+Alt+C false Ctrl+Shift+Space true Enter 18 9",
+                sensitivity) || wait_and_close(sensitivity) != 0) return 19;
+    std::ifstream sensitivity_input(path, std::ios::binary);
+    const std::string sensitivity_bytes((std::istreambuf_iterator<char>(sensitivity_input)), {});
+    sensitivity_input.close();
+    if (sensitivity_bytes.find("user_learning_sensitivity=9\n") == std::string::npos)
+        return 20;
     PROCESS_INFORMATION invalid_all{};
     if (!launch(executable + L" " + config + L" set-all 4 true false 999", invalid_all) ||
         wait_and_close(invalid_all) == 0) return 15;
     std::ifstream invalid_all_input(path, std::ios::binary);
     const std::string after_invalid_all((std::istreambuf_iterator<char>(invalid_all_input)), {});
     invalid_all_input.close();
-    if (after_invalid_all != shortcut_bytes) return 16;
+    if (after_invalid_all != sensitivity_bytes) return 16;
 
     PROCESS_INFORMATION show{};
     if (!launch(executable + L" " + config + L" show", show) || wait_and_close(show) != 0) return 10;
@@ -108,7 +117,8 @@ int wmain(const int argc, wchar_t** argv) {
         wait_and_close(repair) != 0) return 11;
     std::ifstream repaired_input(path, std::ios::binary);
     const std::string repaired((std::istreambuf_iterator<char>(repaired_input)), {});
-    if (repaired.find("candidate_page_size=3\n") == std::string::npos) return 12;
+    if (repaired.find("candidate_page_size=4\n") == std::string::npos ||
+        repaired.find("user_learning_sensitivity=7\n") == std::string::npos) return 12;
     std::filesystem::remove_all(root, error);
     return 0;
 }
