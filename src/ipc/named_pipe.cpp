@@ -1,4 +1,5 @@
 #include "owo/ipc/named_pipe.h"
+#include "owo/ipc/contextual_candidate_order.h"
 #include "owo/config/config_monitor.h"
 #include "owo/model/model_backend.h"
 #include "owo/model/model_protocol.h"
@@ -233,67 +234,6 @@ std::string read_frame(const HANDLE pipe) {
     std::string payload(size, '\0');
     if (!read_exact(pipe, payload.data(), size)) return {};
     return payload;
-}
-
-std::size_t utf8_character_count(const std::string_view text) {
-    return static_cast<std::size_t>(std::count_if(
-        text.begin(), text.end(), [](const unsigned char byte) {
-            return (byte & 0xc0U) != 0x80U;
-        }));
-}
-
-// Context scoring is allowed to choose between candidates with the same
-// structural usefulness, but it must not demote a whole-input sentence below
-// a prefix word, or a prefix word below a single-character fallback.
-void apply_model_order_with_candidate_tiers(
-    const std::vector<std::string>& model_order,
-    const std::size_t full_input_bytes,
-    const std::vector<std::string>& original_candidates,
-    const std::vector<std::uint64_t>& original_consumed,
-    std::vector<std::string>& ordered_candidates,
-    std::vector<std::uint64_t>& ordered_consumed) {
-    if (original_candidates.size() != original_consumed.size()) return;
-
-    const auto model_rank = [&model_order](const std::string& candidate) {
-        const auto found = std::find(model_order.begin(), model_order.end(), candidate);
-        return found == model_order.end()
-                   ? model_order.size()
-                   : static_cast<std::size_t>(found - model_order.begin());
-    };
-    const auto tier = [full_input_bytes](const std::string& candidate,
-                                         const std::uint64_t consumed) {
-        if (consumed == full_input_bytes) return 0;
-        if (utf8_character_count(candidate) >= 2) return 1;
-        return 2;
-    };
-
-    std::vector<std::size_t> indices(original_candidates.size());
-    std::iota(indices.begin(), indices.end(), 0);
-    std::stable_sort(indices.begin(), indices.end(), [&](const std::size_t left,
-                                                         const std::size_t right) {
-        const auto left_tier = tier(original_candidates[left], original_consumed[left]);
-        const auto right_tier = tier(original_candidates[right], original_consumed[right]);
-        if (left_tier != right_tier) return left_tier < right_tier;
-        if (left_tier == 1 && original_consumed[left] != original_consumed[right])
-            return original_consumed[left] > original_consumed[right];
-        // Fuse the immediate dictionary order with the asynchronous model
-        // order. A model may promote a substantially better alternative, but
-        // a one-position n-gram disagreement must not flip a coherent first
-        // candidate and cause visible post-render churn.
-        const auto left_rank = left + model_rank(original_candidates[left]);
-        const auto right_rank = right + model_rank(original_candidates[right]);
-        if (left_rank != right_rank) return left_rank < right_rank;
-        return left < right;
-    });
-
-    ordered_candidates.clear();
-    ordered_consumed.clear();
-    ordered_candidates.reserve(indices.size());
-    ordered_consumed.reserve(indices.size());
-    for (const auto index : indices) {
-        ordered_candidates.push_back(original_candidates[index]);
-        ordered_consumed.push_back(original_consumed[index]);
-    }
 }
 
 std::vector<std::string> preferred_source_segmentation(
@@ -780,7 +720,7 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                     auto update = pending.future.get();
                     if (update.type == model::ModelMessageType::rank_response &&
                         update.status == model::ModelStatus::success) {
-                        apply_model_order_with_candidate_tiers(
+                        apply_contextual_candidate_order(
                             update.candidates, pending.full_input_bytes,
                             pending.candidates, pending.candidate_consumed,
                             response.candidates, response.candidate_consumed);

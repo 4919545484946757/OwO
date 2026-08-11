@@ -1,4 +1,5 @@
 #include "text_service.h"
+#include "owo/tsf/language_context.h"
 
 #include "owo/tsf/pinyin_cursor.h"
 
@@ -1887,17 +1888,7 @@ void TextService::schedule_candidate_request(const bool reset_retry) {
 }
 
 void TextService::append_language_context(const std::wstring_view text) {
-    constexpr std::size_t maximum_context_units = 16;
-    recent_language_context_.assign(text);
-    if (recent_language_context_.size() <= maximum_context_units) return;
-    auto begin = recent_language_context_.size() - maximum_context_units;
-    if (begin < recent_language_context_.size() && begin > 0 &&
-        recent_language_context_[begin] >= 0xdc00 &&
-        recent_language_context_[begin] <= 0xdfff &&
-        recent_language_context_[begin - 1] >= 0xd800 &&
-        recent_language_context_[begin - 1] <= 0xdbff)
-        ++begin;
-    recent_language_context_.erase(0, begin);
+    append_bounded_language_context(recent_language_context_, text);
 }
 
 void TextService::queue_commit_feedback(std::wstring candidate, std::wstring input,
