@@ -1,4 +1,5 @@
 use crate::audit::AuditLog;
+use crate::mcp::{McpClient, McpTool};
 use crate::permissions::Policy;
 use crate::session::Session;
 use async_trait::async_trait;
@@ -63,6 +64,30 @@ impl ToolRegistry {
             .find(|tool| tool.spec().name == name)
             .ok_or_else(|| format!("未知工具：{name}"))?;
         tool.run(ctx, args).await
+    }
+
+    /// 把 MCP 服务器暴露的工具注册为 Agent 工具（命名：`{server}_{tool}`）。
+    pub fn register_mcp_tools(
+        &mut self,
+        server_name: &str,
+        client: Arc<tokio::sync::Mutex<McpClient>>,
+        tools: Vec<McpTool>,
+    ) {
+        for tool in tools {
+            let full_name = format!("{server_name}_{}", tool.name);
+            let spec = ToolSpec {
+                name: full_name.clone(),
+                description: tool.description,
+                input_schema: tool.input_schema,
+            };
+            self.tools.push(Box::new(McpToolAdapter {
+                full_name,
+                server_name: server_name.to_string(),
+                tool_name: tool.name,
+                spec,
+                client: Arc::clone(&client),
+            }));
+        }
     }
 }
 
@@ -306,5 +331,42 @@ impl Tool for RunCommandTool {
             "stdout": String::from_utf8_lossy(&output.stdout),
             "stderr": String::from_utf8_lossy(&output.stderr),
         }))
+    }
+}
+
+struct McpToolAdapter {
+    full_name: String,
+    server_name: String,
+    tool_name: String,
+    spec: ToolSpec,
+    client: Arc<tokio::sync::Mutex<McpClient>>,
+}
+
+#[async_trait]
+impl Tool for McpToolAdapter {
+    fn spec(&self) -> ToolSpec {
+        self.spec.clone()
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let mut client = self.client.lock().await;
+        client
+            .call_tool(&self.tool_name, args)
+            .await
+            .map_err(|error| {
+                format!(
+                    "MCP 工具 {}:{} 失败：{error}",
+                    self.server_name, self.tool_name
+                )
+            })
+    }
+}
+
+impl std::fmt::Debug for McpToolAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpToolAdapter")
+            .field("full_name", &self.full_name)
+            .finish()
     }
 }

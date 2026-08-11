@@ -52,7 +52,15 @@ cargo run -p owo-agent-cli -- repl --workspace .
 - `/diff` 查看文件改动（快照级），`/undo` 回滚全部写操作（新建文件会被删除）。
 - `/model <名称>` 切换模型，`/status`、`/permissions`、`/audit` 查看状态。
 - `/init` 生成 AGENTS.md；`/abort` 中止当前回合；`/exit` 退出。
+- `/mcp add <名称> <命令> [参数...]`、`/mcp list`、`/mcp remove <名称>` 管理 MCP 服务器（配置持久化在 `<data>/mcp-servers.json`）。
 - 支持管道输入（脚本/自动化）与历史记录（`<data>/history.txt`）。
+
+接入任意 stdio MCP 服务器示例：
+
+```text
+/mcp add files npx -y @modelcontextprotocol/server-filesystem C:\workspace
+/mcp list
+```
 
 一次性任务与 HTTP 服务：
 
@@ -72,9 +80,10 @@ cargo run -p owo-agent-cli -- serve --port 4096
 - 审计：内存审计记录（事件、工具、审批、结果）。
 - 模型网关：OpenAI-compatible chat completions（工具调用）。
 - 模型流式输出：SSE token 增量实时上屏（REPL/TUI 打字机效果），工具调用片段流式组装。
+- MCP 客户端：stdio JSON-RPC（initialize/tools/list/tools/call），工具以 `{server}_{tool}` 命名注册进 Agent。
 - 交互式 CLI：build/plan 模式、会话、diff/undo、审批、审计、AGENTS.md 初始化。
 
 ## 尚未实现（M2+）
 
-- AGENTS.md 已注入；Skills/子代理/MCP 尚未实现。
+- AGENTS.md 已注入；Skills/子代理/MCP HTTP 传输尚未实现。
 - 上下文压缩（仅截断）、SQLite 存储、云执行、沙箱 OS 隔离、traces/evals 平台。

@@ -1,11 +1,14 @@
 //! OpenCode 式全屏 TUI（ratatui + crossterm）。
 
-use crate::{build_agent, display_path, ensure_data_root, resolve_model, AGENTS_TEMPLATE};
+use crate::{
+    build_agent_with_mcp, connect_mcp_clients, display_path, ensure_data_root, load_mcp_configs,
+    resolve_model, save_mcp_configs, AGENTS_TEMPLATE,
+};
 use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
-use owo_agent_core::{Agent, JsonSessionStore, TurnEvent};
+use owo_agent_core::{Agent, JsonSessionStore, McpClient, McpServerConfig, TurnEvent};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -43,8 +46,25 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
     let read_only = args.agent == "plan";
     let root = ensure_data_root(args.data_dir, &workspace);
     let store = JsonSessionStore::new(root.join("sessions"));
-    let agent = Arc::new(build_agent(&workspace, &model, read_only)?);
-    let mut app = TuiApp::new(workspace, model, read_only, args.no_approval, store, agent);
+    let mcp_configs = load_mcp_configs(&root);
+    let mcp_clients = runtime.block_on(connect_mcp_clients(&mcp_configs));
+    let agent = Arc::new(build_agent_with_mcp(
+        &workspace,
+        &model,
+        read_only,
+        &mcp_clients,
+    )?);
+    let mut app = TuiApp::new(
+        workspace,
+        model,
+        read_only,
+        args.no_approval,
+        root,
+        store,
+        agent,
+        mcp_configs,
+        mcp_clients,
+    );
     let terminal = ratatui::init();
     let result = app.run(&runtime, terminal);
     ratatui::restore();
@@ -90,6 +110,7 @@ struct TuiApp {
     model: String,
     read_only: bool,
     no_approval: bool,
+    data_root: PathBuf,
     store: JsonSessionStore,
     session: Option<Session>,
     agent: Arc<Agent>,
@@ -103,22 +124,29 @@ struct TuiApp {
     scroll: usize,
     running: bool,
     status: String,
+    mcp_configs: Vec<McpServerConfig>,
+    mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
 }
 
 impl TuiApp {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         workspace: PathBuf,
         model: String,
         read_only: bool,
         no_approval: bool,
+        data_root: PathBuf,
         store: JsonSessionStore,
         agent: Arc<Agent>,
+        mcp_configs: Vec<McpServerConfig>,
+        mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
     ) -> Self {
         Self {
             workspace,
             model,
             read_only,
             no_approval,
+            data_root,
             store,
             session: None,
             agent,
@@ -136,6 +164,8 @@ impl TuiApp {
             scroll: 0,
             running: false,
             status: "就绪".to_string(),
+            mcp_configs,
+            mcp_clients,
         }
     }
 
@@ -513,7 +543,7 @@ impl TuiApp {
 
     fn toggle_mode(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.read_only = !self.read_only;
-        self.agent = Arc::new(build_agent(&self.workspace, &self.model, self.read_only)?);
+        self.rebuild_agent()?;
         self.push_system(
             if self.read_only {
                 "已切换 plan（只读）".to_string()
@@ -522,6 +552,16 @@ impl TuiApp {
             },
             yellow(),
         );
+        Ok(())
+    }
+
+    fn rebuild_agent(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.agent = Arc::new(build_agent_with_mcp(
+            &self.workspace,
+            &self.model,
+            self.read_only,
+            &self.mcp_clients,
+        )?);
         Ok(())
     }
 
@@ -578,8 +618,7 @@ impl TuiApp {
             "model" => match parts.next() {
                 Some(model) => {
                     self.model = model.to_string();
-                    self.agent =
-                        Arc::new(build_agent(&self.workspace, &self.model, self.read_only)?);
+                    self.rebuild_agent()?;
                     self.push_system(format!("模型已切换：{model}"), green());
                 }
                 None => self.push_system(format!("当前模型：{}", self.model), dim()),
@@ -598,6 +637,7 @@ impl TuiApp {
                     self.push_system(format!("已回滚：{}", restored.join(", ")), green());
                 }
             }
+            "mcp" => self.handle_mcp(command, runtime)?,
             "plan" => {
                 if !self.read_only {
                     self.toggle_mode()?;
@@ -623,6 +663,94 @@ impl TuiApp {
             }
             "clear" => self.transcript.clear(),
             other => self.push_system(format!("未知命令：/{other}（/help 查看）"), red()),
+        }
+        Ok(())
+    }
+
+    fn handle_mcp(
+        &mut self,
+        command: &str,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let rest = command.trim_start_matches("mcp").trim_start().to_string();
+        let mut parts = rest.split_whitespace();
+        match parts.next() {
+            Some("add") => {
+                let name = parts
+                    .next()
+                    .ok_or("用法：/mcp add <名称> <命令> [参数...]")?
+                    .to_string();
+                let command_line: Vec<&str> = parts.collect();
+                let command = command_line.first().ok_or("缺少 MCP 服务器命令")?;
+                let config = McpServerConfig {
+                    name: name.clone(),
+                    command: command.to_string(),
+                    args: command_line[1..]
+                        .iter()
+                        .map(|arg| arg.to_string())
+                        .collect(),
+                };
+                match runtime.block_on(McpClient::connect(&config)) {
+                    Ok(client) => {
+                        let tool_count = client.tools().len();
+                        self.mcp_clients
+                            .push((name.clone(), Arc::new(tokio::sync::Mutex::new(client))));
+                        self.mcp_configs.push(config);
+                        save_mcp_configs(&self.data_root, &self.mcp_configs);
+                        self.rebuild_agent()?;
+                        self.push_system(
+                            format!("已添加 MCP {name}（{tool_count} 个工具）"),
+                            green(),
+                        );
+                    }
+                    Err(error) => self.push_system(format!("MCP {name} 连接失败：{error}"), red()),
+                }
+            }
+            Some("list") => {
+                if self.mcp_clients.is_empty() {
+                    self.push_system(
+                        "未配置 MCP 服务器（/mcp add <名称> <命令>）".to_string(),
+                        dim(),
+                    );
+                } else {
+                    let mut lines = Vec::new();
+                    for (name, client) in &self.mcp_clients {
+                        let tool_names = match client.try_lock() {
+                            Ok(guard) => guard
+                                .tools()
+                                .into_iter()
+                                .map(|tool| tool.name)
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            Err(_) => "（忙碌）".to_string(),
+                        };
+                        lines.push(format!("{name}：{tool_names}"));
+                    }
+                    for line in lines {
+                        self.push_line(line, default());
+                    }
+                }
+            }
+            Some("remove") => {
+                let name = parts.next().ok_or("用法：/mcp remove <名称>")?;
+                if let Some(position) = self
+                    .mcp_clients
+                    .iter()
+                    .position(|(existing, _)| existing == name)
+                {
+                    let (_, client) = self.mcp_clients.remove(position);
+                    let _ = runtime.block_on(async { client.lock().await.shutdown().await });
+                }
+                self.mcp_configs.retain(|config| config.name != name);
+                save_mcp_configs(&self.data_root, &self.mcp_configs);
+                self.rebuild_agent()?;
+                self.push_system(format!("已移除 MCP 服务器：{name}"), green());
+            }
+            _ => self.push_system(
+                "用法：/mcp add <名称> <命令> [参数...] | /mcp list | /mcp remove <名称>"
+                    .to_string(),
+                dim(),
+            ),
         }
         Ok(())
     }
@@ -701,6 +829,7 @@ impl TuiApp {
             "/model [名称]  查看/切换模型",
             "/plan /build  切换只读/执行模式（或 Tab）",
             "/diff /undo  查看改动 / 回滚",
+            "/mcp add/list/remove  MCP 服务器",
             "/status /init /clear",
             "/exit 退出（或 Ctrl+C）",
         ] {
@@ -753,7 +882,17 @@ mod tests {
         let workspace = std::env::temp_dir();
         let store = JsonSessionStore::new(workspace.join("owo-tui-test-sessions"));
         let agent = Arc::new(crate::build_agent(&workspace, "mock", false).unwrap());
-        TuiApp::new(workspace, "mock".to_string(), false, true, store, agent)
+        TuiApp::new(
+            workspace,
+            "mock".to_string(),
+            false,
+            true,
+            std::env::temp_dir().join("owo-tui-test-root"),
+            store,
+            agent,
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     #[test]

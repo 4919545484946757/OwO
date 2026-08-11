@@ -5,8 +5,8 @@ use owo_agent_core::permissions::{Approver, AutoApprover, Decision, PermissionRe
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
-    Agent, AgentConfig, JsonSessionStore, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    TurnEvent,
+    Agent, AgentConfig, JsonSessionStore, McpClient, McpServerConfig, OpenAiCompatibleConfig,
+    OpenAiCompatibleProvider, TurnEvent,
 };
 use rustyline::error::ReadlineError;
 use std::future::Future;
@@ -152,6 +152,15 @@ fn build_agent(
     model: &str,
     read_only: bool,
 ) -> Result<Agent, Box<dyn std::error::Error>> {
+    build_agent_with_mcp(workspace, model, read_only, &[])
+}
+
+fn build_agent_with_mcp(
+    workspace: &std::path::Path,
+    model: &str,
+    read_only: bool,
+    mcp_clients: &[(String, Arc<tokio::sync::Mutex<McpClient>>)],
+) -> Result<Agent, Box<dyn std::error::Error>> {
     let mut config = OpenAiCompatibleConfig::from_env()?;
     config.model = model.to_string();
     let provider = Arc::new(OpenAiCompatibleProvider::new(config)?);
@@ -160,13 +169,61 @@ fn build_agent(
     } else {
         Policy::new(workspace.to_path_buf())
     };
-    let registry = ToolRegistry::new();
+    let mut registry = ToolRegistry::new();
+    for (server_name, client) in mcp_clients {
+        let tools = client
+            .try_lock()
+            .map_err(|_| format!("MCP 客户端 {server_name} 忙碌"))?
+            .tools();
+        registry.register_mcp_tools(server_name, Arc::clone(client), tools);
+    }
     Ok(Agent::new(
         provider,
         registry,
         policy,
         AgentConfig::default(),
     ))
+}
+
+async fn connect_mcp_clients(
+    configs: &[McpServerConfig],
+) -> Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)> {
+    let mut clients = Vec::new();
+    for config in configs {
+        match McpClient::connect(config).await {
+            Ok(client) => {
+                println!(
+                    "{} MCP {}（工具 {} 个）",
+                    "已连接".green(),
+                    config.name,
+                    client.tools().len()
+                );
+                clients.push((
+                    config.name.clone(),
+                    Arc::new(tokio::sync::Mutex::new(client)),
+                ));
+            }
+            Err(error) => println!("{} MCP {} 连接失败：{error}", "✘".red(), config.name),
+        }
+    }
+    clients
+}
+
+fn mcp_config_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("mcp-servers.json")
+}
+
+fn load_mcp_configs(root: &std::path::Path) -> Vec<McpServerConfig> {
+    std::fs::read_to_string(mcp_config_path(root))
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_mcp_configs(root: &std::path::Path, configs: &[McpServerConfig]) {
+    if let Ok(content) = serde_json::to_string_pretty(configs) {
+        let _ = std::fs::write(mcp_config_path(root), content);
+    }
 }
 
 fn data_root(override_dir: Option<PathBuf>) -> PathBuf {
@@ -342,11 +399,14 @@ struct Repl {
     model: String,
     read_only: bool,
     no_approval: bool,
+    data_root: PathBuf,
     store: JsonSessionStore,
     session: Option<Session>,
     agent: Arc<Agent>,
     abort: Arc<AtomicBool>,
     stdin: SharedStdin,
+    mcp_configs: Vec<McpServerConfig>,
+    mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
 }
 
 impl Repl {
@@ -356,17 +416,27 @@ impl Repl {
         let read_only = args.agent == "plan";
         let root = ensure_data_root(args.data_dir, &workspace);
         let store = JsonSessionStore::new(root.join("sessions"));
-        let agent = Arc::new(build_agent(&workspace, &model, read_only)?);
+        let mcp_configs = load_mcp_configs(&root);
+        let mcp_clients = connect_mcp_clients(&mcp_configs).await;
+        let agent = Arc::new(build_agent_with_mcp(
+            &workspace,
+            &model,
+            read_only,
+            &mcp_clients,
+        )?);
         let mut repl = Repl {
             workspace,
             model,
             read_only,
             no_approval: args.no_approval,
+            data_root: root.clone(),
             store,
             session: None,
             agent,
             abort: Arc::new(AtomicBool::new(false)),
             stdin: SharedStdin::new(),
+            mcp_configs,
+            mcp_clients,
         };
 
         println!(
@@ -508,6 +578,7 @@ impl Repl {
                 },
                 "diff" => self.show_diff(),
                 "undo" | "revert" => self.undo().await?,
+                "mcp" => self.handle_mcp(command).await?,
                 "status" => self.show_status(),
                 "permissions" => self.show_permissions(),
                 "audit" => self.show_audit(),
@@ -548,7 +619,86 @@ impl Repl {
     }
 
     fn rebuild_agent(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.agent = Arc::new(build_agent(&self.workspace, &self.model, self.read_only)?);
+        self.agent = Arc::new(build_agent_with_mcp(
+            &self.workspace,
+            &self.model,
+            self.read_only,
+            &self.mcp_clients,
+        )?);
+        Ok(())
+    }
+
+    async fn handle_mcp(&mut self, command: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let rest = command.trim_start_matches("mcp").trim_start().to_string();
+        let mut parts = rest.split_whitespace();
+        match parts.next() {
+            Some("add") => {
+                let name = parts
+                    .next()
+                    .ok_or("用法：/mcp add <名称> <命令> [参数...]")?
+                    .to_string();
+                let command_line: Vec<&str> = parts.collect();
+                let command = command_line
+                    .first()
+                    .ok_or("缺少 MCP 服务器命令（如 npx、node、python）")?;
+                let config = McpServerConfig {
+                    name: name.clone(),
+                    command: command.to_string(),
+                    args: command_line[1..]
+                        .iter()
+                        .map(|arg| arg.to_string())
+                        .collect(),
+                };
+                match McpClient::connect(&config).await {
+                    Ok(client) => {
+                        let tool_count = client.tools().len();
+                        self.mcp_clients
+                            .push((name.clone(), Arc::new(tokio::sync::Mutex::new(client))));
+                        self.mcp_configs.push(config);
+                        save_mcp_configs(&self.data_root, &self.mcp_configs);
+                        self.rebuild_agent()?;
+                        println!("{} MCP {name}（{tool_count} 个工具）", "已添加".green());
+                    }
+                    Err(error) => println!("{} 连接失败：{error}", "✘".red()),
+                }
+            }
+            Some("list") => {
+                if self.mcp_clients.is_empty() {
+                    println!("未配置 MCP 服务器（/mcp add <名称> <命令>）");
+                } else {
+                    for (name, client) in &self.mcp_clients {
+                        let tool_names = match client.try_lock() {
+                            Ok(guard) => guard
+                                .tools()
+                                .into_iter()
+                                .map(|tool| tool.name)
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            Err(_) => "（忙碌）".to_string(),
+                        };
+                        println!("{name}：{tool_names}");
+                    }
+                }
+            }
+            Some("remove") => {
+                let name = parts.next().ok_or("用法：/mcp remove <名称>")?;
+                if let Some(position) = self
+                    .mcp_clients
+                    .iter()
+                    .position(|(existing, _)| existing == name)
+                {
+                    let (_, client) = self.mcp_clients.remove(position);
+                    let _ = client.lock().await.shutdown().await;
+                }
+                self.mcp_configs.retain(|config| config.name != name);
+                save_mcp_configs(&self.data_root, &self.mcp_configs);
+                self.rebuild_agent()?;
+                println!("已移除 MCP 服务器：{name}");
+            }
+            _ => {
+                println!("用法：/mcp add <名称> <命令> [参数...] | /mcp list | /mcp remove <名称>")
+            }
+        }
         Ok(())
     }
 
