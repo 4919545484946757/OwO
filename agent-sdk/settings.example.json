@@ -1,0 +1,14 @@
+{
+  "model": "deepseek-v4-pro",
+  "read_only": false,
+  "deny_commands": ["git push", "shutdown"],
+  "mcp_servers": [
+    {
+      "name": "files",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "url": null
+    }
+  ]
+}

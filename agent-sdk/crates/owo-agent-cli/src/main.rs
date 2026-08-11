@@ -7,7 +7,7 @@ use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
     builtin_suite, eval_suite_path, export_html, export_markdown, list_traces, load_trace,
     run_suite, save_trace, Agent, AgentConfig, McpClient, McpServerConfig, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider, SkillRegistry, SqliteSessionStore, TraceRecord, TurnEvent,
+    OpenAiCompatibleProvider, Settings, SkillRegistry, SqliteSessionStore, TraceRecord, TurnEvent,
 };
 use rustyline::error::ReadlineError;
 use std::future::Future;
@@ -145,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_eval(args: EvalArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let model = resolve_model(args.model);
+    let model = resolve_model(args.model, None);
     let mut config = OpenAiCompatibleConfig::from_env()?;
     config.model = model.clone();
     let provider = std::sync::Arc::new(OpenAiCompatibleProvider::new(config)?);
@@ -175,10 +175,11 @@ where
         .block_on(future)
 }
 
-fn resolve_model(option: Option<String>) -> String {
-    option.unwrap_or_else(|| {
-        std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
-    })
+fn resolve_model(option: Option<String>, settings_model: Option<&str>) -> String {
+    option
+        .or_else(|| std::env::var("OPENAI_MODEL").ok())
+        .or_else(|| settings_model.map(str::to_string))
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
 fn build_agent(
@@ -188,7 +189,15 @@ fn build_agent(
 ) -> Result<Agent, Box<dyn std::error::Error>> {
     let root = ensure_data_root(None, workspace);
     let skills = SkillRegistry::discover(workspace, &root);
-    build_agent_with_mcp(workspace, model, read_only, &[], &skills)
+    let settings = Settings::load(workspace);
+    build_agent_with_mcp(
+        workspace,
+        model,
+        read_only,
+        &[],
+        &skills,
+        &settings.deny_commands,
+    )
 }
 
 fn build_agent_with_mcp(
@@ -197,15 +206,19 @@ fn build_agent_with_mcp(
     read_only: bool,
     mcp_clients: &[(String, Arc<tokio::sync::Mutex<McpClient>>)],
     skills: &SkillRegistry,
+    deny_commands: &[String],
 ) -> Result<Agent, Box<dyn std::error::Error>> {
     let mut config = OpenAiCompatibleConfig::from_env()?;
     config.model = model.to_string();
     let provider = Arc::new(OpenAiCompatibleProvider::new(config)?);
-    let policy = if read_only {
+    let mut policy = if read_only {
         Policy::read_only(workspace.to_path_buf())
     } else {
         Policy::new(workspace.to_path_buf())
     };
+    for fragment in deny_commands {
+        policy.add_deny_command(fragment.clone());
+    }
     let mut registry = ToolRegistry::new();
     for (server_name, client) in mcp_clients {
         let tools = client
@@ -299,7 +312,8 @@ fn display_path(path: &std::path::Path) -> String {
 
 async fn run_turn(args: TurnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
-    let model = resolve_model(args.model);
+    let settings = Settings::load(&workspace);
+    let model = resolve_model(args.model, settings.model.as_deref());
     let agent = build_agent(&workspace, &model, false)?;
     let mut session = Session::new(workspace.clone(), model, None);
     let abort = Arc::new(AtomicBool::new(false));
@@ -356,7 +370,8 @@ async fn run_turn(args: TurnArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
-    let model = resolve_model(None);
+    let settings = Settings::load(&workspace);
+    let model = resolve_model(None, settings.model.as_deref());
     let agent = build_agent(&workspace, &model, false)?;
     let root = ensure_data_root(None, &workspace);
     let store = SqliteSessionStore::open(&root.join("index.db"))?;
@@ -465,16 +480,23 @@ struct Repl {
     mcp_configs: Vec<McpServerConfig>,
     mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
     skills: SkillRegistry,
+    settings: Settings,
 }
 
 impl Repl {
     async fn run(args: ReplArgs) -> Result<(), Box<dyn std::error::Error>> {
         let workspace = args.workspace.canonicalize()?;
-        let model = resolve_model(args.model);
-        let read_only = args.agent == "plan";
+        let settings = Settings::load(&workspace);
+        let model = resolve_model(args.model, settings.model.as_deref());
+        let read_only = args.agent == "plan" || settings.read_only;
         let root = ensure_data_root(args.data_dir, &workspace);
         let store = SqliteSessionStore::open(&root.join("index.db"))?;
-        let mcp_configs = load_mcp_configs(&root);
+        let mut mcp_configs = load_mcp_configs(&root);
+        for server in settings.mcp_servers.clone() {
+            if !mcp_configs.iter().any(|config| config.name == server.name) {
+                mcp_configs.push(server);
+            }
+        }
         let mcp_clients = connect_mcp_clients(&mcp_configs).await;
         let skills = SkillRegistry::discover(&workspace, &root);
         let agent = Arc::new(build_agent_with_mcp(
@@ -483,6 +505,7 @@ impl Repl {
             read_only,
             &mcp_clients,
             &skills,
+            &settings.deny_commands,
         )?);
         let mut repl = Repl {
             workspace,
@@ -498,6 +521,7 @@ impl Repl {
             mcp_configs,
             mcp_clients,
             skills,
+            settings,
         };
 
         println!(
@@ -653,6 +677,7 @@ impl Repl {
                 "share" => self.share_session(parts.next())?,
                 "traces" => self.list_traces(),
                 "trace" => self.show_trace(parts.next())?,
+                "settings" => self.show_settings(),
                 "status" => self.show_status(),
                 "permissions" => self.show_permissions(),
                 "audit" => self.show_audit(),
@@ -699,6 +724,7 @@ impl Repl {
             self.read_only,
             &self.mcp_clients,
             &self.skills,
+            &self.settings.deny_commands,
         )?);
         Ok(())
     }
@@ -1005,6 +1031,13 @@ impl Repl {
         Ok(())
     }
 
+    fn show_settings(&self) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&self.settings).unwrap_or_default()
+        );
+    }
+
     fn list_sessions(&self) {
         let ids = self.store.list();
         if ids.is_empty() {
@@ -1243,6 +1276,7 @@ fn print_help() {
     println!("  /tree               查看会话树");
     println!("  /share [html]       导出会话分享（Markdown/HTML）");
     println!("  /traces | /trace <n>  列出/回放回合轨迹");
+    println!("  /settings           查看工作区 settings.json 配置");
     println!("  /model [名称]       查看/切换模型");
     println!("  /plan | /build      切换只读规划模式 / 执行模式");
     println!("  /diff               查看本次会话文件改动");

@@ -98,6 +98,14 @@ impl Policy {
         self.read_only = read_only;
     }
 
+    /// 追加额外危险命令片段（deny 优先）。
+    pub fn add_deny_command(&mut self, fragment: impl Into<String>) {
+        let fragment = fragment.into().to_lowercase();
+        if !self.deny_command_fragments.contains(&fragment) {
+            self.deny_command_fragments.push(fragment);
+        }
+    }
+
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
@@ -236,5 +244,16 @@ mod tests {
         let policy = Policy::read_only(".");
         let request = policy.evaluate("read_file", &json!({ "path": "a.txt" }));
         assert_eq!(policy.decision(&request), Decision::Allow);
+    }
+
+    #[test]
+    fn custom_deny_command_fragment_is_enforced() {
+        let mut policy = Policy::new(".");
+        policy.add_deny_command("danger-command");
+        let request = policy.evaluate(
+            "run_command",
+            &json!({ "command": "danger-command --force" }),
+        );
+        assert_eq!(policy.decision(&request), Decision::Deny);
     }
 }

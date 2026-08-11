@@ -10,6 +10,7 @@ pub mod gateway;
 pub mod mcp;
 pub mod permissions;
 pub mod session;
+pub mod settings;
 pub mod share;
 pub mod skill;
 pub mod sqlite_store;
@@ -28,6 +29,7 @@ pub use gateway::{
 pub use mcp::{McpClient, McpServerConfig, McpTool};
 pub use permissions::{Approver, Decision, Level, PermissionRequest, Policy};
 pub use session::{JsonSessionStore, Session, SessionStore};
+pub use settings::Settings;
 pub use share::{export_html, export_markdown};
 pub use skill::{Skill, SkillRegistry};
 pub use sqlite_store::SqliteSessionStore;

@@ -10,7 +10,8 @@ use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::{
     export_html, export_markdown, list_traces, load_trace, save_trace, Agent, McpClient,
-    McpServerConfig, SkillRegistry, SqliteSessionStore, TraceRecord, TurnEvent, TurnOutcome,
+    McpServerConfig, Settings, SkillRegistry, SqliteSessionStore, TraceRecord, TurnEvent,
+    TurnOutcome,
 };
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -45,11 +46,17 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let workspace = args.workspace.canonicalize()?;
-    let model = resolve_model(args.model);
-    let read_only = args.agent == "plan";
+    let settings = Settings::load(&workspace);
+    let model = resolve_model(args.model, settings.model.as_deref());
+    let read_only = args.agent == "plan" || settings.read_only;
     let root = ensure_data_root(args.data_dir, &workspace);
     let store = SqliteSessionStore::open(&root.join("index.db"))?;
-    let mcp_configs = load_mcp_configs(&root);
+    let mut mcp_configs = load_mcp_configs(&root);
+    for server in settings.mcp_servers.clone() {
+        if !mcp_configs.iter().any(|config| config.name == server.name) {
+            mcp_configs.push(server);
+        }
+    }
     let mcp_clients = runtime.block_on(connect_mcp_clients(&mcp_configs));
     let skills = SkillRegistry::discover(&workspace, &root);
     let agent = Arc::new(build_agent_with_mcp(
@@ -58,6 +65,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         read_only,
         &mcp_clients,
         &skills,
+        &settings.deny_commands,
     )?);
     let mut app = TuiApp::new(
         workspace,
@@ -70,6 +78,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         mcp_configs,
         mcp_clients,
         skills,
+        settings,
     );
     let terminal = ratatui::init();
     let result = app.run(&runtime, terminal);
@@ -133,6 +142,7 @@ struct TuiApp {
     mcp_configs: Vec<McpServerConfig>,
     mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
     skills: SkillRegistry,
+    settings: Settings,
 }
 
 impl TuiApp {
@@ -148,6 +158,7 @@ impl TuiApp {
         mcp_configs: Vec<McpServerConfig>,
         mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
         skills: SkillRegistry,
+        settings: Settings,
     ) -> Self {
         Self {
             workspace,
@@ -175,6 +186,7 @@ impl TuiApp {
             mcp_configs,
             mcp_clients,
             skills,
+            settings,
         }
     }
 
@@ -579,6 +591,7 @@ impl TuiApp {
             self.read_only,
             &self.mcp_clients,
             &self.skills,
+            &self.settings.deny_commands,
         )?);
         Ok(())
     }
@@ -669,6 +682,7 @@ impl TuiApp {
             "share" => self.share_session(parts.next())?,
             "traces" => self.list_traces(),
             "trace" => self.show_trace(parts.next())?,
+            "settings" => self.show_settings(),
             "plan" => {
                 if !self.read_only {
                     self.toggle_mode()?;
@@ -913,6 +927,13 @@ impl TuiApp {
         Ok(())
     }
 
+    fn show_settings(&mut self) {
+        let content = serde_json::to_string_pretty(&self.settings).unwrap_or_default();
+        for line in content.lines() {
+            self.push_line(line.to_string(), default());
+        }
+    }
+
     fn handle_mcp(
         &mut self,
         command: &str,
@@ -1090,6 +1111,7 @@ impl TuiApp {
             "/undo-msg [n] /redo-msg  消息级撤销/重做",
             "/share [html]  导出会话分享",
             "/traces /trace <n>  回合轨迹",
+            "/settings  查看 settings.json",
             "/model [名称]  查看/切换模型",
             "/plan /build  切换只读/执行模式（或 Tab）",
             "/diff /undo  查看改动 / 回滚",
@@ -1161,6 +1183,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             SkillRegistry::default(),
+            Settings::default(),
         )
     }
 

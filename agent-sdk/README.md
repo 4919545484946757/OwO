@@ -21,6 +21,8 @@ OPENAI_MODEL=gpt-5.1-codex                      # 可替换任意 OpenAI-compati
 OWO_AGENT_DATA=%LOCALAPPDATA%\OwO\Agent         # 会话/审计数据目录（可选）
 ```
 
+工作区配置（`settings.json`，参考 `settings.example.json`）：默认模型、默认只读模式、额外危险命令片段、自动连接的 MCP 服务器；优先级为 命令行参数 > 环境变量 > settings.json > 内置默认。
+
 ## 构建与测试
 
 ```powershell
