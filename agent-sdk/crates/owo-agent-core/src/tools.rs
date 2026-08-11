@@ -2,6 +2,7 @@ use crate::audit::AuditLog;
 use crate::mcp::{McpClient, McpTool};
 use crate::permissions::Policy;
 use crate::session::Session;
+use crate::subagent::SubagentRunner;
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -21,6 +22,7 @@ pub struct ToolContext<'a> {
     pub policy: &'a Policy,
     pub session: &'a mut Session,
     pub audit: &'a Arc<Mutex<AuditLog>>,
+    pub subagent: Option<SubagentRunner<'a>>,
 }
 
 #[async_trait]
@@ -41,6 +43,17 @@ impl ToolRegistry {
         registry.register(ListDirTool);
         registry.register(SearchFilesTool);
         registry.register(RunCommandTool);
+        registry.register(ExploreTool);
+        registry.register(SubagentTool);
+        registry
+    }
+
+    /// 只读工具表（子代理 explore 使用）：不含写/执行/委派工具。
+    pub fn read_only() -> Self {
+        let mut registry = Self { tools: Vec::new() };
+        registry.register(ReadFileTool);
+        registry.register(ListDirTool);
+        registry.register(SearchFilesTool);
         registry
     }
 
@@ -368,5 +381,59 @@ impl std::fmt::Debug for McpToolAdapter {
             .debug_struct("McpToolAdapter")
             .field("full_name", &self.full_name)
             .finish()
+    }
+}
+
+struct ExploreTool;
+
+#[async_trait]
+impl Tool for ExploreTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "explore".into(),
+            description: "把调查任务交给只读探索子代理（只能读/搜文件），返回其调查汇报".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .ok_or("参数缺少字符串字段：query")?;
+        let runner = ctx.subagent.as_ref().ok_or("子代理运行时不可用")?;
+        let text = runner.run(ctx.workspace, query, true).await?;
+        Ok(json!({ "mode": "explore", "text": text }))
+    }
+}
+
+struct SubagentTool;
+
+#[async_trait]
+impl Tool for SubagentTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "subagent".into(),
+            description: "把独立任务委派给通用子代理（完整工具、仍需审批），返回其汇报".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "task": { "type": "string" } },
+                "required": ["task"]
+            }),
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let task = args
+            .get("task")
+            .and_then(Value::as_str)
+            .ok_or("参数缺少字符串字段：task")?;
+        let runner = ctx.subagent.as_ref().ok_or("子代理运行时不可用")?;
+        let text = runner.run(ctx.workspace, task, false).await?;
+        Ok(json!({ "mode": "general", "text": text }))
     }
 }

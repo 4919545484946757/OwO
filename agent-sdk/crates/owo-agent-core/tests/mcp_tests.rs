@@ -61,6 +61,7 @@ async fn mcp_tools_are_registered_and_callable() {
         policy: &policy,
         session: &mut session,
         audit: &audit,
+        subagent: None,
     };
     let result = registry
         .execute("test_echo", &mut context, json!({ "text": "ok" }))

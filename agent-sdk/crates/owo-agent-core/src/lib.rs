@@ -9,6 +9,7 @@ pub mod gateway;
 pub mod mcp;
 pub mod permissions;
 pub mod session;
+pub mod subagent;
 pub mod tools;
 
 pub use agent::{Agent, AgentConfig, TurnEvent, TurnOutcome};

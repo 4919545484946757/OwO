@@ -278,3 +278,42 @@ async fn streaming_deltas_are_emitted_and_final_text_returned() {
         .collect();
     assert_eq!(deltas, vec!["你".to_string(), "好".to_string()]);
 }
+
+#[tokio::test]
+async fn explore_subagent_runs_read_only_child_and_returns_report() {
+    let workspace = temp_workspace("subagent-explore");
+    std::fs::write(workspace.join("info.txt"), "重要信息").unwrap();
+    let provider = ScriptedProvider::new(vec![
+        call("c1", "explore", json!({ "query": "info.txt 的内容" })),
+        ModelOutput::Text("子代理发现：重要信息".to_string()),
+        ModelOutput::Text("done".to_string()),
+    ]);
+    let agent = build_agent(&workspace, provider);
+    let mut session = Session::new(&workspace, "mock".to_string(), None);
+    let abort = AtomicBool::new(false);
+    let approver = AutoApprover { allow: true };
+
+    let outcome = agent
+        .run_turn(&mut session, "探索一下", &approver, &abort, &mut |_| {})
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.final_text.as_deref(), Some("done"));
+    assert!(session.messages.iter().any(|message| message
+        .content
+        .as_deref()
+        .is_some_and(|c| c.contains("子代理发现"))));
+}
+
+#[tokio::test]
+async fn read_only_registry_has_no_write_or_delegate_tools() {
+    let registry = ToolRegistry::read_only();
+    let specs = registry.specs();
+    assert!(specs.iter().any(|spec| spec.name == "read_file"));
+    assert!(specs.iter().all(|spec| {
+        !matches!(
+            spec.name.as_str(),
+            "write_file" | "run_command" | "explore" | "subagent"
+        )
+    }));
+}

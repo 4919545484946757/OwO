@@ -4,6 +4,7 @@ use crate::error::AgentError;
 use crate::gateway::{ChatMessage, ModelOutput, ModelProvider};
 use crate::permissions::{Approver, Decision, PermissionRequest, Policy};
 use crate::session::Session;
+use crate::subagent::SubagentRunner;
 use crate::tools::{ToolContext, ToolRegistry};
 use chrono::Utc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +14,7 @@ use std::sync::{Arc, Mutex};
 pub struct AgentConfig {
     pub max_turns: usize,
     pub context_limit: usize,
+    pub subagent_depth: usize,
 }
 
 impl Default for AgentConfig {
@@ -20,6 +22,7 @@ impl Default for AgentConfig {
         Self {
             max_turns: 25,
             context_limit: 200,
+            subagent_depth: 0,
         }
     }
 }
@@ -182,11 +185,20 @@ impl Agent {
                                     tool: call.name.clone(),
                                 },
                             );
+                            let subagent = SubagentRunner {
+                                provider: Arc::clone(&self.provider),
+                                approver,
+                                abort,
+                                depth: self.config.subagent_depth,
+                                max_turns: self.config.max_turns,
+                                model: session.model.clone(),
+                            };
                             let mut ctx = ToolContext {
                                 workspace: &workspace,
                                 policy: &self.policy,
                                 session,
                                 audit: &self.audit,
+                                subagent: Some(subagent),
                             };
                             let outcome = self
                                 .registry

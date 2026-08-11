@@ -81,9 +81,10 @@ cargo run -p owo-agent-cli -- serve --port 4096
 - 模型网关：OpenAI-compatible chat completions（工具调用）。
 - 模型流式输出：SSE token 增量实时上屏（REPL/TUI 打字机效果），工具调用片段流式组装。
 - MCP 客户端：stdio JSON-RPC（initialize/tools/list/tools/call），工具以 `{server}_{tool}` 命名注册进 Agent。
+- 子代理：`explore`（只读调查，独立子会话）与 `subagent`（通用委派，完整工具需审批），深度限制 2 层，共享中止/审批。
 - 交互式 CLI：build/plan 模式、会话、diff/undo、审批、审计、AGENTS.md 初始化。
 
 ## 尚未实现（M2+）
 
-- AGENTS.md 已注入；Skills/子代理/MCP HTTP 传输尚未实现。
+- AGENTS.md 已注入；Skills/MCP HTTP 传输尚未实现。
 - 上下文压缩（仅截断）、SQLite 存储、云执行、沙箱 OS 隔离、traces/evals 平台。
