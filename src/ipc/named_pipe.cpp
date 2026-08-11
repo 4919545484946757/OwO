@@ -272,6 +272,14 @@ std::vector<std::string> preferred_source_segmentation(
         parsed.paths.begin(), parsed.paths.end(), [](const engine::ParsePath& path) {
             return path.match_kind == engine::InputMatchKind::exact && !path.syllables.empty();
         });
+    // For long compact input the engine may intentionally compare two exact
+    // segmentations. Keep the preview aligned with the winning candidate;
+    // short input and user-authored apostrophe boundaries retain the existing
+    // preview rules.
+    if (parsed.normalized_input.size() >= 12 &&
+        parsed.normalized_input.find('\'') == std::string::npos &&
+        !candidate_segments.empty())
+        return candidate_segments;
     if (!correction_enabled)
         return exact != parsed.paths.end() ? source_segments(*exact) : raw_segments();
 
@@ -368,6 +376,7 @@ private:
 
 struct CandidateCacheKey {
     std::string input;
+    std::string context_input;
     std::string context;
     std::uint64_t config_generation{};
     std::uint64_t learning_generation{};
@@ -385,6 +394,7 @@ struct CandidateCacheKeyHash {
         const auto combine = [&value](const std::size_t next) {
             value ^= next + 0x9e3779b9U + (value << 6U) + (value >> 2U);
         };
+        combine(std::hash<std::string>{}(key.context_input));
         combine(std::hash<std::string>{}(key.context));
         combine(std::hash<std::uint64_t>{}(key.config_generation));
         combine(std::hash<std::uint64_t>{}(key.learning_generation));
@@ -441,6 +451,138 @@ bool is_double_initial_input(const std::string_view input) {
         return value >= 'a' && value <= 'z' &&
                vowels.find(value) == std::string_view::npos;
     });
+}
+
+std::vector<std::size_t> utf8_boundaries(const std::string_view text) {
+    std::vector<std::size_t> boundaries{0};
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        const auto byte = static_cast<unsigned char>(text[index]);
+        if ((byte & 0xc0U) != 0x80U && index != 0) boundaries.push_back(index);
+    }
+    boundaries.push_back(text.size());
+    return boundaries;
+}
+
+std::string_view utf8_prefix(const std::string_view text,
+                             const std::size_t characters) {
+    const auto boundaries = utf8_boundaries(text);
+    if (boundaries.size() <= 1) return {};
+    const auto count = std::min(characters, boundaries.size() - 1);
+    return text.substr(0, boundaries[count]);
+}
+
+std::string_view utf8_suffix(const std::string_view text,
+                             const std::size_t characters) {
+    const auto boundaries = utf8_boundaries(text);
+    if (boundaries.size() <= 1) return {};
+    const auto count = std::min(characters, boundaries.size() - 1);
+    return text.substr(boundaries[boundaries.size() - 1 - count]);
+}
+
+struct ContextualLexiconMatch {
+    std::string candidate;
+    std::size_t combined_syllables{};
+    std::uint32_t frequency{};
+    std::size_t original_index{};
+};
+
+std::vector<std::string> contextual_lexicon_preferences(
+    const engine::Lexicon& lexicon,
+    const engine::ParseResult& previous,
+    const std::string_view context,
+    const std::vector<engine::Candidate>& candidates,
+    const std::size_t limit = 2) {
+    if (!previous.valid || context.empty() || candidates.empty() || limit == 0)
+        return {};
+    const auto previous_path = std::find_if(
+        previous.paths.begin(), previous.paths.end(),
+        [](const engine::ParsePath& path) {
+            return path.match_kind == engine::InputMatchKind::exact &&
+                   !path.syllables.empty();
+        });
+    if (previous_path == previous.paths.end()) return {};
+
+    std::vector<ContextualLexiconMatch> matches;
+    for (std::size_t candidate_index = 0; candidate_index < candidates.size();
+         ++candidate_index) {
+        const auto& candidate = candidates[candidate_index];
+        if (candidate.model_only || candidate.text.empty() ||
+            candidate.syllables.empty()) continue;
+        std::optional<ContextualLexiconMatch> best;
+        const auto previous_limit = std::min<std::size_t>(
+            2, previous_path->syllables.size());
+        const auto candidate_limit = std::min<std::size_t>(
+            2, std::min(candidate.syllables.size(),
+                        utf8_character_count(candidate.text)));
+        for (std::size_t previous_count = 1; previous_count <= previous_limit;
+             ++previous_count) {
+            const auto previous_text = utf8_suffix(context, previous_count);
+            if (utf8_character_count(previous_text) != previous_count) continue;
+            for (std::size_t candidate_count = 1; candidate_count <= candidate_limit;
+                 ++candidate_count) {
+                std::vector<std::string_view> reading;
+                reading.reserve(previous_count + candidate_count);
+                const auto previous_begin =
+                    previous_path->syllables.size() - previous_count;
+                for (std::size_t index = previous_begin;
+                     index < previous_path->syllables.size(); ++index)
+                    reading.push_back(previous_path->syllables[index].text);
+                for (std::size_t index = 0; index < candidate_count; ++index)
+                    reading.push_back(candidate.syllables[index]);
+                const std::string expected = std::string(previous_text) +
+                    std::string(utf8_prefix(candidate.text, candidate_count));
+                for (const auto& entry : lexicon.lookup(reading)) {
+                    if (entry.text != expected) continue;
+                    const ContextualLexiconMatch current{
+                        candidate.text, reading.size(), entry.frequency,
+                        candidate_index};
+                    if (!best || current.combined_syllables > best->combined_syllables ||
+                        (current.combined_syllables == best->combined_syllables &&
+                         current.frequency > best->frequency))
+                        best = current;
+                }
+            }
+        }
+        if (best) matches.push_back(std::move(*best));
+    }
+    std::stable_sort(matches.begin(), matches.end(),
+                     [](const auto& left, const auto& right) {
+        if (left.combined_syllables != right.combined_syllables)
+            return left.combined_syllables > right.combined_syllables;
+        if (left.frequency != right.frequency)
+            return left.frequency > right.frequency;
+        return left.original_index < right.original_index;
+    });
+    std::vector<std::string> preferences;
+    for (const auto& match : matches) {
+        if (std::find(preferences.begin(), preferences.end(), match.candidate) !=
+            preferences.end()) continue;
+        preferences.push_back(match.candidate);
+        if (preferences.size() == limit) break;
+    }
+    return preferences;
+}
+
+void promote_contextual_preferences(
+    const std::vector<std::string>& preferences,
+    std::vector<engine::Candidate>& candidates) {
+    for (auto preference = preferences.rbegin(); preference != preferences.rend();
+         ++preference) {
+        const auto found = std::find_if(
+            candidates.begin(), candidates.end(), [&preference](const engine::Candidate& candidate) {
+                return candidate.text == *preference;
+            });
+        if (found == candidates.end()) continue;
+        const auto consumed = found->consumed_input_bytes;
+        auto tier_begin = std::find_if(
+            candidates.begin(), found, [consumed](const engine::Candidate& candidate) {
+                return candidate.consumed_input_bytes == consumed;
+            });
+        if (tier_begin == found) continue;
+        auto promoted = std::move(*found);
+        candidates.erase(found);
+        candidates.insert(tier_begin, std::move(promoted));
+    }
 }
 
 void arrange_double_initial_pages(std::vector<engine::Candidate>& candidates,
@@ -593,6 +735,9 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
         std::vector<std::string> candidates;
         std::vector<std::uint64_t> candidate_consumed;
         std::size_t full_input_bytes{};
+        std::size_t visible_count{};
+        std::vector<std::string> contextual_preferences;
+        std::vector<std::string> learned_preferences;
     };
     std::unordered_map<std::string, PendingModelRequest> model_requests;
     LatestModelTaskQueue model_queue;
@@ -724,6 +869,72 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                             update.candidates, pending.full_input_bytes,
                             pending.candidates, pending.candidate_consumed,
                             response.candidates, response.candidate_consumed);
+                        std::string model_preferred_full;
+                        for (std::size_t index = 0;
+                             index < response.candidates.size(); ++index) {
+                            if (response.candidate_consumed[index] !=
+                                pending.full_input_bytes)
+                                continue;
+                            model_preferred_full = response.candidates[index];
+                            break;
+                        }
+                        promote_preferred_candidates(
+                            pending.contextual_preferences, response.candidates,
+                            response.candidate_consumed);
+                        restore_preferred_candidate_positions(
+                            pending.learned_preferences, pending.candidates,
+                            pending.candidate_consumed, response.candidates,
+                            response.candidate_consumed);
+                        auto visible_full_count = std::max<std::size_t>(
+                            1, static_cast<std::size_t>(std::count(
+                                   pending.candidate_consumed.begin(),
+                                   pending.candidate_consumed.begin() +
+                                       static_cast<std::ptrdiff_t>(
+                                           std::min(pending.visible_count,
+                                            pending.candidate_consumed.size())),
+                                   pending.full_input_bytes)));
+                        // A learned choice may disagree with the language
+                        // model. Preserve both full-input candidates in that
+                        // case so the user can select the model preference and
+                        // naturally correct their frequency history. Inputs
+                        // without such a conflict still expose only the normal
+                        // one-or-two sentence budget.
+                        const auto learned_preferred_full = std::find_if(
+                            response.candidate_consumed.begin(),
+                            response.candidate_consumed.end(),
+                            [&pending](const std::uint64_t consumed) {
+                                return consumed == pending.full_input_bytes;
+                            });
+                        if (!model_preferred_full.empty() &&
+                            learned_preferred_full !=
+                                response.candidate_consumed.end()) {
+                            const auto index = static_cast<std::size_t>(
+                                learned_preferred_full -
+                                response.candidate_consumed.begin());
+                            if (response.candidates[index] != model_preferred_full)
+                                visible_full_count = std::max<std::size_t>(
+                                    visible_full_count, 2);
+                        }
+                        std::size_t retained_full = 0;
+                        for (std::size_t index = 0;
+                             index < response.candidates.size();) {
+                            if (response.candidate_consumed[index] !=
+                                pending.full_input_bytes ||
+                                retained_full++ < visible_full_count) {
+                                ++index;
+                                continue;
+                            }
+                            response.candidates.erase(
+                                response.candidates.begin() +
+                                static_cast<std::ptrdiff_t>(index));
+                            response.candidate_consumed.erase(
+                                response.candidate_consumed.begin() +
+                                static_cast<std::ptrdiff_t>(index));
+                        }
+                        if (response.candidates.size() > pending.visible_count) {
+                            response.candidates.resize(pending.visible_count);
+                            response.candidate_consumed.resize(pending.visible_count);
+                        }
                     }
                 }
                 }
@@ -742,6 +953,12 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                 constexpr std::size_t maximum_expanded_pages = 8;
                 constexpr std::size_t maximum_expanded_candidates = 64;
                 std::size_t full_input_bytes = 0;
+                std::vector<std::string> model_candidate_pool;
+                std::vector<std::size_t> model_candidate_consumed;
+                std::vector<std::string> model_hidden_candidates;
+                std::vector<std::uint64_t> model_hidden_consumed;
+                std::vector<std::string> contextual_preferences;
+                std::vector<std::string> learned_preferences;
                 if (decoded.message.page > maximum_page ||
                     (decoded.message.expanded && decoded.message.page != 0)) {
                     response.type = protocol::MessageType::error_response;
@@ -767,6 +984,9 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                     const bool double_initial_request =
                         is_double_initial_input(decoded.message.text);
                     auto result_limit = begin + result_size + 1;
+                    if (adaptive_ranking_enabled && !decoded.message.input.empty() &&
+                        !decoded.message.context.empty())
+                        result_limit = std::max<std::size_t>(result_limit, 16);
                     if (double_initial_request) {
                         const auto requested_pages = decoded.message.expanded
                                                          ? expanded_pages
@@ -782,6 +1002,7 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                     }
                     CandidateCacheKey cache_key{
                         decoded.message.text,
+                        decoded.message.input,
                         decoded.message.context,
                         config_monitor != nullptr ? config_monitor->generation() : 0,
                         learning_generation,
@@ -800,20 +1021,38 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                         candidates = std::move(cached->candidates);
                     } else {
                         const auto strict_parse_started = std::chrono::steady_clock::now();
-                        const auto strict_path_limit = decoded.message.expanded
-                                                           ? std::size_t{16}
-                                                           : std::size_t{8};
-                        parsed = schema.parse_incremental(
-                            decoded.message.text, strict_path_limit,
-                            incremental_parse_state, &parse_metrics, cancelled,
-                            &incremental_reused);
+                        const auto long_compact_input =
+                            decoded.message.text.size() >= 12 &&
+                            decoded.message.text.find('\'') == std::string::npos;
+                        const auto strict_path_limit =
+                            decoded.message.expanded || long_compact_input
+                                ? std::size_t{16}
+                                : std::size_t{8};
+                        if (long_compact_input) {
+                            // Long ambiguous input must be deterministic for a
+                            // given string. Reusing a boundary fixed by an
+                            // earlier prefix can lock kuang'ao and poison the
+                            // candidate cache even after kuan'gao becomes the
+                            // stronger complete sentence.
+                            parsed = schema.parse(
+                                decoded.message.text, strict_path_limit, false,
+                                &parse_metrics, cancelled);
+                            incremental_parse_state = {
+                                decoded.message.text, parsed, strict_path_limit};
+                        } else {
+                            parsed = schema.parse_incremental(
+                                decoded.message.text, strict_path_limit,
+                                incremental_parse_state, &parse_metrics, cancelled,
+                                &incremental_reused);
+                        }
                         parse_phase_us += static_cast<std::uint64_t>(
                             std::chrono::duration_cast<std::chrono::microseconds>(
                                 std::chrono::steady_clock::now() - strict_parse_started).count());
                         const auto strict_generation_started = std::chrono::steady_clock::now();
                         candidates = generator.generate(
                             parsed, result_limit, adaptive_ranking_enabled,
-                            decoded.message.context, &generation_metrics, cancelled);
+                            decoded.message.context, &generation_metrics, cancelled,
+                            external_model_ranking_enabled);
                         generation_phase_us += static_cast<std::uint64_t>(
                             std::chrono::duration_cast<std::chrono::microseconds>(
                                 std::chrono::steady_clock::now() -
@@ -863,7 +1102,7 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                             auto corrected_candidates = generator.generate(
                                 corrected, result_limit, adaptive_ranking_enabled,
                                 decoded.message.context, &corrected_generation_metrics,
-                                cancelled);
+                                cancelled, external_model_ranking_enabled);
                             generation_phase_us += static_cast<std::uint64_t>(
                                 std::chrono::duration_cast<std::chrono::microseconds>(
                                     std::chrono::steady_clock::now() -
@@ -892,14 +1131,47 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                         if (!cancelled())
                             candidate_cache.put(cache_key, {parsed, candidates});
                     }
+                    if (adaptive_ranking_enabled && !decoded.message.input.empty() &&
+                        !decoded.message.context.empty() && !candidates.empty()) {
+                        const auto previous = schema.parse(
+                            decoded.message.input, 8, false);
+                        contextual_preferences = contextual_lexicon_preferences(
+                            lexicon, previous, decoded.message.context, candidates);
+                        promote_contextual_preferences(
+                            contextual_preferences, candidates);
+                    }
                     full_input_bytes = parsed.normalized_input.size();
                     const auto generation_finished = std::chrono::steady_clock::now();
-                    const auto end = std::min(candidates.size(), begin + result_size);
+                    const auto first_model_only = std::find_if(
+                        candidates.begin(), candidates.end(),
+                        [](const engine::Candidate& candidate) {
+                            return candidate.model_only;
+                        });
+                    const auto visible_candidate_count = static_cast<std::size_t>(
+                        first_model_only - candidates.begin());
+                    model_candidate_pool.reserve(candidates.size());
+                    model_candidate_consumed.reserve(candidates.size());
+                    for (const auto& candidate : candidates) {
+                        model_candidate_pool.push_back(candidate.text);
+                        model_candidate_consumed.push_back(
+                            candidate.consumed_input_bytes);
+                    }
+                    if (begin == 0) {
+                        for (std::size_t index = visible_candidate_count;
+                             index < candidates.size(); ++index) {
+                            if (!candidates[index].model_only) continue;
+                            model_hidden_candidates.push_back(candidates[index].text);
+                            model_hidden_consumed.push_back(
+                                candidates[index].consumed_input_bytes);
+                        }
+                    }
+                    const auto end = std::min(visible_candidate_count,
+                                              begin + result_size);
                     response.page = decoded.message.expanded ? 0 : decoded.message.page;
                     response.expanded = decoded.message.expanded;
                     response.page_size = candidate_page_size;
                     response.correction_enabled = decoded.message.correction_enabled;
-                    response.has_more = candidates.size() > end;
+                    response.has_more = visible_candidate_count > end;
                     // Preview the parser's preferred source structure. Auxiliary
                     // abbreviation/correction paths may generate candidates, but
                     // must not rewrite xing+b as xin+g+b or xing+ba+f as xing+baf.
@@ -981,6 +1253,47 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                 // Transitional compatibility for the P1 TSF consumer. It is removed when
                 // TSF owns a paged candidate list later in P2.1.
                 if (!response.candidates.empty()) response.text = response.candidates.front();
+                if (user_frequency != nullptr && user_learning_enabled &&
+                    !response.candidates.empty()) {
+                    struct LearnedPreference {
+                        std::string text;
+                        std::int64_t score{};
+                        std::size_t index{};
+                    };
+                    std::vector<LearnedPreference> learned;
+                    learned.reserve(response.candidates.size());
+                    for (std::size_t index = 0; index < response.candidates.size(); ++index) {
+                        const auto& text = response.candidates[index];
+                        const auto score = user_frequency->score(text) +
+                            user_frequency->contextual_score(
+                                decoded.message.text, text) +
+                            user_frequency->language_context_score(
+                                decoded.message.context, decoded.message.text, text);
+                        if (score > 0) learned.push_back({text, score, index});
+                    }
+                    std::stable_sort(learned.begin(), learned.end(),
+                                     [](const auto& left, const auto& right) {
+                        if (left.score != right.score) return left.score > right.score;
+                        return left.index < right.index;
+                    });
+                    for (const auto& preference : learned) {
+                        learned_preferences.push_back(preference.text);
+                        if (learned_preferences.size() == 2) break;
+                    }
+                }
+                auto model_update_candidates = response.candidates;
+                auto model_update_consumed = response.candidate_consumed;
+                // Normal candidates remain page-local so a delayed model
+                // result cannot replace page N with page zero. Hidden
+                // whole-input alternatives are the deliberate exception:
+                // they exist only to let sentence-level scoring replace a
+                // raw-frequency composition on the first page.
+                model_update_candidates.insert(model_update_candidates.end(),
+                                               model_hidden_candidates.begin(),
+                                               model_hidden_candidates.end());
+                model_update_consumed.insert(model_update_consumed.end(),
+                                             model_hidden_consumed.begin(),
+                                             model_hidden_consumed.end());
                 if (external_model_ranking_enabled && !response.candidates.empty() &&
                     !is_double_initial_input(decoded.message.text) &&
                     model_requests.size() < 128) {
@@ -994,9 +1307,7 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                     model_request.model_id.clear();
                     model_request.input = decoded.message.text;
                     model_request.context = decoded.message.context;
-                    model_request.candidates = response.candidates;
-                    const auto original_candidates = response.candidates;
-                    const auto original_consumed = response.candidate_consumed;
+                    model_request.candidates = model_candidate_pool;
                     const std::wstring model_pipe(model_pipe_name);
                     // Only the newest composition can affect the active TSF
                     // window. Drop mappings for older generations before the
@@ -1015,8 +1326,11 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                 model::decode_model_message(exchanged.response);
                             return decoded_model.validation ? decoded_model.message
                                                             : model::ModelMessage{};
-                        }), std::chrono::steady_clock::now(), original_candidates,
-                            original_consumed, full_input_bytes});
+                        }), std::chrono::steady_clock::now(),
+                            std::move(model_update_candidates),
+                            std::move(model_update_consumed), full_input_bytes,
+                            response.candidates.size(),
+                            contextual_preferences, learned_preferences});
                     response.model_pending = true;
                 }
                 if (cancellation_event != nullptr) CloseHandle(cancellation_event);

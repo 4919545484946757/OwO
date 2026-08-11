@@ -732,6 +732,7 @@ HRESULT TextService::OnSetFocus(const BOOL foreground) {
     if (!foreground_focus_) {
         clear_composition();
         recent_language_context_.clear();
+        recent_language_input_.clear();
     } else if (!input_buffer_.empty()) {
         update_candidate_window();
     }
@@ -749,7 +750,10 @@ HRESULT TextService::OnUninitDocumentMgr(ITfDocumentMgr*) {
 HRESULT TextService::OnSetFocus(ITfDocumentMgr* document_manager,
                                 ITfDocumentMgr* previous_document_manager) {
     if (document_manager != previous_document_manager) clear_composition();
-    if (document_manager != previous_document_manager) recent_language_context_.clear();
+    if (document_manager != previous_document_manager) {
+        recent_language_context_.clear();
+        recent_language_input_.clear();
+    }
     foreground_focus_ = document_manager != nullptr;
     return S_OK;
 }
@@ -757,12 +761,14 @@ HRESULT TextService::OnSetFocus(ITfDocumentMgr* document_manager,
 HRESULT TextService::OnPushContext(ITfContext*) {
     clear_composition();
     recent_language_context_.clear();
+    recent_language_input_.clear();
     return S_OK;
 }
 
 HRESULT TextService::OnPopContext(ITfContext*) {
     clear_composition();
     recent_language_context_.clear();
+    recent_language_input_.clear();
     return S_OK;
 }
 
@@ -776,6 +782,7 @@ HRESULT TextService::OnKillThreadFocus() {
     foreground_focus_ = false;
     clear_composition();
     recent_language_context_.clear();
+    recent_language_input_.clear();
     return S_OK;
 }
 
@@ -821,10 +828,10 @@ bool TextService::should_eat_key(const WPARAM key) const noexcept {
         !key_down(VK_SHIFT) && !command_modifier_down()) return true;
     if (key == VK_NEXT || key == VK_OEM_6)
         return candidates_expanded_ ||
-               (!candidate_request_pending_ && has_more_candidates_);
+               candidate_request_pending_ || has_more_candidates_;
     if (key == VK_PRIOR || key == VK_OEM_4)
         return candidates_expanded_ ||
-               (!candidate_request_pending_ && candidate_page_ > 0);
+               candidate_page_ > 0;
     if (key == VK_SPACE)
         return candidate_request_pending_ || !candidates_.empty();
     return key >= '1' && key <= '9' &&
@@ -933,7 +940,8 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
                 key == VK_PRIOR || key == VK_OEM_4)) {
         scroll_expanded_candidates(-1);
     } else if (!candidates_expanded_ &&
-               (key == VK_NEXT || key == VK_OEM_6) && has_more_candidates_) {
+               (key == VK_NEXT || key == VK_OEM_6) &&
+               (candidate_request_pending_ || has_more_candidates_)) {
         change_candidate_page(1);
     } else if (!candidates_expanded_ &&
                (key == VK_PRIOR || key == VK_OEM_4) && candidate_page_ > 0) {
@@ -1495,13 +1503,13 @@ void TextService::render_candidate_window() {
             D2D1::RectF(control_x, content_top, control_x + kButtonWidthDip,
                         content_top + kCandidateItemHeightDip);
         draw_button(previous_bounds, {HitKind::previous_page, 0}, L"◀",
-                    !candidate_request_pending_ && candidate_page_ > 0);
+                    candidate_page_ > 0);
         control_x += kButtonWidthDip + kControlGapDip;
         const D2D1_RECT_F next_bounds =
             D2D1::RectF(control_x, content_top, control_x + kButtonWidthDip,
                         content_top + kCandidateItemHeightDip);
         draw_button(next_bounds, {HitKind::next_page, 0}, L"▶",
-                    !candidate_request_pending_ && has_more_candidates_);
+                    candidate_request_pending_ || has_more_candidates_);
         control_x += kButtonWidthDip + kControlGapDip;
     }
     const D2D1_RECT_F expand_bounds =
@@ -1882,7 +1890,8 @@ void TextService::schedule_candidate_request(const bool reset_retry) {
         pending_request_ = PendingRequest{
             static_cast<std::uint8_t>(protocol::MessageType::candidate_request),
             active_candidate_request_id_, context_generation_, candidate_page_, input_buffer_,
-            candidates_expanded_, correction_enabled_, {}, recent_language_context_};
+            candidates_expanded_, correction_enabled_, recent_language_input_,
+            recent_language_context_};
     }
     request_ready_.notify_one();
     update_candidate_window();
@@ -2142,6 +2151,14 @@ void TextService::handle_candidate_result(CandidateResult* raw_result) {
             segmented_input_ = case_preserving_segmented_input(
                 input_buffer_, result->segmented_input);
     }
+    if (!result->preserve_paging && deferred_page_direction_ != 0) {
+        const int direction = std::exchange(deferred_page_direction_, 0);
+        if ((direction > 0 && has_more_candidates_) ||
+            (direction < 0 && candidate_page_ > 0)) {
+            change_candidate_page(direction);
+            return;
+        }
+    }
     if (deferred_candidate_text_) {
         const auto selected = std::find(candidates_.begin(), candidates_.end(),
                                         *deferred_candidate_text_);
@@ -2216,16 +2233,18 @@ void TextService::update_candidate_window() {
 }
 
 void TextService::change_candidate_page(const int direction) {
-    if (candidate_request_pending_ || candidates_expanded_) return;
+    if (candidates_expanded_ || direction == 0) return;
+    if (candidate_request_pending_) {
+        deferred_page_direction_ = direction > 0 ? 1 : -1;
+        return;
+    }
     if (direction > 0) {
         if (!has_more_candidates_) return;
         ++candidate_page_;
     } else if (direction < 0) {
         if (candidate_page_ == 0) return;
         --candidate_page_;
-    } else {
-        return;
-    }
+    } else return;
     has_more_candidates_ = false;
     candidates_expanded_ = false;
     hovered_target_.reset();
@@ -2292,6 +2311,10 @@ void TextService::invoke_hit_target(const HitTarget& target) {
     if (candidate_request_pending_) {
         if (target.kind == HitKind::candidate)
             defer_candidate_selection(target.candidate_index, nullptr);
+        else if (target.kind == HitKind::previous_page)
+            change_candidate_page(-1);
+        else if (target.kind == HitKind::next_page)
+            change_candidate_page(1);
         return;
     }
     switch (target.kind) {
@@ -2373,6 +2396,7 @@ void TextService::clear_composition() {
     candidate_page_ = 0;
     has_more_candidates_ = false;
     candidate_request_pending_ = false;
+    deferred_page_direction_ = 0;
     candidate_request_failed_ = false;
     candidate_retry_count_ = 0;
     candidates_expanded_ = false;
@@ -2399,6 +2423,7 @@ HRESULT TextService::commit_candidate(ITfContext* context, const std::size_t ind
     session->Release();
     if (SUCCEEDED(request_result) && SUCCEEDED(session_result)) {
         append_language_context(committed);
+        recent_language_input_ = learned_input;
         if (consumed == input_buffer_.size()) {
             clear_composition();
         } else {
@@ -2437,6 +2462,7 @@ HRESULT TextService::commit_raw_input(ITfContext* context) {
     if (SUCCEEDED(request_result) && SUCCEEDED(session_result)) {
         clear_composition();
         recent_language_context_.clear();
+        recent_language_input_.clear();
     }
     return FAILED(request_result) ? request_result : session_result;
 }

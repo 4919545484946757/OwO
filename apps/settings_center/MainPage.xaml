@@ -54,8 +54,24 @@
                             <TextBlock Grid.Row="2" Text="用户词频学习" VerticalAlignment="Center" />
                             <ToggleSwitch x:Name="UserLearning" Grid.Row="2" Grid.Column="1" />
                             <TextBlock Grid.Row="3" Text="词频学习灵敏度（1–10）" VerticalAlignment="Center" />
-                            <NumberBox x:Name="UserLearningSensitivity" Grid.Row="3" Grid.Column="1"
-                                       Minimum="1" Maximum="10" SpinButtonPlacementMode="Inline" />
+                            <Grid Grid.Row="3" Grid.Column="1" ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="28" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="1" VerticalAlignment="Center"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <Slider x:Name="UserLearningSensitivity" Grid.Column="1"
+                                        Minimum="1" Maximum="10" Value="7"
+                                        StepFrequency="1" TickFrequency="1"
+                                        SnapsTo="StepValues" IsThumbToolTipEnabled="True"
+                                        ValueChanged="UserLearningSensitivity_ValueChanged"
+                                        ToolTipService.ToolTip="1 最稳定，10 最灵敏" />
+                                <TextBlock x:Name="UserLearningSensitivityValue" Grid.Column="2"
+                                           Text="7" TextAlignment="Right"
+                                           VerticalAlignment="Center" />
+                            </Grid>
                             <TextBlock Grid.Row="4" Text="智能排序（本地自适应）" VerticalAlignment="Center" />
                             <ToggleSwitch x:Name="ModelRanking" Grid.Row="4" Grid.Column="1" />
                             <TextBlock Grid.Row="5" Text="外部模型预算（毫秒）" VerticalAlignment="Center" />

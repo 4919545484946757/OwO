@@ -10,7 +10,7 @@
   <Identity
     Name="OwO.InputMethod.Settings"
     Publisher="CN=OwOInputMethodDevelopment"
-    Version="0.1.0.0" />
+    Version="0.1.0.2" />
 
   <mp:PhoneIdentity PhoneProductId="8DC48B4D-30A6-489C-999B-E0BB794BBB8D" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
 

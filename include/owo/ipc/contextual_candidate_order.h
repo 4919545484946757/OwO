@@ -66,4 +66,70 @@ inline void apply_contextual_candidate_order(
     }
 }
 
+inline void promote_preferred_candidates(
+    const std::vector<std::string>& preferences,
+    std::vector<std::string>& candidates,
+    std::vector<std::uint64_t>& consumed) {
+    if (candidates.size() != consumed.size()) return;
+    for (auto preference = preferences.rbegin(); preference != preferences.rend();
+         ++preference) {
+        const auto found = std::find(candidates.begin(), candidates.end(), *preference);
+        if (found == candidates.end()) continue;
+        const auto index = static_cast<std::size_t>(found - candidates.begin());
+        const auto tier = consumed[index];
+        const auto tier_begin = std::find(consumed.begin(), consumed.begin() + index, tier);
+        if (tier_begin == consumed.begin() + index) continue;
+        const auto destination = static_cast<std::size_t>(tier_begin - consumed.begin());
+        auto text = std::move(candidates[index]);
+        candidates.erase(candidates.begin() + static_cast<std::ptrdiff_t>(index));
+        consumed.erase(consumed.begin() + static_cast<std::ptrdiff_t>(index));
+        candidates.insert(candidates.begin() + static_cast<std::ptrdiff_t>(destination),
+                          std::move(text));
+        consumed.insert(consumed.begin() + static_cast<std::ptrdiff_t>(destination), tier);
+    }
+}
+
+inline void restore_preferred_candidate_positions(
+    const std::vector<std::string>& preferences,
+    const std::vector<std::string>& base_candidates,
+    const std::vector<std::uint64_t>& base_consumed,
+    std::vector<std::string>& candidates,
+    std::vector<std::uint64_t>& consumed) {
+    if (candidates.size() != consumed.size() ||
+        candidates.size() != base_candidates.size() ||
+        base_candidates.size() != base_consumed.size()) return;
+    for (const auto& preference : preferences) {
+        const auto base = std::find(base_candidates.begin(), base_candidates.end(),
+                                    preference);
+        const auto current = std::find(candidates.begin(), candidates.end(), preference);
+        if (base == base_candidates.end() || current == candidates.end()) continue;
+        const auto base_index = static_cast<std::size_t>(base - base_candidates.begin());
+        const auto source = static_cast<std::size_t>(current - candidates.begin());
+        const auto consumed_bytes = consumed[source];
+        if (base_consumed[base_index] != consumed_bytes) continue;
+        const auto tier_rank = static_cast<std::size_t>(std::count(
+            base_consumed.begin(),
+            base_consumed.begin() + static_cast<std::ptrdiff_t>(base_index),
+            consumed_bytes));
+        std::size_t destination = candidates.size();
+        std::size_t seen = 0;
+        for (std::size_t index = 0; index < consumed.size(); ++index) {
+            if (consumed[index] != consumed_bytes) continue;
+            if (seen++ == tier_rank) {
+                destination = index;
+                break;
+            }
+        }
+        if (destination == candidates.size()) continue;
+        if (source == destination) continue;
+        auto text = std::move(candidates[source]);
+        candidates.erase(candidates.begin() + static_cast<std::ptrdiff_t>(source));
+        consumed.erase(consumed.begin() + static_cast<std::ptrdiff_t>(source));
+        candidates.insert(candidates.begin() + static_cast<std::ptrdiff_t>(destination),
+                          std::move(text));
+        consumed.insert(consumed.begin() + static_cast<std::ptrdiff_t>(destination),
+                        consumed_bytes);
+    }
+}
+
 }  // namespace owo::ipc

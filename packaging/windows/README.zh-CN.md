@@ -1,6 +1,6 @@
-# OwO 输入法 0.1.0-alpha.1
+# OwO 输入法 0.1.0-alpha.2
 
-首个面向 Windows 11 x64 的预览发行版。包含 TSF 输入法、Core Service、完整拼音词库、
+面向 Windows 11 x64 的 Alpha 预览版。包含 TSF 输入法、Core Service、完整拼音词库、
 本地词频学习、libime 中文上下文排序、候选窗口和 WinUI 3 设置中心。
 
 ## 安装
@@ -11,7 +11,7 @@
 
 安装范围仅限当前 Windows 用户；首次注册和卸载 TSF 时会显示 Windows UAC 管理员授权提示。
 运行文件安装到
-`%LOCALAPPDATA%\Programs\OwO\InputMethod\0.1.0-alpha.1`，用户配置、词频和日志保存在
+`%LOCALAPPDATA%\Programs\OwO\InputMethod\0.1.0-alpha.2`，用户配置、词频和日志保存在
 `%LOCALAPPDATA%\OwO\InputMethod`。
 
 ## 使用与卸载

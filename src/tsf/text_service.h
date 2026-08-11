@@ -208,6 +208,7 @@ private:
     std::wstring input_buffer_;
     std::size_t input_cursor_{0};
     std::wstring recent_language_context_;
+    std::wstring recent_language_input_;
     std::wstring segmented_input_;
     std::vector<std::wstring> candidates_;
     std::vector<std::uint64_t> candidate_consumed_;
@@ -227,6 +228,7 @@ private:
     std::uint64_t candidate_page_size_{5};
     bool has_more_candidates_{false};
     bool candidate_request_pending_{false};
+    int deferred_page_direction_{0};
     bool candidate_request_failed_{false};
     std::uint8_t candidate_retry_count_{0};
     bool candidates_expanded_{false};

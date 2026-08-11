@@ -458,9 +458,16 @@ std::vector<ChunkPath> parse_chunk(const std::string_view normalized,
                                    const bool allow_incomplete,
                                    const std::function<bool()>& cancelled) {
     std::vector<ChunkPath> paths;
+    // A small caller budget is enough for ordinary words, but a long compact
+    // sentence can spend that budget on variants of its first boundary before
+    // reaching another equally short segmentation. Only long chunks explore a
+    // wider bounded pool; the returned path count remains unchanged.
+    const auto exploration_limit = end - begin >= 12
+        ? std::min<std::size_t>(256, std::max<std::size_t>(64, max_paths * 8))
+        : max_paths;
     std::vector<Syllable> current;
     std::function<void(std::size_t)> visit = [&](const std::size_t offset) {
-        if ((cancelled && cancelled()) || paths.size() >= max_paths) return;
+        if ((cancelled && cancelled()) || paths.size() >= exploration_limit) return;
         if (offset == end) {
             paths.push_back({current, false});
             return;
@@ -479,7 +486,7 @@ std::vector<ChunkPath> parse_chunk(const std::string_view normalized,
 
         // An unfinished syllable is useful only at the end of the whole chunk.
         const auto suffix = normalized.substr(offset, remaining);
-        if (allow_incomplete && paths.size() < max_paths && is_prefix(suffix)) {
+        if (allow_incomplete && paths.size() < exploration_limit && is_prefix(suffix)) {
             current.push_back({std::string(suffix), offset, end, false});
             paths.push_back({current, true});
             current.pop_back();
@@ -506,6 +513,7 @@ std::vector<ChunkPath> parse_chunk(const std::string_view normalized,
         });
     }
     std::stable_sort(paths.begin(), paths.end(), chunk_path_less);
+    if (paths.size() > max_paths) paths.resize(max_paths);
     return paths;
 }
 

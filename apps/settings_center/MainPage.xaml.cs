@@ -123,6 +123,14 @@ public sealed partial class MainPage : Page
     private async void ReloadButton_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         await LoadConfigAsync();
 
+    private void UserLearningSensitivity_ValueChanged(
+        object sender,
+        Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (UserLearningSensitivityValue is not null)
+            UserLearningSensitivityValue.Text = ((int)Math.Round(e.NewValue)).ToString();
+    }
+
     private void SettingsTab_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         if (sender is not RadioButton { Tag: string page }) return;

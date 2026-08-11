@@ -23,6 +23,8 @@ struct Candidate {
     std::size_t consumed_input_bytes{};
     std::size_t segment_count{1};
     std::int64_t coherence_score{};
+    std::vector<std::size_t> segment_lengths;
+    bool model_only{};
 
     bool operator==(const Candidate&) const = default;
 };
@@ -44,7 +46,8 @@ public:
                                                   bool contextual_ranking = false,
                                                   std::string_view language_context = {},
                                                   CandidateGenerationMetrics* metrics = nullptr,
-                                                  const std::function<bool()>& cancelled = {}) const;
+                                                  const std::function<bool()>& cancelled = {},
+                                                  bool include_model_alternatives = false) const;
 
 private:
     const Lexicon& lexicon_;

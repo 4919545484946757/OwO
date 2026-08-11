@@ -51,11 +51,13 @@ int wmain(int argc, wchar_t** argv) {
     owo::engine::UserFrequencyStore frequencies;
     if (!frequencies.load(frequency_path).success) return 2;
     const owo::engine::MemoryLexicon lexicon({
-        {{"ce", "shi"}, "测试一", 1000}, {{"ce", "shi"}, "测试二", 900},
-        {{"ce", "shi"}, "测试三", 800}, {{"ce", "shi"}, "测试四", 700},
-        {{"ce", "shi"}, "测试五", 600}, {{"ce", "shi"}, "测试六", 500},
-        {{"ce", "shi"}, "测试七", 400}, {{"ni", "hao"}, "你好", 1000},
-        {{"ni", "hao"}, "泥号", 2000}});
+        {{"ce"}, "测", 1000}, {{"ce"}, "侧", 900},
+        {{"ce"}, "策", 800}, {{"ce"}, "册", 700},
+        {{"ce"}, "厕", 600}, {{"ce"}, "恻", 500},
+        {{"ce"}, "栅", 400}, {{"ni", "hao"}, "你好", 1000},
+        {{"ni", "hao"}, "泥号", 2000},
+        {{"wang"}, "王", 3000}, {{"wang"}, "望", 2000},
+        {{"wang"}, "妄", 200}, {{"kuang", "wang"}, "狂妄", 5000}});
     const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto pipe = LR"(\\.\pipe\OwO.InputMethod.ConfigContract.)" + std::to_wstring(suffix);
     const auto model_pipe = LR"(\\.\pipe\OwO.InputMethod.ConfigModelContract.)" +
@@ -69,9 +71,9 @@ int wmain(int argc, wchar_t** argv) {
     const auto model_disabled = send(pipe, {owo::protocol::MessageType::candidate_request,
                                             10, 1, "nihao"});
     const auto page_of_three = send(pipe, {owo::protocol::MessageType::candidate_request,
-                                           20, 1, "ceshi"});
+                                           20, 1, "ce"});
     owo::protocol::Message expanded_request{
-        owo::protocol::MessageType::candidate_request, 22, 1, "ceshi"};
+        owo::protocol::MessageType::candidate_request, 22, 1, "ce"};
     expanded_request.expanded = true;
     const auto expanded = send(pipe, expanded_request);
     const auto disabled = send(pipe, {owo::protocol::MessageType::candidate_committed,
@@ -91,6 +93,11 @@ int wmain(int argc, wchar_t** argv) {
         owo::protocol::MessageType::candidate_request, 13, 1, "nihao"};
     language_ranked_request.context = "我说";
     const auto language_ranked = send(pipe, language_ranked_request);
+    owo::protocol::Message dictionary_context_request{
+        owo::protocol::MessageType::candidate_request, 15, 1, "wang"};
+    dictionary_context_request.input = "kuang";
+    dictionary_context_request.context = "狂";
+    const auto dictionary_context_ranked = send(pipe, dictionary_context_request);
     const auto model_enabled = send(pipe, {owo::protocol::MessageType::candidate_request,
                                            11, 1, "nihao"});
     owo::protocol::Message smart_expanded_request{
@@ -105,7 +112,7 @@ int wmain(int argc, wchar_t** argv) {
     const auto model_disabled_again = send(
         pipe, {owo::protocol::MessageType::candidate_request, 12, 1, "nihao"});
     owo::protocol::Message page_request{owo::protocol::MessageType::candidate_request,
-                                        21, 1, "ceshi"};
+                                        21, 1, "ce"};
     page_request.page = 1;
     const auto page_of_two = send(pipe, page_request);
     const auto shutdown = send(pipe, {owo::protocol::MessageType::shutdown_request,
@@ -120,6 +127,9 @@ int wmain(int argc, wchar_t** argv) {
                     language_ranked.validation &&
                     !language_ranked.message.candidates.empty() &&
                     language_ranked.message.candidates.front() == "你好" &&
+                    dictionary_context_ranked.validation &&
+                    !dictionary_context_ranked.message.candidates.empty() &&
+                    dictionary_context_ranked.message.candidates.front() == "妄" &&
                     acknowledged(shutdown, "shutdown_ack") && server_exit == 0 &&
                     model_disabled.validation && !model_disabled.message.model_pending &&
                     page_of_three.validation && page_of_three.message.candidates.size() == 3 &&
@@ -134,7 +144,7 @@ int wmain(int argc, wchar_t** argv) {
                     !model_disabled_again.message.model_pending &&
                     page_of_two.validation && page_of_two.message.page == 1 &&
                     page_of_two.message.candidates ==
-                        std::vector<std::string>{"测试三", "测试四"} &&
+                        std::vector<std::string>{"策", "册"} &&
                     page_of_two.message.has_more &&
                     loaded.success && persisted.count("你好") == 1 &&
                     persisted.contextual_count("nihao", "你好") == 1 &&

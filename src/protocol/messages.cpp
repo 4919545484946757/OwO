@@ -164,7 +164,9 @@ bool valid_candidate_layout(const Message& message) {
 }
 
 bool valid_feedback_input(const Message& message) {
-    if (message.type != MessageType::candidate_committed) return message.input.empty();
+    if (message.type != MessageType::candidate_committed &&
+        message.type != MessageType::candidate_request)
+        return message.input.empty();
     if (message.input.size() > 4096) return false;
     return std::all_of(message.input.begin(), message.input.end(), [](const char value) {
         return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
