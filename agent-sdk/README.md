@@ -62,6 +62,13 @@ cargo run -p owo-agent-cli -- repl --workspace .
 /mcp list
 ```
 
+HTTP MCP 服务器示例：
+
+```text
+/mcp add remote http https://example.com/mcp
+/mcp list
+```
+
 一次性任务与 HTTP 服务：
 
 ```powershell
@@ -80,7 +87,7 @@ cargo run -p owo-agent-cli -- serve --port 4096
 - 审计：内存审计记录（事件、工具、审批、结果）。
 - 模型网关：OpenAI-compatible chat completions（工具调用）。
 - 模型流式输出：SSE token 增量实时上屏（REPL/TUI 打字机效果），工具调用片段流式组装。
-- MCP 客户端：stdio JSON-RPC（initialize/tools/list/tools/call），工具以 `{server}_{tool}` 命名注册进 Agent。
+- MCP 客户端：stdio 与 HTTP（streamable HTTP，JSON/SSE 响应）双传输，工具以 `{server}_{tool}` 命名注册进 Agent。
 - 子代理：`explore`（只读调查，独立子会话）与 `subagent`（通用委派，完整工具需审批），深度限制 2 层，共享中止/审批。
 - Skills：发现工作区 `.agents/skills/` 与 `<data>/skills/` 下的 SKILL.md（Agent Skills 开放标准），清单注入系统提示，`use_skill` 工具按需取用；仓库自带 `demo-summary` 示例技能。
 - 上下文压缩：估算 token 超预算时用模型把旧历史压成摘要（保留最近 N 条），压缩事件上屏并审计；可用 `OWO_TOKEN_BUDGET` / `OWO_KEEP_RECENT` 调参。

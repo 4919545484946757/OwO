@@ -841,14 +841,22 @@ impl TuiApp {
                     .ok_or("用法：/mcp add <名称> <命令> [参数...]")?
                     .to_string();
                 let command_line: Vec<&str> = parts.collect();
-                let command = command_line.first().ok_or("缺少 MCP 服务器命令")?;
-                let config = McpServerConfig {
-                    name: name.clone(),
-                    command: command.to_string(),
-                    args: command_line[1..]
-                        .iter()
-                        .map(|arg| arg.to_string())
-                        .collect(),
+                let config = if matches!(command_line.first().copied(), Some("http" | "https")) {
+                    let url = command_line
+                        .get(1)
+                        .copied()
+                        .ok_or("HTTP MCP 用法：/mcp add <名称> http <URL>")?;
+                    McpServerConfig::http(&name, url)
+                } else {
+                    let command = command_line.first().ok_or("缺少 MCP 服务器命令")?;
+                    McpServerConfig::stdio(
+                        &name,
+                        *command,
+                        command_line[1..]
+                            .iter()
+                            .map(|arg| arg.to_string())
+                            .collect(),
+                    )
                 };
                 match runtime.block_on(McpClient::connect(&config)) {
                     Ok(client) => {
@@ -875,6 +883,12 @@ impl TuiApp {
                 } else {
                     let mut lines = Vec::new();
                     for (name, client) in &self.mcp_clients {
+                        let transport = self
+                            .mcp_configs
+                            .iter()
+                            .find(|config| config.name == *name)
+                            .map(|config| config.transport.as_str())
+                            .unwrap_or("stdio");
                         let tool_names = match client.try_lock() {
                             Ok(guard) => guard
                                 .tools()
@@ -884,7 +898,7 @@ impl TuiApp {
                                 .join(", "),
                             Err(_) => "（忙碌）".to_string(),
                         };
-                        lines.push(format!("{name}：{tool_names}"));
+                        lines.push(format!("{name}（{transport}）：{tool_names}"));
                     }
                     for line in lines {
                         self.push_line(line, default());

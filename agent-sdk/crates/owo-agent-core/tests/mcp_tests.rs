@@ -8,11 +8,11 @@ use serde_json::json;
 use std::sync::Arc;
 
 fn test_config() -> McpServerConfig {
-    McpServerConfig {
-        name: "test".to_string(),
-        command: env!("CARGO_BIN_EXE_owo-mcp-test-server").to_string(),
-        args: Vec::new(),
-    }
+    McpServerConfig::stdio(
+        "test",
+        env!("CARGO_BIN_EXE_owo-mcp-test-server"),
+        Vec::new(),
+    )
 }
 
 #[tokio::test]
@@ -72,4 +72,40 @@ async fn mcp_tools_are_registered_and_callable() {
         .unwrap();
     assert_eq!(result["text"], "ok");
     let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn mcp_http_connect_list_and_call() {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_owo-mcp-http-test-server"))
+        .arg(port.to_string())
+        .spawn()
+        .unwrap();
+
+    let config = McpServerConfig::http("http-test", format!("http://127.0.0.1:{port}/mcp"));
+    let mut client = None;
+    for _attempt in 0..10 {
+        match McpClient::connect(&config).await {
+            Ok(connected) => {
+                client = Some(connected);
+                break;
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+        }
+    }
+    let mut client = client.expect("HTTP MCP 服务器应可连接");
+
+    let tools = client.tools();
+    assert!(tools.iter().any(|tool| tool.name == "echo"));
+    let echo = client
+        .call_tool("echo", json!({ "text": "http-ok" }))
+        .await
+        .unwrap();
+    assert_eq!(echo["text"], "http-ok");
+    client.shutdown().await.unwrap();
+    let _ = server.kill().await;
 }

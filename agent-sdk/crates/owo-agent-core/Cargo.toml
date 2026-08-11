@@ -21,3 +21,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 [[bin]]
 name = "owo-mcp-test-server"
 path = "src/bin/mcp_test_server.rs"
+
+[[bin]]
+name = "owo-mcp-http-test-server"
+path = "src/bin/mcp_http_test_server.rs"
