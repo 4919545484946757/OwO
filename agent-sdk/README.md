@@ -26,11 +26,35 @@ OWO_AGENT_DATA=%LOCALAPPDATA%\OwO\Agent         # 会话/审计数据目录（�
 ```powershell
 cargo build --workspace
 cargo test --workspace
+```
+
+## CLI（OpenCode 式交互终端）
+
+直接运行 `owo-agent repl`（或 `owo-agent`）进入交互式终端：
+
+```powershell
+cargo run -p owo-agent-cli -- repl --workspace .
+```
+
+交互终端支持：
+
+- 直接输入文字发起任务；自动创建/恢复会话。
+- `build` / `plan` 两种模式：plan 为只读（写/执行一律拒绝），build 的写操作需审批。
+- `/new`、`/sessions`、`/resume <id>` 会话管理。
+- `/diff` 查看文件改动（快照级），`/undo` 回滚全部写操作（新建文件会被删除）。
+- `/model <名称>` 切换模型，`/status`、`/permissions`、`/audit` 查看状态。
+- `/init` 生成 AGENTS.md；`/abort` 中止当前回合；`/exit` 退出。
+- 支持管道输入（脚本/自动化）与历史记录（`<data>/history.txt`）。
+
+一次性任务与 HTTP 服务：
+
+```powershell
 cargo run -p owo-agent-cli -- turn --workspace . --prompt "给 parseConfig 补单元测试"
+cargo run -p owo-agent-cli -- init --workspace .
 cargo run -p owo-agent-cli -- serve --port 4096
 ```
 
-## M1 范围（已实现）
+## 当前范围（M1）
 
 - Agent loop：模型调用 → 工具执行 → 结果回填 → 停止条件（最大轮数/超时/中止）。
 - 内置工具：`read_file`、`write_file`（带快照）、`list_dir`、`search_files`、`run_command`。
@@ -39,8 +63,9 @@ cargo run -p owo-agent-cli -- serve --port 4096
 - 会话：JSON 持久化、diff、revert（回滚写操作）。
 - 审计：内存审计记录（事件、工具、审批、结果）。
 - 模型网关：OpenAI-compatible chat completions（工具调用）。
+- 交互式 CLI：build/plan 模式、会话、diff/undo、审批、审计、AGENTS.md 初始化。
 
 ## 尚未实现（M2+）
 
-- AGENTS.md 已注入，Skills/子代理/MCP 尚未实现。
+- AGENTS.md 已注入；Skills/子代理/MCP 尚未实现。
 - 上下文压缩（仅截断）、SQLite 存储、云执行、沙箱 OS 隔离、traces/evals 平台。

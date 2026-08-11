@@ -138,11 +138,13 @@ impl Tool for WriteFileTool {
         let abs = ctx.policy.resolve_within_workspace(&path)?;
         let key = snapshot_key(&abs);
         if let std::collections::hash_map::Entry::Vacant(entry) = ctx.session.snapshots.entry(key) {
-            if let Ok(original) = tokio::fs::read(&abs).await {
-                entry.insert(crate::session::SnapshotEntry {
-                    original_b64: BASE64.encode(original),
-                });
-            }
+            let original = match tokio::fs::read(&abs).await {
+                Ok(bytes) => Some(BASE64.encode(bytes)),
+                Err(_) => None,
+            };
+            entry.insert(crate::session::SnapshotEntry {
+                original_b64: original,
+            });
         }
         if let Some(parent) = abs.parent() {
             tokio::fs::create_dir_all(parent)

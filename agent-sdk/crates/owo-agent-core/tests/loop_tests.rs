@@ -186,3 +186,37 @@ async fn revert_restores_original_content() {
     );
     assert!(session.diff().is_empty());
 }
+
+#[tokio::test]
+async fn revert_removes_created_file() {
+    let workspace = temp_workspace("revert-created");
+    let provider = ScriptedProvider::new(vec![
+        call(
+            "c1",
+            "write_file",
+            json!({ "path": "new.txt", "content": "created\n" }),
+        ),
+        ModelOutput::Text("done".to_string()),
+    ]);
+    let agent = build_agent(&workspace, provider);
+    let mut session = Session::new(&workspace, "mock".to_string(), None);
+    let abort = AtomicBool::new(false);
+    let approver = AutoApprover { allow: true };
+
+    agent
+        .run_turn(
+            &mut session,
+            "create new.txt",
+            &approver,
+            &abort,
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(workspace.join("new.txt").exists());
+
+    let restored = session.revert().await.unwrap();
+    assert_eq!(restored, vec!["new.txt"]);
+    assert!(!workspace.join("new.txt").exists());
+    assert!(session.diff().is_empty());
+}

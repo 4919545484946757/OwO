@@ -192,6 +192,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .post(&url)
             .bearer_auth(&self.config.api_key)
             .json(&body)
+            .timeout(std::time::Duration::from_secs(180))
             .send()
             .await
             .map_err(|e| format!("模型请求失败：{e}"))?;

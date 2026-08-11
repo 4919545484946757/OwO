@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotEntry {
-    pub original_b64: String,
+    /// None 表示文件原本不存在（回滚时删除）。
+    #[serde(default)]
+    pub original_b64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,10 +54,12 @@ impl Session {
     pub fn diff(&self) -> Vec<FileDiff> {
         let mut diffs = Vec::new();
         for (path, snapshot) in &self.snapshots {
-            let original = BASE64
-                .decode(&snapshot.original_b64)
-                .ok()
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+            let original = snapshot.original_b64.as_ref().and_then(|encoded| {
+                BASE64
+                    .decode(encoded)
+                    .ok()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            });
             let current = std::fs::read(path)
                 .ok()
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
@@ -75,14 +79,21 @@ impl Session {
     pub async fn revert(&mut self) -> Result<Vec<String>, AgentError> {
         let mut restored = Vec::new();
         for (path, snapshot) in &self.snapshots {
-            let bytes = BASE64
-                .decode(&snapshot.original_b64)
-                .map_err(|e| AgentError::Session(format!("快照解码失败：{e}")))?;
             let target = PathBuf::from(path);
-            if let Some(parent) = target.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+            match &snapshot.original_b64 {
+                Some(encoded) => {
+                    let bytes = BASE64
+                        .decode(encoded)
+                        .map_err(|e| AgentError::Session(format!("快照解码失败：{e}")))?;
+                    if let Some(parent) = target.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&target, bytes).await?;
+                }
+                None => {
+                    let _ = tokio::fs::remove_file(&target).await;
+                }
             }
-            tokio::fs::write(&target, bytes).await?;
             restored.push(relative_display(&self.workspace, &target));
         }
         self.snapshots.clear();
@@ -107,6 +118,10 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<Session, AgentError>;
     fn load(&self, id: &str) -> Result<Session, AgentError>;
     fn save(&self, session: &Session) -> Result<(), AgentError>;
+    /// 列出全部会话 ID（按更新时间倒序）。
+    fn list(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// M1 会话存储：JSON 文件（后续迁移 SQLite）。
@@ -149,5 +164,48 @@ impl SessionStore for JsonSessionStore {
         std::fs::write(&tmp, content)?;
         std::fs::rename(&tmp, self.path(&session.id))?;
         Ok(())
+    }
+
+    fn list(&self) -> Vec<String> {
+        let mut sessions = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(id) = name.strip_suffix(".json") {
+                    sessions.push(id.to_string());
+                }
+            }
+        }
+        sessions.sort_by(|a, b| {
+            let ta = self
+                .load(a)
+                .map(|s| s.updated_at.clone())
+                .unwrap_or_default();
+            let tb = self
+                .load(b)
+                .map(|s| s.updated_at.clone())
+                .unwrap_or_default();
+            tb.cmp(&ta)
+        });
+        sessions
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_store_round_trip_and_list() {
+        let root =
+            std::env::temp_dir().join(format!("owo-session-store-test-{}", uuid::Uuid::new_v4()));
+        let store = JsonSessionStore::new(&root);
+        let session = store
+            .create(std::path::Path::new("."), "mock", None)
+            .unwrap();
+        assert_eq!(store.list().len(), 1);
+        let loaded = store.load(&session.id).unwrap();
+        assert_eq!(loaded.id, session.id);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -65,6 +65,7 @@ impl Approver for AutoApprover {
 pub struct Policy {
     workspace: PathBuf,
     deny_command_fragments: Vec<String>,
+    read_only: bool,
 }
 
 impl Policy {
@@ -82,7 +83,23 @@ impl Policy {
                 "git push".to_string(),
                 "git reset --hard".to_string(),
             ],
+            read_only: false,
         }
+    }
+
+    /// 只读策略（Plan 模式）：写/执行/注入一律拒绝。
+    pub fn read_only(workspace: impl Into<PathBuf>) -> Self {
+        let mut policy = Self::new(workspace);
+        policy.read_only = true;
+        policy
+    }
+
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn workspace(&self) -> &Path {
@@ -148,6 +165,9 @@ impl Policy {
         if request.reason.starts_with("拒绝") {
             return Decision::Deny;
         }
+        if self.read_only && request.level != Level::Read {
+            return Decision::Deny;
+        }
         match request.level {
             Level::Read => Decision::Allow,
             Level::Write | Level::Execute | Level::Inject => Decision::Ask,
@@ -196,5 +216,25 @@ fn canonicalize_existing_parent(path: &Path) -> std::io::Result<PathBuf> {
             }
             None => return Ok(path.to_path_buf()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn read_only_policy_denies_writes() {
+        let policy = Policy::read_only(".");
+        let request = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
+        assert_eq!(policy.decision(&request), Decision::Deny);
+    }
+
+    #[test]
+    fn read_only_policy_allows_reads() {
+        let policy = Policy::read_only(".");
+        let request = policy.evaluate("read_file", &json!({ "path": "a.txt" }));
+        assert_eq!(policy.decision(&request), Decision::Allow);
     }
 }
