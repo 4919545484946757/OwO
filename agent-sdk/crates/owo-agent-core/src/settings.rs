@@ -49,7 +49,7 @@ mod tests {
         std::fs::write(
             workspace.join("settings.json"),
             r#"{
-                "model": "deepseek-v4-pro",
+                "model": "deepseek-v4-flash",
                 "read_only": true,
                 "deny_commands": ["git push"],
                 "mcp_servers": [
@@ -61,7 +61,7 @@ mod tests {
         )
         .unwrap();
         let settings = Settings::load(&workspace);
-        assert_eq!(settings.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(settings.model.as_deref(), Some("deepseek-v4-flash"));
         assert!(settings.read_only);
         assert_eq!(settings.deny_commands, vec!["git push"]);
         assert_eq!(settings.mcp_servers.len(), 1);

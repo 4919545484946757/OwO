@@ -176,7 +176,7 @@ async fn create_session(
         ));
     }
     let model = request.model.unwrap_or_else(|| {
-        std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.1-codex".to_string())
+        std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string())
     });
     let session = state
         .store
@@ -438,7 +438,7 @@ async fn run_eval(
             ))
         }
     };
-    let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.1-codex".to_string());
+    let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
     let provider = state.agent.provider();
     let report = owo_agent_core::run_suite(provider, &model, &suite).await;
     Ok(Json(report))

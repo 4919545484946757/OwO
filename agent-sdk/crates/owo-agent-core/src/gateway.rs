@@ -114,7 +114,8 @@ impl OpenAiCompatibleConfig {
         })?;
         let base_url = std::env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.1-codex".to_string());
+        let model =
+            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
         Ok(Self {
             base_url,
             api_key,

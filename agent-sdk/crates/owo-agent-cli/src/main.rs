@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 mod tui;
 
-const DEFAULT_MODEL: &str = "gpt-5.1-codex";
+const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
 const AGENTS_TEMPLATE: &str = r#"# AGENTS.md
 

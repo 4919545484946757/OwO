@@ -5,7 +5,7 @@ use crate::{
     resolve_model, save_mcp_configs, AGENTS_TEMPLATE,
 };
 use async_trait::async_trait;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::{
@@ -367,6 +367,11 @@ impl TuiApp {
         key: KeyEvent,
         runtime: &tokio::runtime::Runtime,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        // Windows 下同一个按键会同时派发 Press 与 Release（以及长按 Repeat），
+        // 只处理 Press 防止输入重复。
+        if key.kind != KeyEventKind::Press {
+            return Ok(false);
+        }
         if self.running {
             match key.code {
                 KeyCode::Char('y' | 'Y') => self.respond_approval(true),
@@ -1571,5 +1576,37 @@ mod tests {
             .iter()
             .any(|(text, _)| text.contains("before")));
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn windows_release_and_repeat_events_do_not_double_input() {
+        let mut app = test_app();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let press =
+            KeyEvent::new_with_kind(KeyCode::Char('你'), KeyModifiers::NONE, KeyEventKind::Press);
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('你'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        let repeat = KeyEvent::new_with_kind(
+            KeyCode::Char('好'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        );
+
+        app.handle_key(press, &runtime).unwrap();
+        app.handle_key(release, &runtime).unwrap();
+        app.handle_key(repeat, &runtime).unwrap();
+        app.handle_key(
+            KeyEvent::new_with_kind(KeyCode::Char('好'), KeyModifiers::NONE, KeyEventKind::Press),
+            &runtime,
+        )
+        .unwrap();
+
+        assert_eq!(app.input, "你好");
     }
 }

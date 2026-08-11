@@ -17,7 +17,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 ```text
 OPENAI_API_KEY=<你的 API Key>
 OPENAI_BASE_URL=https://api.openai.com/v1      # 可指向 Ollama/兼容代理
-OPENAI_MODEL=gpt-5.1-codex                      # 可替换任意 OpenAI-compatible 模型
+OPENAI_MODEL=deepseek-v4-flash                  # 可替换任意 OpenAI-compatible 模型
 OWO_AGENT_DATA=%LOCALAPPDATA%\OwO\Agent         # 会话/审计数据目录（可选）
 ```
 
