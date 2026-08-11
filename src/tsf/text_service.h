@@ -160,7 +160,8 @@ private:
     void initialize_language_bar();
     void uninitialize_language_bar() noexcept;
     void update_language_bar() noexcept;
-    [[nodiscard]] bool shortcut_matches(std::string_view shortcut, WPARAM key) const;
+    [[nodiscard]] bool shortcut_matches(const std::vector<std::string>& shortcuts,
+                                        WPARAM key) const;
     void handle_candidate_result(CandidateResult* result);
     void update_candidate_window();
     void move_pinyin_cursor(int direction);
@@ -234,9 +235,8 @@ private:
     config::AppConfig shortcut_config_;
     ULONGLONG next_shortcut_config_refresh_{0};
     bool shortcut_config_initialized_{false};
-    std::string preserved_language_shortcut_;
-    TF_PRESERVEDKEY preserved_language_key_{};
-    bool preserved_language_key_registered_{false};
+    std::vector<std::string> preserved_language_shortcuts_;
+    std::vector<TF_PRESERVEDKEY> preserved_language_keys_;
     bool correction_enabled_{true};
     bool chinese_mode_{true};
     bool foreground_focus_{true};

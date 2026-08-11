@@ -205,6 +205,32 @@ void prioritize_two_character_words(std::vector<Candidate>& candidates) {
         candidates[positions[index]] = std::move(reordered[index]);
 }
 
+void limit_two_syllable_full_candidates(std::vector<Candidate>& candidates) {
+    const auto is_composed = [](const Candidate& candidate) {
+        return candidate.syllables.size() == 2 && candidate.segment_count > 1;
+    };
+    const bool has_dictionary_word = std::any_of(
+        candidates.begin(), candidates.end(), [](const Candidate& candidate) {
+            return candidate.syllables.size() == 2 && candidate.segment_count == 1;
+        });
+    constexpr std::size_t kMaximumTwoSyllableDictionaryWords = 2;
+    std::size_t dictionary_words_kept = 0;
+    bool fallback_kept = false;
+    candidates.erase(std::remove_if(
+        candidates.begin(), candidates.end(), [&](const Candidate& candidate) {
+            if (candidate.syllables.size() == 2 && candidate.segment_count == 1) {
+                if (dictionary_words_kept >= kMaximumTwoSyllableDictionaryWords)
+                    return true;
+                ++dictionary_words_kept;
+                return false;
+            }
+            if (!is_composed(candidate)) return false;
+            if (has_dictionary_word || fallback_kept) return true;
+            fallback_kept = true;
+            return false;
+        }), candidates.end());
+}
+
 }  // namespace
 
 std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
@@ -699,6 +725,12 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
             prefixes.push_back(std::move(candidate));
     }
     std::sort(full.begin(), full.end(), score_less);
+    // Keep no more than two whole dictionary words for one two-syllable
+    // reading. A composition assembled from arbitrary single-character entries
+    // is not a dictionary word: omit it when any whole word exists, otherwise
+    // retain one fallback. This prevents both corpus noise and Beam permutations
+    // from filling pages for inputs such as chan+wu or ni+jian.
+    limit_two_syllable_full_candidates(full);
     const auto apply_cross_boundary_coherence = [this, metrics](Candidate& candidate) {
         constexpr std::size_t kMaximumPhraseCharacters = 4;
         const auto character_count = candidate.syllables.size();

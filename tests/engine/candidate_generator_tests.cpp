@@ -291,8 +291,11 @@ int main() {
     bigram.set("泥", "号", -5000);
     const owo::engine::CandidateGenerator beam_generator(compositional, &bigram);
     const auto composed = beam_generator.generate(schema.parse("nihao"));
-    if (composed.size() != 6 || composed[0].text != "你好" ||
-        composed[0].syllables != std::vector<std::string>{"ni", "hao"})
+    if (composed.empty() || composed[0].text != "你好" ||
+        composed[0].syllables != std::vector<std::string>{"ni", "hao"} ||
+        std::count_if(composed.begin(), composed.end(), [](const auto& candidate) {
+            return candidate.syllables.size() == 2 && candidate.segment_count > 1;
+        }) > 1)
         return fail("beam search or bigram ranking failed");
 
     owo::engine::UserFrequencyStore user_frequency;
@@ -376,6 +379,47 @@ int main() {
                         return candidate.text == expected;
                     }))
         return fail("two-character word priority bands failed");
+
+    const owo::engine::MemoryLexicon bounded_composition_lexicon({
+        {{"chan"}, "产", 1000000}, {{"chan"}, "禅", 900000},
+        {{"wu"}, "无", 1000000},   {{"wu"}, "五", 900000},
+        {{"chan", "wu"}, "产物", 1000},
+        {{"chan", "wu"}, "禅悟", 900},
+        {{"chan", "wu"}, "产无", 100},
+        {{"ni"}, "你", 1000000},  {{"ni"}, "拟", 900000},
+        {{"jian"}, "见", 1000000}, {{"jian"}, "间", 900000},
+        {{"ni", "jian"}, "拟建", 800},
+    });
+    const owo::engine::CandidateGenerator bounded_composition_generator(
+        bounded_composition_lexicon);
+    for (const auto input : {"chanwu", "nijian"}) {
+        const auto bounded = bounded_composition_generator.generate(schema.parse(input), 16);
+        const auto dictionary_words = std::count_if(
+            bounded.begin(), bounded.end(), [](const auto& candidate) {
+                return candidate.syllables.size() == 2 && candidate.segment_count == 1;
+            });
+        if (bounded.empty() || dictionary_words > 2 || std::any_of(
+                bounded.begin(), bounded.end(), [](const auto& candidate) {
+                    return candidate.syllables.size() == 2 &&
+                           candidate.segment_count > 1;
+                }))
+            return fail("two-syllable permutations displaced dictionary words");
+    }
+
+    const owo::engine::MemoryLexicon fallback_composition_lexicon({
+        {{"ni"}, "你", 1000}, {{"ni"}, "拟", 900},
+        {{"jian"}, "见", 1000}, {{"jian"}, "间", 900},
+    });
+    const owo::engine::CandidateGenerator fallback_composition_generator(
+        fallback_composition_lexicon);
+    const auto fallback_compositions = fallback_composition_generator.generate(
+        schema.parse("nijian"), 16);
+    if (std::count_if(fallback_compositions.begin(), fallback_compositions.end(),
+                      [](const auto& candidate) {
+                          return candidate.syllables.size() == 2 &&
+                                 candidate.segment_count > 1;
+                      }) > 1)
+        return fail("two-syllable fallback permutations were not bounded");
 
     const auto cancelled_generation = word_priority_generator.generate(
         schema.parse("shi"), 32, false, {}, nullptr, [] { return true; });

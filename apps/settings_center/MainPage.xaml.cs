@@ -13,13 +13,13 @@ public sealed partial class MainPage : Page
     private Button? _shortcutCaptureTarget;
     private IntPtr _shortcutCaptureHook;
     private readonly LowLevelKeyboardProc _shortcutCaptureHookProc;
-    private string _correctionShortcut = "Alt";
-    private string _languageShortcut = "Ctrl+Space";
-    private string _rawInputShortcut = "Enter";
-    private string _cursorLeftShortcut = "Shift+Left";
-    private string _cursorRightShortcut = "Shift+Right";
-    private string _previousPageShortcut = "Shift+Up";
-    private string _nextPageShortcut = "Shift+Down";
+    private sealed class ShortcutBinding(string group, string value)
+    {
+        internal string Group { get; } = group;
+        internal string Value { get; set; } = value;
+    }
+
+    private readonly Dictionary<string, List<ShortcutBinding>> _shortcutBindings = new();
 
     [DllImport("user32.dll")]
     private static extern short GetKeyState(int virtualKey);
@@ -44,6 +44,14 @@ public sealed partial class MainPage : Page
     {
         _shortcutCaptureHookProc = ShortcutCaptureHook;
         InitializeComponent();
+        SetShortcutBindings("correction", ["Ctrl+Alt+Shift"]);
+        SetShortcutBindings("language", ["Ctrl+Space"]);
+        SetShortcutBindings("raw", ["Enter"]);
+        SetShortcutBindings("cursor-left", ["Shift+Left"]);
+        SetShortcutBindings("cursor-right", ["Shift+Right"]);
+        SetShortcutBindings("previous-page", ["[", "Shift+Up"]);
+        SetShortcutBindings("next-page", ["]", "Shift+Down"]);
+        UpdateShortcutButtons();
         ConfigPath.Text = _client.ConfigPath;
         PluginPath.Text = _pluginClient.StorePath;
         Loaded += async (_, _) => {
@@ -71,13 +79,13 @@ public sealed partial class MainPage : Page
             CursorRightShortcutEnabled.IsOn = value.CursorRightShortcutEnabled;
             PreviousPageShortcutEnabled.IsOn = value.PreviousPageShortcutEnabled;
             NextPageShortcutEnabled.IsOn = value.NextPageShortcutEnabled;
-            _correctionShortcut = value.CorrectionShortcut;
-            _languageShortcut = value.LanguageShortcut;
-            _rawInputShortcut = value.RawInputShortcut;
-            _cursorLeftShortcut = value.CursorLeftShortcut;
-            _cursorRightShortcut = value.CursorRightShortcut;
-            _previousPageShortcut = value.PreviousPageShortcut;
-            _nextPageShortcut = value.NextPageShortcut;
+            SetShortcutBindings("correction", value.CorrectionShortcuts);
+            SetShortcutBindings("language", value.LanguageShortcuts);
+            SetShortcutBindings("raw", value.RawInputShortcuts);
+            SetShortcutBindings("cursor-left", value.CursorLeftShortcuts);
+            SetShortcutBindings("cursor-right", value.CursorRightShortcuts);
+            SetShortcutBindings("previous-page", value.PreviousPageShortcuts);
+            SetShortcutBindings("next-page", value.NextPageShortcuts);
             UpdateShortcutButtons();
             ShowStatus("配置已加载", InfoBarSeverity.Success);
         } catch (Exception error) {
@@ -96,13 +104,13 @@ public sealed partial class MainPage : Page
                 (uint)CandidateWrapLength.Value,
                 (uint)UserLearningSensitivity.Value,
                 UserLearning.IsOn, ModelRanking.IsOn, (uint)ModelTimeout.Value,
-                CorrectionShortcutEnabled.IsOn, _correctionShortcut,
-                LanguageShortcutEnabled.IsOn, _languageShortcut,
-                RawInputShortcutEnabled.IsOn, _rawInputShortcut,
-                CursorLeftShortcutEnabled.IsOn, _cursorLeftShortcut,
-                CursorRightShortcutEnabled.IsOn, _cursorRightShortcut,
-                PreviousPageShortcutEnabled.IsOn, _previousPageShortcut,
-                NextPageShortcutEnabled.IsOn, _nextPageShortcut);
+                CorrectionShortcutEnabled.IsOn, ShortcutValues("correction"),
+                LanguageShortcutEnabled.IsOn, ShortcutValues("language"),
+                RawInputShortcutEnabled.IsOn, ShortcutValues("raw"),
+                CursorLeftShortcutEnabled.IsOn, ShortcutValues("cursor-left"),
+                CursorRightShortcutEnabled.IsOn, ShortcutValues("cursor-right"),
+                PreviousPageShortcutEnabled.IsOn, ShortcutValues("previous-page"),
+                NextPageShortcutEnabled.IsOn, ShortcutValues("next-page"));
             await _client.SaveAsync(value);
             ShowStatus("配置已保存，Core Service 将自动应用。", InfoBarSeverity.Success);
         } catch (Exception error) {
@@ -114,6 +122,17 @@ public sealed partial class MainPage : Page
 
     private async void ReloadButton_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
         await LoadConfigAsync();
+
+    private void SettingsTab_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (sender is not RadioButton { Tag: string page }) return;
+        GeneralSettingsPage.Visibility = page == "general"
+            ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+        ShortcutSettingsPage.Visibility = page == "shortcuts"
+            ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+        PluginSettingsPage.Visibility = page == "plugins"
+            ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+    }
 
     private void ShortcutButton_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
@@ -149,7 +168,8 @@ public sealed partial class MainPage : Page
     {
         if (_shortcutCaptureTarget is null || !IsModifierKey(e.Key)) return;
         var shortcut = ShortcutForKeyEvent(e.Key);
-        if (shortcut == "Alt") {
+        if (shortcut is not null &&
+            (shortcut == "Alt" || shortcut.Count(character => character == '+') >= 1)) {
             CommitCapturedShortcut(shortcut);
         } else {
             _shortcutCaptureTarget.Content = "请继续按主键…";
@@ -165,15 +185,7 @@ public sealed partial class MainPage : Page
     private void CommitCapturedShortcut(string shortcut)
     {
         if (_shortcutCaptureTarget is null) return;
-        switch (_shortcutCaptureTarget.Tag?.ToString()) {
-            case "correction": _correctionShortcut = shortcut; break;
-            case "language": _languageShortcut = shortcut; break;
-            case "raw": _rawInputShortcut = shortcut; break;
-            case "cursor-left": _cursorLeftShortcut = shortcut; break;
-            case "cursor-right": _cursorRightShortcut = shortcut; break;
-            case "previous-page": _previousPageShortcut = shortcut; break;
-            case "next-page": _nextPageShortcut = shortcut; break;
-        }
+        if (_shortcutCaptureTarget.Tag is ShortcutBinding binding) binding.Value = shortcut;
         _shortcutCaptureTarget = null;
         StopShortcutCaptureHook();
         UpdateShortcutButtons();
@@ -263,27 +275,92 @@ public sealed partial class MainPage : Page
         };
     }
 
+    private void SetShortcutBindings(string group, IEnumerable<string> values)
+    {
+        var items = values.Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => new ShortcutBinding(group, value)).ToList();
+        if (items.Count == 0) throw new InvalidOperationException("每项快捷键至少需要一种绑定方案。");
+        _shortcutBindings[group] = items;
+    }
+
+    private IReadOnlyList<string> ShortcutValues(string group) =>
+        _shortcutBindings[group].Select(binding => binding.Value).ToArray();
+
+    private StackPanel ShortcutPanel(string group) => group switch {
+        "correction" => CorrectionShortcutBindings,
+        "language" => LanguageShortcutBindings,
+        "raw" => RawInputShortcutBindings,
+        "cursor-left" => CursorLeftShortcutBindings,
+        "cursor-right" => CursorRightShortcutBindings,
+        "previous-page" => PreviousPageShortcutBindings,
+        "next-page" => NextPageShortcutBindings,
+        _ => throw new ArgumentOutOfRangeException(nameof(group)),
+    };
+
     private void UpdateShortcutButtons()
     {
-        CorrectionShortcutButton.Content = _correctionShortcut;
-        LanguageShortcutButton.Content = _languageShortcut;
-        RawInputShortcutButton.Content = _rawInputShortcut;
-        CursorLeftShortcutButton.Content = _cursorLeftShortcut;
-        CursorRightShortcutButton.Content = _cursorRightShortcut;
-        PreviousPageShortcutButton.Content = _previousPageShortcut;
-        NextPageShortcutButton.Content = _nextPageShortcut;
+        foreach (var (group, bindings) in _shortcutBindings) {
+            var panel = ShortcutPanel(group);
+            panel.Children.Clear();
+            foreach (var binding in bindings) {
+                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+                var capture = new Button {
+                    Content = binding.Value, Tag = binding, MinWidth = 220,
+                    HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Left,
+                };
+                capture.Click += ShortcutButton_Click;
+                var remove = new Button { Content = "−", Tag = binding, MinWidth = 40 };
+                remove.Click += RemoveShortcutButton_Click;
+                row.Children.Add(capture);
+                row.Children.Add(remove);
+                panel.Children.Add(row);
+            }
+        }
+    }
+
+    private void AddShortcutButton_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: string group }) return;
+        var bindings = _shortcutBindings[group];
+        if (bindings.Count >= 16) {
+            ShowStatus("每项快捷键最多可添加 16 种方案。", InfoBarSeverity.Warning);
+            return;
+        }
+        var binding = new ShortcutBinding(group, bindings[^1].Value);
+        bindings.Add(binding);
+        UpdateShortcutButtons();
+        var panel = ShortcutPanel(group);
+        var row = (StackPanel)panel.Children[panel.Children.Count - 1];
+        ShortcutButton_Click(row.Children[0], e);
+    }
+
+    private void RemoveShortcutButton_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: ShortcutBinding binding }) return;
+        var bindings = _shortcutBindings[binding.Group];
+        if (bindings.Count == 1) {
+            ShowStatus("每项快捷键至少保留一种方案；如不需要可关闭该快捷键项。",
+                       InfoBarSeverity.Warning);
+            return;
+        }
+        if (_shortcutCaptureTarget?.Tag == binding) {
+            _shortcutCaptureTarget = null;
+            StopShortcutCaptureHook();
+        }
+        bindings.Remove(binding);
+        UpdateShortcutButtons();
     }
 
     private void ValidateShortcutConflicts()
     {
         var shortcuts = new List<string>();
-        if (CorrectionShortcutEnabled.IsOn) shortcuts.Add(_correctionShortcut);
-        if (LanguageShortcutEnabled.IsOn) shortcuts.Add(_languageShortcut);
-        if (RawInputShortcutEnabled.IsOn) shortcuts.Add(_rawInputShortcut);
-        if (CursorLeftShortcutEnabled.IsOn) shortcuts.Add(_cursorLeftShortcut);
-        if (CursorRightShortcutEnabled.IsOn) shortcuts.Add(_cursorRightShortcut);
-        if (PreviousPageShortcutEnabled.IsOn) shortcuts.Add(_previousPageShortcut);
-        if (NextPageShortcutEnabled.IsOn) shortcuts.Add(_nextPageShortcut);
+        if (CorrectionShortcutEnabled.IsOn) shortcuts.AddRange(ShortcutValues("correction"));
+        if (LanguageShortcutEnabled.IsOn) shortcuts.AddRange(ShortcutValues("language"));
+        if (RawInputShortcutEnabled.IsOn) shortcuts.AddRange(ShortcutValues("raw"));
+        if (CursorLeftShortcutEnabled.IsOn) shortcuts.AddRange(ShortcutValues("cursor-left"));
+        if (CursorRightShortcutEnabled.IsOn) shortcuts.AddRange(ShortcutValues("cursor-right"));
+        if (PreviousPageShortcutEnabled.IsOn) shortcuts.AddRange(ShortcutValues("previous-page"));
+        if (NextPageShortcutEnabled.IsOn) shortcuts.AddRange(ShortcutValues("next-page"));
         if (shortcuts.Count != shortcuts.Distinct(StringComparer.Ordinal).Count())
             throw new InvalidOperationException("启用的快捷键不能重复。");
     }

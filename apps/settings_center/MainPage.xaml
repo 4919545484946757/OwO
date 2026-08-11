@@ -4,101 +4,157 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       PreviewKeyDown="Page_KeyDown"
       PreviewKeyUp="Page_KeyUp">
-    <ScrollViewer>
-        <StackPanel MaxWidth="720" Padding="32" Spacing="20" HorizontalAlignment="Left">
+    <Grid Padding="32" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Spacing="6">
             <TextBlock Text="OwO 输入法设置" Style="{StaticResource TitleTextBlockStyle}" />
             <TextBlock Text="更改会原子保存，并由 Core Service 与输入法自动热加载。"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <Grid ColumnSpacing="24" RowSpacing="16">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="280" />
-                    <ColumnDefinition Width="240" />
-                </Grid.ColumnDefinitions>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" Text="每页候选数" VerticalAlignment="Center" />
-                <NumberBox x:Name="CandidatePageSize" Grid.Row="0" Grid.Column="1"
-                           Minimum="1" Maximum="9" SpinButtonPlacementMode="Inline" />
-                <TextBlock Grid.Row="1" Text="候选词换行长度（字符）" VerticalAlignment="Center" />
-                <NumberBox x:Name="CandidateWrapLength" Grid.Row="1" Grid.Column="1"
-                           Minimum="4" Maximum="64" SpinButtonPlacementMode="Inline" />
-                <TextBlock Grid.Row="2" Text="用户词频学习" VerticalAlignment="Center" />
-                <ToggleSwitch x:Name="UserLearning" Grid.Row="2" Grid.Column="1" />
-                <TextBlock Grid.Row="3" Text="词频学习灵敏度（1–10）" VerticalAlignment="Center" />
-                <NumberBox x:Name="UserLearningSensitivity" Grid.Row="3" Grid.Column="1"
-                           Minimum="1" Maximum="10" SpinButtonPlacementMode="Inline" />
-                <TextBlock Grid.Row="4" Text="智能排序（本地自适应）" VerticalAlignment="Center" />
-                <ToggleSwitch x:Name="ModelRanking" Grid.Row="4" Grid.Column="1" />
-                <TextBlock Grid.Row="5" Text="外部模型预算（毫秒）" VerticalAlignment="Center" />
-                <NumberBox x:Name="ModelTimeout" Grid.Row="5" Grid.Column="1"
-                           Minimum="5" Maximum="500" SpinButtonPlacementMode="Inline" />
+        </StackPanel>
+
+        <Grid Grid.Row="1" RowSpacing="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <RadioButton Content="常规" Tag="general" GroupName="SettingsTabs"
+                             IsChecked="True" Click="SettingsTab_Click" />
+                <RadioButton Content="快捷键" Tag="shortcuts" GroupName="SettingsTabs"
+                             Click="SettingsTab_Click" />
+                <RadioButton Content="插件" Tag="plugins" GroupName="SettingsTabs"
+                             Click="SettingsTab_Click" />
+            </StackPanel>
+            <Grid Grid.Row="1">
+                <ScrollViewer x:Name="GeneralSettingsPage">
+                    <StackPanel MaxWidth="760" Padding="8,24,24,24" Spacing="20"
+                                HorizontalAlignment="Left">
+                        <TextBlock Text="候选与学习" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <Grid ColumnSpacing="24" RowSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="320" />
+                                <ColumnDefinition Width="240" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="每页候选数" VerticalAlignment="Center" />
+                            <NumberBox x:Name="CandidatePageSize" Grid.Row="0" Grid.Column="1"
+                                       Minimum="1" Maximum="9" SpinButtonPlacementMode="Inline" />
+                            <TextBlock Grid.Row="1" Text="候选词换行长度（字符）" VerticalAlignment="Center" />
+                            <NumberBox x:Name="CandidateWrapLength" Grid.Row="1" Grid.Column="1"
+                                       Minimum="4" Maximum="64" SpinButtonPlacementMode="Inline" />
+                            <TextBlock Grid.Row="2" Text="用户词频学习" VerticalAlignment="Center" />
+                            <ToggleSwitch x:Name="UserLearning" Grid.Row="2" Grid.Column="1" />
+                            <TextBlock Grid.Row="3" Text="词频学习灵敏度（1–10）" VerticalAlignment="Center" />
+                            <NumberBox x:Name="UserLearningSensitivity" Grid.Row="3" Grid.Column="1"
+                                       Minimum="1" Maximum="10" SpinButtonPlacementMode="Inline" />
+                            <TextBlock Grid.Row="4" Text="智能排序（本地自适应）" VerticalAlignment="Center" />
+                            <ToggleSwitch x:Name="ModelRanking" Grid.Row="4" Grid.Column="1" />
+                            <TextBlock Grid.Row="5" Text="外部模型预算（毫秒）" VerticalAlignment="Center" />
+                            <NumberBox x:Name="ModelTimeout" Grid.Row="5" Grid.Column="1"
+                                       Minimum="5" Maximum="500" SpinButtonPlacementMode="Inline" />
+                        </Grid>
+                        <TextBlock Text="智能排序在本机学习当前拼音、所选候选及最近上屏片段之间的关系。切换焦点会清空短期前文，不读取窗口标题，也不会上传数据。基础候选不依赖模型，可随时关闭。"
+                                   TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </ScrollViewer>
+
+                <ScrollViewer x:Name="ShortcutSettingsPage" Visibility="Collapsed">
+                    <ContentControl x:Name="ShortcutSection" HorizontalContentAlignment="Stretch">
+                        <StackPanel MaxWidth="760" Padding="8,24,24,24" Spacing="18"
+                                    HorizontalAlignment="Left">
+                            <TextBlock Text="输入快捷键" Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBlock Text="每项可同时绑定多种方案。点击快捷键按钮后按下新组合；使用加号添加方案，使用减号删除方案。启用的方案之间不能重复。"
+                                       TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                            <StackPanel Spacing="8">
+                                <Grid ColumnSpacing="4" HorizontalAlignment="Left"><Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="切换拼音纠错" VerticalAlignment="Center"/><ToggleSwitch x:Name="CorrectionShortcutEnabled" Grid.Column="1"/><Button Grid.Column="2" Content="＋" Tag="correction" Click="AddShortcutButton_Click" ToolTipService.ToolTip="添加快捷键方案"/></Grid>
+                                <StackPanel x:Name="CorrectionShortcutBindings" Spacing="8" />
+                            </StackPanel>
+                            <StackPanel Spacing="8">
+                                <Grid ColumnSpacing="4" HorizontalAlignment="Left"><Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="切换中 / 英文输入" VerticalAlignment="Center"/><ToggleSwitch x:Name="LanguageShortcutEnabled" Grid.Column="1"/><Button Grid.Column="2" Content="＋" Tag="language" Click="AddShortcutButton_Click" ToolTipService.ToolTip="添加快捷键方案"/></Grid>
+                                <StackPanel x:Name="LanguageShortcutBindings" Spacing="8" />
+                            </StackPanel>
+                            <StackPanel Spacing="8">
+                                <Grid ColumnSpacing="4" HorizontalAlignment="Left"><Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="拼音原样上屏" VerticalAlignment="Center"/><ToggleSwitch x:Name="RawInputShortcutEnabled" Grid.Column="1"/><Button Grid.Column="2" Content="＋" Tag="raw" Click="AddShortcutButton_Click" ToolTipService.ToolTip="添加快捷键方案"/></Grid>
+                                <StackPanel x:Name="RawInputShortcutBindings" Spacing="8" />
+                            </StackPanel>
+                            <StackPanel Spacing="8">
+                                <Grid ColumnSpacing="4" HorizontalAlignment="Left"><Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="拼音光标左移" VerticalAlignment="Center"/><ToggleSwitch x:Name="CursorLeftShortcutEnabled" Grid.Column="1"/><Button Grid.Column="2" Content="＋" Tag="cursor-left" Click="AddShortcutButton_Click" ToolTipService.ToolTip="添加快捷键方案"/></Grid>
+                                <StackPanel x:Name="CursorLeftShortcutBindings" Spacing="8" />
+                            </StackPanel>
+                            <StackPanel Spacing="8">
+                                <Grid ColumnSpacing="4" HorizontalAlignment="Left"><Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="拼音光标右移" VerticalAlignment="Center"/><ToggleSwitch x:Name="CursorRightShortcutEnabled" Grid.Column="1"/><Button Grid.Column="2" Content="＋" Tag="cursor-right" Click="AddShortcutButton_Click" ToolTipService.ToolTip="添加快捷键方案"/></Grid>
+                                <StackPanel x:Name="CursorRightShortcutBindings" Spacing="8" />
+                            </StackPanel>
+                            <StackPanel Spacing="8">
+                                <Grid ColumnSpacing="4" HorizontalAlignment="Left"><Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="候选词上一页" VerticalAlignment="Center"/><ToggleSwitch x:Name="PreviousPageShortcutEnabled" Grid.Column="1"/><Button Grid.Column="2" Content="＋" Tag="previous-page" Click="AddShortcutButton_Click" ToolTipService.ToolTip="添加快捷键方案"/></Grid>
+                                <StackPanel x:Name="PreviousPageShortcutBindings" Spacing="8" />
+                            </StackPanel>
+                            <StackPanel Spacing="8">
+                                <Grid ColumnSpacing="4" HorizontalAlignment="Left"><Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="候选词下一页" VerticalAlignment="Center"/><ToggleSwitch x:Name="NextPageShortcutEnabled" Grid.Column="1"/><Button Grid.Column="2" Content="＋" Tag="next-page" Click="AddShortcutButton_Click" ToolTipService.ToolTip="添加快捷键方案"/></Grid>
+                                <StackPanel x:Name="NextPageShortcutBindings" Spacing="8" />
+                            </StackPanel>
+                        </StackPanel>
+                    </ContentControl>
+                </ScrollViewer>
+
+                <ScrollViewer x:Name="PluginSettingsPage" Visibility="Collapsed">
+                    <ContentControl x:Name="PluginSection" HorizontalContentAlignment="Stretch">
+                        <StackPanel MaxWidth="920" Padding="8,24,24,24" Spacing="14"
+                                    HorizontalAlignment="Left">
+                            <TextBlock Text="插件管理" Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <TextBlock Text="第三方、未验证或高权限包必须先显示完整风险，再对该包单独授权；安装后保持停用。授权不会跨版本继承，可随时撤销。"
+                                       TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                <Button x:Name="PluginInstallButton" Content="安装压缩包" Click="PluginInstallButton_Click" />
+                                <Button x:Name="PluginInstallFolderButton" Content="安装文件夹" Click="PluginInstallFolderButton_Click" />
+                                <Button x:Name="PluginReloadButton" Content="刷新插件状态" Click="PluginReloadButton_Click" />
+                            </StackPanel>
+                            <TextBlock x:Name="NoPlugins" Text="尚未安装有效插件版本。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <ItemsControl x:Name="PluginVersions">
+                                <ItemsControl.ItemTemplate><DataTemplate>
+                                    <Grid Margin="0,0,0,10" ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <StackPanel Spacing="3"><TextBlock Text="{Binding Title}"/><TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel>
+                                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"><Button Content="{Binding ActionLabel}" Tag="{Binding}" Click="PluginVersionAction_Click"/><Button Content="撤销权限" Tag="{Binding}" IsEnabled="{Binding CanRevoke}" Click="PluginVersionRevoke_Click"/><Button Content="卸载此版本" Tag="{Binding}" IsEnabled="{Binding CanUninstall}" Click="PluginVersionUninstall_Click"/></StackPanel>
+                                    </Grid>
+                                </DataTemplate></ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Text="恢复与维护" Margin="0,8,0,0" />
+                            <TextBlock x:Name="NoRecovery" Text="未发现需要审计的恢复项。" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <ItemsControl x:Name="RecoveryItems">
+                                <ItemsControl.ItemTemplate><DataTemplate>
+                                    <Grid Margin="0,0,0,10" ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <StackPanel Spacing="3"><TextBlock Text="{Binding Title}"/><TextBlock Text="{Binding Detail}" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel>
+                                        <Button Grid.Column="1" Content="{Binding ActionLabel}" Tag="{Binding}" IsEnabled="{Binding CanApply}" Click="RecoveryAction_Click"/>
+                                    </Grid>
+                                </DataTemplate></ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock x:Name="PluginPath" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ContentControl>
+                </ScrollViewer>
             </Grid>
-            <TextBlock Text="智能排序开启后，会在本机学习“当前拼音 → 所选候选”以及最近一次 OwO 上屏片段（最多 16 个字符）的短语关系；切换焦点时清空短期前文，不读取应用名称或窗口标题，也不会上传数据。基础候选不依赖模型，可随时关闭。"
-                       TextWrapping="Wrap"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
-            <ContentControl x:Name="ShortcutSection" HorizontalContentAlignment="Stretch">
-              <StackPanel Spacing="14">
-                <TextBlock Text="输入快捷键" Style="{StaticResource SubtitleTextBlockStyle}" />
-                <TextBlock Text="点击快捷键按钮后按下新的单键或组合键；组合键会等待主键按下，单独 Alt 在松开时确认。启用的快捷键不能重复，设置会由输入法自动热加载。"
-                           TextWrapping="Wrap"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <Grid ColumnSpacing="18" RowSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="280" />
-                        <ColumnDefinition Width="100" />
-                        <ColumnDefinition Width="180" />
-                    </Grid.ColumnDefinitions>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Text="切换拼音纠错" VerticalAlignment="Center" />
-                    <ToggleSwitch x:Name="CorrectionShortcutEnabled" Grid.Row="0" Grid.Column="1" />
-                    <Button x:Name="CorrectionShortcutButton" Grid.Row="0" Grid.Column="2"
-                            HorizontalAlignment="Stretch" Tag="correction"
-                            Click="ShortcutButton_Click" />
-                    <TextBlock Grid.Row="1" Text="切换中/英文输入" VerticalAlignment="Center" />
-                    <ToggleSwitch x:Name="LanguageShortcutEnabled" Grid.Row="1" Grid.Column="1" />
-                    <Button x:Name="LanguageShortcutButton" Grid.Row="1" Grid.Column="2"
-                            HorizontalAlignment="Stretch" Tag="language"
-                            Click="ShortcutButton_Click" />
-                    <TextBlock Grid.Row="2" Text="拼音原样上屏" VerticalAlignment="Center" />
-                    <ToggleSwitch x:Name="RawInputShortcutEnabled" Grid.Row="2" Grid.Column="1" />
-                    <Button x:Name="RawInputShortcutButton" Grid.Row="2" Grid.Column="2"
-                            HorizontalAlignment="Stretch" Tag="raw"
-                            Click="ShortcutButton_Click" />
-                    <TextBlock Grid.Row="3" Text="拼音光标左移" VerticalAlignment="Center" />
-                    <ToggleSwitch x:Name="CursorLeftShortcutEnabled" Grid.Row="3" Grid.Column="1" />
-                    <Button x:Name="CursorLeftShortcutButton" Grid.Row="3" Grid.Column="2"
-                            HorizontalAlignment="Stretch" Tag="cursor-left"
-                            Click="ShortcutButton_Click" />
-                    <TextBlock Grid.Row="4" Text="拼音光标右移" VerticalAlignment="Center" />
-                    <ToggleSwitch x:Name="CursorRightShortcutEnabled" Grid.Row="4" Grid.Column="1" />
-                    <Button x:Name="CursorRightShortcutButton" Grid.Row="4" Grid.Column="2"
-                            HorizontalAlignment="Stretch" Tag="cursor-right"
-                            Click="ShortcutButton_Click" />
-                    <TextBlock Grid.Row="5" Text="候选词上一页" VerticalAlignment="Center" />
-                    <ToggleSwitch x:Name="PreviousPageShortcutEnabled" Grid.Row="5" Grid.Column="1" />
-                    <Button x:Name="PreviousPageShortcutButton" Grid.Row="5" Grid.Column="2"
-                            HorizontalAlignment="Stretch" Tag="previous-page"
-                            Click="ShortcutButton_Click" />
-                    <TextBlock Grid.Row="6" Text="候选词下一页" VerticalAlignment="Center" />
-                    <ToggleSwitch x:Name="NextPageShortcutEnabled" Grid.Row="6" Grid.Column="1" />
-                    <Button x:Name="NextPageShortcutButton" Grid.Row="6" Grid.Column="2"
-                            HorizontalAlignment="Stretch" Tag="next-page"
-                            Click="ShortcutButton_Click" />
-                </Grid>
-              </StackPanel>
-            </ContentControl>
+        </Grid>
+
+        <StackPanel Grid.Row="2" Spacing="10">
             <StackPanel Orientation="Horizontal" Spacing="12">
                 <Button x:Name="SaveButton" Content="保存" Click="SaveButton_Click" />
                 <Button Content="重新加载" Click="ReloadButton_Click" />
@@ -107,77 +163,6 @@
                      Title="正在加载配置" IsClosable="False" />
             <TextBlock x:Name="ConfigPath" FontFamily="Consolas" FontSize="12"
                        TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
-            <ContentControl x:Name="PluginSection" HorizontalContentAlignment="Stretch">
-              <StackPanel Spacing="14">
-                <TextBlock Text="插件管理" Style="{StaticResource SubtitleTextBlockStyle}" />
-                <TextBlock Text="默认使用 Windows 发布者信任。第三方、未验证或高权限包必须先显示完整风险，再对该包单独授权；安装后保持停用。授权不会跨版本继承，可随时撤销。"
-                           TextWrapping="Wrap"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <StackPanel Orientation="Horizontal" Spacing="12">
-                    <Button x:Name="PluginInstallButton" Content="安装压缩包…"
-                            Click="PluginInstallButton_Click" />
-                    <Button x:Name="PluginInstallFolderButton" Content="安装文件夹…"
-                            Click="PluginInstallFolderButton_Click" />
-                    <Button x:Name="PluginReloadButton" Content="刷新插件状态"
-                            Click="PluginReloadButton_Click" />
-                </StackPanel>
-                <TextBlock x:Name="NoPlugins" Text="尚未安装有效插件版本。"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <ItemsControl x:Name="PluginVersions">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Grid Margin="0,0,0,10" ColumnSpacing="16">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Spacing="3">
-                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
-                                    <TextBlock Text="{Binding Detail}" TextWrapping="Wrap"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                                    <Button Content="{Binding ActionLabel}" Tag="{Binding}"
-                                            Click="PluginVersionAction_Click" />
-                                    <Button Content="撤销权限" Tag="{Binding}"
-                                            IsEnabled="{Binding CanRevoke}"
-                                            Click="PluginVersionRevoke_Click" />
-                                    <Button Content="卸载此版本" Tag="{Binding}"
-                                            IsEnabled="{Binding CanUninstall}"
-                                            Click="PluginVersionUninstall_Click" />
-                                </StackPanel>
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                <TextBlock Text="恢复与维护" FontWeight="SemiBold" Margin="0,8,0,0" />
-                <TextBlock x:Name="NoRecovery" Text="未发现需要审计的恢复项。"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <ItemsControl x:Name="RecoveryItems">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Grid Margin="0,0,0,10" ColumnSpacing="16">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Spacing="3">
-                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
-                                    <TextBlock Text="{Binding Detail}" TextWrapping="Wrap"
-                                               FontFamily="Consolas" FontSize="12"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                </StackPanel>
-                                <Button Grid.Column="1" Content="{Binding ActionLabel}" Tag="{Binding}"
-                                        IsEnabled="{Binding CanApply}" Click="RecoveryAction_Click" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                <TextBlock x:Name="PluginPath" FontFamily="Consolas" FontSize="12"
-                           TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-              </StackPanel>
-            </ContentControl>
         </StackPanel>
-    </ScrollViewer>
+    </Grid>
 </Page>

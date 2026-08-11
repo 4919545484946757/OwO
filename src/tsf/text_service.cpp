@@ -799,19 +799,19 @@ HRESULT TextService::OnChange(REFGUID guid) {
 
 bool TextService::should_eat_key(const WPARAM key) const noexcept {
     if (shortcut_config_.correction_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.correction_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.correction_shortcuts, key)) return true;
     if (shortcut_config_.language_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.language_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.language_shortcuts, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.raw_input_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.raw_input_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.raw_input_shortcuts, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.cursor_left_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.cursor_left_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.cursor_left_shortcuts, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.cursor_right_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.cursor_right_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.cursor_right_shortcuts, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.previous_page_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.previous_page_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.previous_page_shortcuts, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.next_page_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.next_page_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.next_page_shortcuts, key)) return true;
     if (!chinese_mode_) return false;
     if (key >= 'A' && key <= 'Z') return !command_modifier_down();
     if (input_buffer_.empty()) return false;
@@ -847,7 +847,7 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
     if (context != nullptr) update_candidate_anchor(context);
 
     if (shortcut_config_.correction_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.correction_shortcut, key)) {
+        shortcut_matches(shortcut_config_.correction_shortcuts, key)) {
         correction_enabled_ = !correction_enabled_;
         if (!input_buffer_.empty()) {
             // A mode change is intentional, so immediately discard any
@@ -864,23 +864,23 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
             queue_candidate_request();
         }
     } else if (shortcut_config_.language_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.language_shortcut, key)) {
+               shortcut_matches(shortcut_config_.language_shortcuts, key)) {
         return toggle_language_mode(context);
     } else if (!input_buffer_.empty() && shortcut_config_.raw_input_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.raw_input_shortcut, key)) {
+               shortcut_matches(shortcut_config_.raw_input_shortcuts, key)) {
         if (context != nullptr) return commit_raw_input(context);
         clear_composition();
     } else if (!input_buffer_.empty() && shortcut_config_.cursor_left_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.cursor_left_shortcut, key)) {
+               shortcut_matches(shortcut_config_.cursor_left_shortcuts, key)) {
         move_pinyin_cursor(-1);
     } else if (!input_buffer_.empty() && shortcut_config_.cursor_right_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.cursor_right_shortcut, key)) {
+               shortcut_matches(shortcut_config_.cursor_right_shortcuts, key)) {
         move_pinyin_cursor(1);
     } else if (!input_buffer_.empty() && shortcut_config_.previous_page_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.previous_page_shortcut, key)) {
+               shortcut_matches(shortcut_config_.previous_page_shortcuts, key)) {
         move_candidate_page_from_shortcut(-1);
     } else if (!input_buffer_.empty() && shortcut_config_.next_page_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.next_page_shortcut, key)) {
+               shortcut_matches(shortcut_config_.next_page_shortcuts, key)) {
         move_candidate_page_from_shortcut(1);
     } else if (key >= 'A' && key <= 'Z') {
         if (input_buffer_.size() >= kMaximumPinyinInputLength) return S_OK;
@@ -1664,7 +1664,7 @@ LRESULT CALLBACK TextService::keyboard_hook_proc(const int code, const WPARAM ke
         if (!released) {
             service->refresh_shortcut_config();
             if (service->shortcut_config_.language_shortcut_enabled &&
-                service->shortcut_matches(service->shortcut_config_.language_shortcut,
+                service->shortcut_matches(service->shortcut_config_.language_shortcuts,
                                            VK_SPACE)) {
                 service->language_space_key_suppressed_ = true;
                 if (!repeated && service->message_window_ != nullptr)
@@ -1707,38 +1707,38 @@ void TextService::refresh_shortcut_config(const bool force) {
 
 void TextService::sync_preserved_language_key() {
     if (thread_manager_ == nullptr || client_id_ == TF_CLIENTID_NULL) return;
-    const std::string desired = shortcut_config_.language_shortcut_enabled
-                                    ? shortcut_config_.language_shortcut
-                                    : std::string{};
-    if (preserved_language_key_registered_ && desired == preserved_language_shortcut_) return;
+    const std::vector<std::string> desired = shortcut_config_.language_shortcut_enabled
+                                    ? shortcut_config_.language_shortcuts
+                                    : std::vector<std::string>{};
+    if (desired == preserved_language_shortcuts_) return;
     clear_preserved_language_key();
     if (desired.empty()) return;
-    TF_PRESERVEDKEY key{};
-    if (!preserved_shortcut(desired, key)) return;
     ITfKeystrokeMgr* manager = nullptr;
     if (FAILED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager)))) return;
     constexpr wchar_t description[] = L"OwO 切换中英文输入";
-    const HRESULT preserved = manager->PreserveKey(
-        client_id_, kLanguageModePreservedKeyGuid, &key, description,
-        static_cast<ULONG>(std::size(description) - 1));
-    manager->Release();
-    if (SUCCEEDED(preserved)) {
-        preserved_language_key_ = key;
-        preserved_language_shortcut_ = desired;
-        preserved_language_key_registered_ = true;
+    for (const auto& shortcut : desired) {
+        TF_PRESERVEDKEY key{};
+        if (!preserved_shortcut(shortcut, key)) continue;
+        if (SUCCEEDED(manager->PreserveKey(
+                client_id_, kLanguageModePreservedKeyGuid, &key, description,
+                static_cast<ULONG>(std::size(description) - 1)))) {
+            preserved_language_keys_.push_back(key);
+        }
     }
+    manager->Release();
+    if (!preserved_language_keys_.empty()) preserved_language_shortcuts_ = desired;
 }
 
 void TextService::clear_preserved_language_key() noexcept {
-    if (!preserved_language_key_registered_ || thread_manager_ == nullptr) return;
+    if (preserved_language_keys_.empty() || thread_manager_ == nullptr) return;
     ITfKeystrokeMgr* manager = nullptr;
     if (SUCCEEDED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager)))) {
-        manager->UnpreserveKey(kLanguageModePreservedKeyGuid, &preserved_language_key_);
+        for (auto& key : preserved_language_keys_)
+            manager->UnpreserveKey(kLanguageModePreservedKeyGuid, &key);
         manager->Release();
     }
-    preserved_language_key_ = {};
-    preserved_language_shortcut_.clear();
-    preserved_language_key_registered_ = false;
+    preserved_language_keys_.clear();
+    preserved_language_shortcuts_.clear();
 }
 
 void TextService::initialize_language_compartment() {
@@ -1842,9 +1842,10 @@ void TextService::update_language_bar() noexcept {
     if (language_bar_item_ != nullptr) language_bar_item_->notify_mode_changed();
 }
 
-bool TextService::shortcut_matches(const std::string_view shortcut,
+bool TextService::shortcut_matches(const std::vector<std::string>& shortcuts,
                                    const WPARAM key) const {
-    return shortcut == shortcut_for_key_event(key);
+    const auto event = shortcut_for_key_event(key);
+    return std::find(shortcuts.begin(), shortcuts.end(), event) != shortcuts.end();
 }
 
 void TextService::schedule_candidate_request(const bool reset_retry) {

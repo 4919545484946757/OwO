@@ -82,7 +82,10 @@ bool valid_shortcut(const std::string_view shortcut) {
         if (separator == std::string_view::npos) break;
         offset = separator + 1;
     }
-    if (primary.empty() && (control || shift || !alt)) return false;
+    const auto modifier_count = static_cast<unsigned>(control) +
+                                static_cast<unsigned>(alt) +
+                                static_cast<unsigned>(shift);
+    if (primary.empty() && shortcut != "Alt" && modifier_count < 2) return false;
     std::string canonical;
     const auto append = [&canonical](const std::string_view token) {
         if (!canonical.empty()) canonical.push_back('+');
@@ -93,6 +96,30 @@ bool valid_shortcut(const std::string_view shortcut) {
     if (shift) append("Shift");
     if (!primary.empty()) append(primary);
     return canonical == shortcut;
+}
+
+bool parse_shortcut_list(const std::string_view text, std::vector<std::string>& output) {
+    output.clear();
+    std::size_t offset = 0;
+    while (offset < text.size()) {
+        const auto separator = text.find(';', offset);
+        const auto item = text.substr(offset, separator == std::string_view::npos
+            ? text.size() - offset : separator - offset);
+        if (item.empty()) return false;
+        output.emplace_back(item);
+        if (separator == std::string_view::npos) break;
+        offset = separator + 1;
+    }
+    return !output.empty();
+}
+
+std::string serialize_shortcut_list(const std::vector<std::string>& shortcuts) {
+    std::string result;
+    for (const auto& shortcut : shortcuts) {
+        if (!result.empty()) result.push_back(';');
+        result += shortcut;
+    }
+    return result;
 }
 
 ConfigParseResult read_config(const std::filesystem::path& path) {
@@ -160,28 +187,35 @@ ConfigValidationResult validate_config(const AppConfig& value) {
         return {false, "user_learning_sensitivity must be between 1 and 10"};
     if (value.model_timeout_ms < 5 || value.model_timeout_ms > 500)
         return {false, "model_timeout_ms must be between 5 and 500"};
-    if (!valid_shortcut(value.correction_shortcut) ||
-        !valid_shortcut(value.language_shortcut) ||
-        !valid_shortcut(value.raw_input_shortcut) ||
-        !valid_shortcut(value.cursor_left_shortcut) ||
-        !valid_shortcut(value.cursor_right_shortcut) ||
-        !valid_shortcut(value.previous_page_shortcut) ||
-        !valid_shortcut(value.next_page_shortcut))
-        return {false, "shortcut must be a canonical key or modifier combination"};
+    const auto valid_list = [](const std::vector<std::string>& shortcuts) {
+        return !shortcuts.empty() && shortcuts.size() <= 16 &&
+            std::all_of(shortcuts.begin(), shortcuts.end(), valid_shortcut);
+    };
+    if (!valid_list(value.correction_shortcuts) ||
+        !valid_list(value.language_shortcuts) ||
+        !valid_list(value.raw_input_shortcuts) ||
+        !valid_list(value.cursor_left_shortcuts) ||
+        !valid_list(value.cursor_right_shortcuts) ||
+        !valid_list(value.previous_page_shortcuts) ||
+        !valid_list(value.next_page_shortcuts))
+        return {false, "shortcut list must contain canonical key or modifier combinations"};
     std::set<std::string_view> enabled_shortcuts;
     const auto unique_if_enabled = [&enabled_shortcuts](const bool enabled,
-                                                         const std::string& shortcut) {
-        return !enabled || enabled_shortcuts.insert(shortcut).second;
+                                                         const std::vector<std::string>& shortcuts) {
+        if (!enabled) return true;
+        return std::all_of(shortcuts.begin(), shortcuts.end(), [&](const auto& shortcut) {
+            return enabled_shortcuts.insert(shortcut).second;
+        });
     };
-    if (!unique_if_enabled(value.correction_shortcut_enabled, value.correction_shortcut) ||
-        !unique_if_enabled(value.language_shortcut_enabled, value.language_shortcut) ||
-        !unique_if_enabled(value.raw_input_shortcut_enabled, value.raw_input_shortcut) ||
-        !unique_if_enabled(value.cursor_left_shortcut_enabled, value.cursor_left_shortcut) ||
-        !unique_if_enabled(value.cursor_right_shortcut_enabled, value.cursor_right_shortcut) ||
+    if (!unique_if_enabled(value.correction_shortcut_enabled, value.correction_shortcuts) ||
+        !unique_if_enabled(value.language_shortcut_enabled, value.language_shortcuts) ||
+        !unique_if_enabled(value.raw_input_shortcut_enabled, value.raw_input_shortcuts) ||
+        !unique_if_enabled(value.cursor_left_shortcut_enabled, value.cursor_left_shortcuts) ||
+        !unique_if_enabled(value.cursor_right_shortcut_enabled, value.cursor_right_shortcuts) ||
         !unique_if_enabled(value.previous_page_shortcut_enabled,
-                           value.previous_page_shortcut) ||
+                           value.previous_page_shortcuts) ||
         !unique_if_enabled(value.next_page_shortcut_enabled,
-                           value.next_page_shortcut))
+                           value.next_page_shortcuts))
         return {false, "enabled shortcuts must be unique"};
     return {true, {}};
 }
@@ -266,9 +300,18 @@ ConfigParseResult parse_config(const std::string_view utf8) {
             !parse_bool(fields["raw_input_shortcut_enabled"],
                         value.raw_input_shortcut_enabled))
             return {false, {}, "configuration field type is invalid"};
-        value.correction_shortcut = fields["correction_shortcut"];
-        value.language_shortcut = fields["language_shortcut"];
-        value.raw_input_shortcut = fields["raw_input_shortcut"];
+        const auto load_shortcuts = [version](const std::string& text,
+                                              std::vector<std::string>& output) {
+            if (version < 6) {
+                output = {text};
+                return true;
+            }
+            return parse_shortcut_list(text, output);
+        };
+        if (!load_shortcuts(fields["correction_shortcut"], value.correction_shortcuts) ||
+            !load_shortcuts(fields["language_shortcut"], value.language_shortcuts) ||
+            !load_shortcuts(fields["raw_input_shortcut"], value.raw_input_shortcuts))
+            return {false, {}, "configuration shortcut list is invalid"};
     }
     if (version >= 3 &&
         !parse_u32(fields["candidate_wrap_length"], value.candidate_wrap_length))
@@ -286,10 +329,25 @@ ConfigParseResult parse_config(const std::string_view utf8) {
             !parse_bool(fields["next_page_shortcut_enabled"],
                         value.next_page_shortcut_enabled))
             return {false, {}, "configuration field type is invalid"};
-        value.cursor_left_shortcut = fields["cursor_left_shortcut"];
-        value.cursor_right_shortcut = fields["cursor_right_shortcut"];
-        value.previous_page_shortcut = fields["previous_page_shortcut"];
-        value.next_page_shortcut = fields["next_page_shortcut"];
+        const auto load_shortcuts = [version](const std::string& text,
+                                              std::vector<std::string>& output) {
+            if (version < 6) {
+                output = {text};
+                return true;
+            }
+            return parse_shortcut_list(text, output);
+        };
+        if (!load_shortcuts(fields["cursor_left_shortcut"], value.cursor_left_shortcuts) ||
+            !load_shortcuts(fields["cursor_right_shortcut"], value.cursor_right_shortcuts) ||
+            !load_shortcuts(fields["previous_page_shortcut"], value.previous_page_shortcuts) ||
+            !load_shortcuts(fields["next_page_shortcut"], value.next_page_shortcuts))
+            return {false, {}, "configuration shortcut list is invalid"};
+        if (version < 6) {
+            if (value.previous_page_shortcuts.front() != "[")
+                value.previous_page_shortcuts.insert(value.previous_page_shortcuts.begin(), "[");
+            if (value.next_page_shortcuts.front() != "]")
+                value.next_page_shortcuts.insert(value.next_page_shortcuts.begin(), "]");
+        }
     }
     const auto validation = validate_config(value);
     if (!validation.ok) return {false, {}, validation.diagnostic};
@@ -308,25 +366,25 @@ std::string serialize_config(const AppConfig& value) {
            "\nmodel_timeout_ms=" + std::to_string(value.model_timeout_ms) +
            "\ncorrection_shortcut_enabled=" +
                (value.correction_shortcut_enabled ? std::string("true") : "false") +
-           "\ncorrection_shortcut=" + value.correction_shortcut +
+           "\ncorrection_shortcut=" + serialize_shortcut_list(value.correction_shortcuts) +
            "\nlanguage_shortcut_enabled=" +
                (value.language_shortcut_enabled ? std::string("true") : "false") +
-           "\nlanguage_shortcut=" + value.language_shortcut +
+           "\nlanguage_shortcut=" + serialize_shortcut_list(value.language_shortcuts) +
            "\nraw_input_shortcut_enabled=" +
                (value.raw_input_shortcut_enabled ? std::string("true") : "false") +
-           "\nraw_input_shortcut=" + value.raw_input_shortcut +
+           "\nraw_input_shortcut=" + serialize_shortcut_list(value.raw_input_shortcuts) +
            "\ncursor_left_shortcut_enabled=" +
                (value.cursor_left_shortcut_enabled ? std::string("true") : "false") +
-           "\ncursor_left_shortcut=" + value.cursor_left_shortcut +
+           "\ncursor_left_shortcut=" + serialize_shortcut_list(value.cursor_left_shortcuts) +
            "\ncursor_right_shortcut_enabled=" +
                (value.cursor_right_shortcut_enabled ? std::string("true") : "false") +
-           "\ncursor_right_shortcut=" + value.cursor_right_shortcut +
+           "\ncursor_right_shortcut=" + serialize_shortcut_list(value.cursor_right_shortcuts) +
            "\nprevious_page_shortcut_enabled=" +
                (value.previous_page_shortcut_enabled ? std::string("true") : "false") +
-           "\nprevious_page_shortcut=" + value.previous_page_shortcut +
+           "\nprevious_page_shortcut=" + serialize_shortcut_list(value.previous_page_shortcuts) +
            "\nnext_page_shortcut_enabled=" +
                (value.next_page_shortcut_enabled ? std::string("true") : "false") +
-           "\nnext_page_shortcut=" + value.next_page_shortcut + "\n";
+           "\nnext_page_shortcut=" + serialize_shortcut_list(value.next_page_shortcuts) + "\n";
 }
 
 ConfigIoResult ConfigStore::load(const std::filesystem::path& path) {
