@@ -414,6 +414,7 @@ fn estimate_tokens_counts_content() {
 #[tokio::test]
 async fn context_compaction_summarizes_old_history() {
     let workspace = temp_workspace("compaction");
+    std::fs::write(workspace.join("AGENTS.md"), "重要规则XYZ：必须遵守。").unwrap();
     let mut session = Session::new(&workspace, "mock".to_string(), None);
     for index in 0..10 {
         session.push(ChatMessage::user(format!(
@@ -421,10 +422,17 @@ async fn context_compaction_summarizes_old_history() {
             "很长的内容".repeat(20)
         )));
     }
-    let provider = ScriptedProvider::new(vec![
-        ModelOutput::Text("摘要：已完成的动作".to_string()),
-        ModelOutput::Text("done".to_string()),
-    ]);
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        script: Mutex::new(
+            vec![
+                ModelOutput::Text("摘要：已完成的动作".to_string()),
+                ModelOutput::Text("done".to_string()),
+            ]
+            .into(),
+        ),
+        recorded: Arc::clone(&recorded),
+    };
     let policy = Policy::new(&workspace);
     let registry = ToolRegistry::new();
     let config = AgentConfig {
@@ -461,6 +469,14 @@ async fn context_compaction_summarizes_old_history() {
         .entries
         .iter()
         .any(|entry| entry.event == "compaction"));
+    let messages = recorded.lock().unwrap();
+    assert!(messages.iter().any(|message| {
+        message.role == "system"
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("重要规则XYZ"))
+    }));
 }
 
 #[tokio::test]

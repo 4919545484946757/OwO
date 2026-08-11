@@ -47,6 +47,7 @@ impl AppState {
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/openapi.json", get(openapi_spec))
         .route("/session", post(create_session))
         .route("/session/{id}/turn", post(turn))
         .route(
@@ -63,6 +64,74 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/export/{format}", get(export_session))
         .route("/eval/run", post(run_eval))
         .with_state(state)
+}
+
+async fn openapi_spec() -> Json<Value> {
+    Json(serde_json::json!({
+        "openapi": "3.1.0",
+        "info": { "title": "OwO Agent SDK API", "version": env!("CARGO_PKG_VERSION") },
+        "servers": [{ "url": "http://127.0.0.1:4096" }],
+        "paths": {
+            "/health": { "get": { "operationId": "health", "responses": { "200": { "description": "ok" } } } },
+            "/session": { "post": {
+                "operationId": "createSession",
+                "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateSessionRequest" } } } },
+                "responses": { "200": { "description": "session created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionInfo" } } } } }
+            } },
+            "/session/{id}/turn": { "post": {
+                "operationId": "agentTurn",
+                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+                "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TurnRequest" } } } },
+                "responses": { "200": { "description": "SSE event stream" } }
+            } },
+            "/session/{id}/abort": { "post": { "operationId": "abortTurn", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
+            "/session/{id}/permission/{request_id}": { "post": { "operationId": "respondPermission", "parameters": [path_param("id"), path_param("request_id")], "responses": { "200": { "description": "ok" } } } },
+            "/session/{id}/diff": { "get": { "operationId": "sessionDiff", "parameters": [path_param("id")], "responses": { "200": { "description": "diff list" } } } },
+            "/session/{id}/revert": { "post": { "operationId": "sessionRevert", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
+            "/session/{id}/fork": { "post": { "operationId": "sessionFork", "parameters": [path_param("id")], "responses": { "200": { "description": "forked session" } } } },
+            "/session/{id}/rewind": { "post": { "operationId": "sessionRewind", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
+            "/session/{id}/redo": { "post": { "operationId": "sessionRedo", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
+            "/session/{id}/children": { "get": { "operationId": "sessionChildren", "parameters": [path_param("id")], "responses": { "200": { "description": "children" } } } },
+            "/session/{id}/export/{format}": { "get": { "operationId": "exportSession", "parameters": [path_param("id"), path_param("format")], "responses": { "200": { "description": "md or html" } } } },
+            "/eval/run": { "post": { "operationId": "runEval", "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EvalRunRequest" } } } }, "responses": { "200": { "description": "eval report" } } } }
+        },
+        "components": {
+            "schemas": {
+                "CreateSessionRequest": {
+                    "type": "object",
+                    "properties": {
+                        "workspace": { "type": "string" },
+                        "model": { "type": "string" },
+                        "system_prompt": { "type": "string" }
+                    },
+                    "required": ["workspace"]
+                },
+                "SessionInfo": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "workspace": { "type": "string" },
+                        "model": { "type": "string" },
+                        "created_at": { "type": "string" }
+                    }
+                },
+                "TurnRequest": {
+                    "type": "object",
+                    "properties": { "prompt": { "type": "string" } },
+                    "required": ["prompt"]
+                },
+                "EvalRunRequest": {
+                    "type": "object",
+                    "properties": { "suite_id": { "type": "string" } },
+                    "required": ["suite_id"]
+                }
+            }
+        }
+    }))
+}
+
+fn path_param(name: &str) -> Value {
+    serde_json::json!({ "name": name, "in": "path", "required": true, "schema": { "type": "string" } })
 }
 
 fn to_session_info(session: &Session) -> SessionInfo {

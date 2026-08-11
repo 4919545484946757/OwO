@@ -35,7 +35,11 @@ impl ModelProvider for KeywordProvider {
 
 #[tokio::test]
 async fn eval_suite_reports_pass_and_fail() {
-    let mut suite = owo_agent_core::builtin_suite();
+    let mut builtin = owo_agent_core::builtin_suite();
+    let mut suite = owo_agent_core::EvalSuite {
+        name: "test".to_string(),
+        cases: builtin.cases.drain(..5).collect(),
+    };
     suite.cases.push(EvalCase {
         name: "fail_case".to_string(),
         prompt: "做点别的".to_string(),
@@ -63,4 +67,9 @@ async fn eval_suite_reports_pass_and_fail() {
         .unwrap();
     assert!(read.passed);
     assert!(read.output.contains("hello-eval"));
+}
+
+#[test]
+fn builtin_suite_has_at_least_twenty_cases() {
+    assert!(owo_agent_core::builtin_suite().cases.len() >= 20);
 }
