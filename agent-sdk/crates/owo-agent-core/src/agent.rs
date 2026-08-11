@@ -110,6 +110,30 @@ impl Agent {
         Arc::clone(&self.provider)
     }
 
+    /// 直呼子代理（CLI `@explore` / `@subagent`）：独立子会话执行，返回最终文本。
+    pub async fn run_subagent(
+        &self,
+        workspace: &std::path::Path,
+        model: &str,
+        prompt: &str,
+        read_only: bool,
+    ) -> Result<String, AgentError> {
+        let abort = AtomicBool::new(false);
+        let approver = crate::permissions::AutoApprover { allow: true };
+        let runner = SubagentRunner {
+            provider: Arc::clone(&self.provider),
+            approver: &approver,
+            abort: &abort,
+            depth: self.config.subagent_depth,
+            max_turns: self.config.max_turns,
+            model: model.to_string(),
+        };
+        runner
+            .run(workspace, prompt, read_only)
+            .await
+            .map_err(AgentError::Tool)
+    }
+
     pub fn audit_log(&self) -> Arc<Mutex<AuditLog>> {
         Arc::clone(&self.audit)
     }

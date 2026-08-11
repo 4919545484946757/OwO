@@ -462,3 +462,16 @@ async fn context_compaction_summarizes_old_history() {
         .iter()
         .any(|entry| entry.event == "compaction"));
 }
+
+#[tokio::test]
+async fn direct_subagent_invocation_returns_result() {
+    let workspace = temp_workspace("at-subagent");
+    std::fs::write(workspace.join("x.txt"), "内容").unwrap();
+    let provider = ScriptedProvider::new(vec![ModelOutput::Text("找到 x.txt".to_string())]);
+    let agent = build_agent(&workspace, provider);
+    let text = agent
+        .run_subagent(&workspace, "mock", "调查", true)
+        .await
+        .unwrap();
+    assert!(text.contains("找到"));
+}

@@ -666,6 +666,14 @@ impl Repl {
     }
 
     async fn handle_line(&mut self, line: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        if let Some(query) = line.strip_prefix("@explore ") {
+            self.run_at_subagent(query, true).await?;
+            return Ok(false);
+        }
+        if let Some(task) = line.strip_prefix("@subagent ") {
+            self.run_at_subagent(task, false).await?;
+            return Ok(false);
+        }
         if let Some(command) = line.strip_prefix('/') {
             let mut parts = command.split_whitespace();
             match parts.next().unwrap_or_default() {
@@ -1333,11 +1341,36 @@ impl Repl {
         );
         Ok(())
     }
+
+    async fn run_at_subagent(
+        &mut self,
+        prompt: &str,
+        read_only: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = self.workspace.clone();
+        let model = self.model.clone();
+        let agent = Arc::clone(&self.agent);
+        let text = agent
+            .run_subagent(&workspace, &model, prompt, read_only)
+            .await?;
+        println!(
+            "{} {}",
+            if read_only {
+                "探索结果：".cyan()
+            } else {
+                "子代理结果：".green()
+            },
+            text
+        );
+        Ok(())
+    }
 }
 
 fn print_help() {
     println!("{}", "── 命令 ──".bold());
     println!("  直接输入文字        向当前 Agent 发起任务");
+    println!("  @explore <问题>     直呼只读探索子代理");
+    println!("  @subagent <任务>    直呼通用子代理");
     println!("  /new [模型]         新建会话");
     println!("  /sessions           列出会话");
     println!("  /resume <id>        恢复会话");

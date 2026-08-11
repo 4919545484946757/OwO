@@ -429,11 +429,43 @@ impl TuiApp {
         if line.is_empty() {
             return Ok(());
         }
+        if let Some(query) = line.strip_prefix("@explore ") {
+            self.run_at_subagent(runtime, query, true)?;
+            return Ok(());
+        }
+        if let Some(task) = line.strip_prefix("@subagent ") {
+            self.run_at_subagent(runtime, task, false)?;
+            return Ok(());
+        }
         if let Some(command) = line.strip_prefix('/') {
             self.handle_command(command, runtime)?;
             return Ok(());
         }
         self.start_turn(runtime, &line);
+        Ok(())
+    }
+
+    fn run_at_subagent(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        prompt: &str,
+        read_only: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = self.workspace.clone();
+        let model = self.model.clone();
+        let agent = Arc::clone(&self.agent);
+        let text = runtime.block_on(agent.run_subagent(&workspace, &model, prompt, read_only))?;
+        self.push_system(
+            format!(
+                "{}：{text}",
+                if read_only {
+                    "探索结果"
+                } else {
+                    "子代理结果"
+                }
+            ),
+            if read_only { cyan() } else { green() },
+        );
         Ok(())
     }
 
@@ -1233,6 +1265,7 @@ impl TuiApp {
     fn push_help(&mut self) {
         for line in [
             "直接输入文字 发起任务",
+            "@explore / @subagent  直呼子代理",
             "/new /sessions /resume <id>  会话管理",
             "/fork [序号] /rewind <条数> /redo /tree  会话分支/回退/恢复/树",
             "/undo-msg [n] /redo-msg  消息级撤销/重做",
