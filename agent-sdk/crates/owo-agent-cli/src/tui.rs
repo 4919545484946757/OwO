@@ -9,8 +9,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::{
-    export_html, export_markdown, Agent, McpClient, McpServerConfig, SkillRegistry,
-    SqliteSessionStore, TurnEvent,
+    export_html, export_markdown, list_traces, load_trace, save_trace, Agent, McpClient,
+    McpServerConfig, SkillRegistry, SqliteSessionStore, TraceRecord, TurnEvent, TurnOutcome,
 };
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -108,7 +108,7 @@ impl Approver for TuiApprover {
 
 enum TuiMsg {
     Event(TurnEvent),
-    Finished(Result<(usize, Option<String>), String>, Box<Session>),
+    Finished(Result<TurnOutcome, String>, Box<Session>),
 }
 
 struct TuiApp {
@@ -412,9 +412,7 @@ impl TuiApp {
                     &mut on_event,
                 )
                 .await;
-            let result = outcome
-                .map(|outcome| (outcome.steps, outcome.final_text))
-                .map_err(|error| error.to_string());
+            let result = outcome.map_err(|error| error.to_string());
             let _ = tx.send(TuiMsg::Finished(result, Box::new(session)));
         });
     }
@@ -432,7 +430,13 @@ impl TuiApp {
                         let _ = self.store.save(session);
                     }
                     match result {
-                        Ok((steps, final_text)) => {
+                        Ok(outcome) => {
+                            let steps = outcome.steps;
+                            let final_text = outcome.final_text.clone();
+                            if let Some(session) = &self.session {
+                                let trace = TraceRecord::from_outcome(session, &outcome);
+                                let _ = save_trace(&self.data_root.join("traces"), &trace);
+                            }
                             let changed = self
                                 .session
                                 .as_ref()
@@ -444,9 +448,9 @@ impl TuiApp {
                                 ),
                                 green(),
                             );
-                            if let Some(text) = final_text {
+                            if let Some(text) = &final_text {
                                 self.push_line("── 结果 ──".to_string(), bold());
-                                self.push_line(text, default());
+                                self.push_line(text.clone(), default());
                             }
                             self.status = "就绪".to_string();
                         }
@@ -661,6 +665,8 @@ impl TuiApp {
             "redo" => self.redo_session()?,
             "tree" => self.show_tree(),
             "share" => self.share_session(parts.next())?,
+            "traces" => self.list_traces(),
+            "trace" => self.show_trace(parts.next())?,
             "plan" => {
                 if !self.read_only {
                     self.toggle_mode()?;
@@ -824,6 +830,46 @@ impl TuiApp {
         };
         std::fs::write(&path, content)?;
         self.push_system(format!("已导出会话分享：{}", display_path(&path)), green());
+        Ok(())
+    }
+
+    fn list_traces(&mut self) {
+        let traces = list_traces(&self.data_root.join("traces"));
+        if traces.is_empty() {
+            self.push_system("暂无 trace（完成回合后自动记录）".to_string(), dim());
+            return;
+        }
+        let mut lines = Vec::new();
+        for (index, path) in traces.iter().enumerate() {
+            if let Ok(trace) = load_trace(path) {
+                let preview: String = trace.prompt.chars().take(40).collect();
+                lines.push(format!(
+                    "{index}: steps={} {}ms final={} {}",
+                    trace.steps,
+                    trace.duration_ms,
+                    trace.final_text.is_some(),
+                    preview
+                ));
+            }
+        }
+        for line in lines {
+            self.push_line(line, default());
+        }
+    }
+
+    fn show_trace(&mut self, index: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let index: usize = index
+            .ok_or("用法：/trace <序号>（/traces 查看）")?
+            .parse()?;
+        let traces = list_traces(&self.data_root.join("traces"));
+        let path = traces
+            .get(index)
+            .ok_or_else(|| format!("trace 序号越界（共 {} 条）", traces.len()))?;
+        let trace = load_trace(path)?;
+        let content = serde_json::to_string_pretty(&trace)?;
+        for line in content.lines() {
+            self.push_line(line.to_string(), default());
+        }
         Ok(())
     }
 
@@ -1002,6 +1048,7 @@ impl TuiApp {
             "/new /sessions /resume <id>  会话管理",
             "/fork [序号] /rewind <条数> /redo /tree  会话分支/回退/恢复/树",
             "/share [html]  导出会话分享",
+            "/traces /trace <n>  回合轨迹",
             "/model [名称]  查看/切换模型",
             "/plan /build  切换只读/执行模式（或 Tab）",
             "/diff /undo  查看改动 / 回滚",

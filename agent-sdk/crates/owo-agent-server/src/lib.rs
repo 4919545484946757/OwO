@@ -16,6 +16,7 @@ use owo_agent_protocol::{
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -27,16 +28,18 @@ pub struct AppState {
     pub sessions: Arc<Mutex<HashMap<String, Session>>>,
     pub pending_approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Decision>>>>,
     pub aborts: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    pub traces_dir: PathBuf,
 }
 
 impl AppState {
-    pub fn new(agent: Agent, store: impl SessionStore + 'static) -> Self {
+    pub fn new(agent: Agent, store: impl SessionStore + 'static, traces_dir: PathBuf) -> Self {
         Self {
             agent: Arc::new(agent),
             store: Arc::new(store),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_approvals: Arc::new(Mutex::new(HashMap::new())),
             aborts: Arc::new(Mutex::new(HashMap::new())),
+            traces_dir,
         }
     }
 }
@@ -146,6 +149,7 @@ async fn turn(
     let agent = Arc::clone(&state.agent);
     let store = Arc::clone(&state.store);
     let sessions = Arc::clone(&state.sessions);
+    let traces_dir = state.traces_dir.clone();
     tokio::spawn(async move {
         let mut current = session;
         let mut on_event = |event: &owo_agent_core::TurnEvent| {
@@ -153,7 +157,7 @@ async fn turn(
                 let _ = tx.try_send(to_event(sse));
             }
         };
-        let outcome = agent
+        match agent
             .run_turn(
                 &mut current,
                 &request.prompt,
@@ -161,11 +165,17 @@ async fn turn(
                 &abort_flag,
                 &mut on_event,
             )
-            .await;
-        if let Err(error) = outcome {
-            let _ = tx.try_send(to_event(SseEvent::Progress {
-                message: format!("turn failed: {error}"),
-            }));
+            .await
+        {
+            Ok(outcome) => {
+                let trace = owo_agent_core::TraceRecord::from_outcome(&current, &outcome);
+                let _ = owo_agent_core::save_trace(&traces_dir, &trace);
+            }
+            Err(error) => {
+                let _ = tx.try_send(to_event(SseEvent::Progress {
+                    message: format!("turn failed: {error}"),
+                }));
+            }
         }
         if let Ok(mut sessions) = sessions.lock() {
             sessions.insert(current.id.clone(), current.clone());

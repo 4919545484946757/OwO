@@ -5,9 +5,9 @@ use owo_agent_core::permissions::{Approver, AutoApprover, Decision, PermissionRe
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
-    builtin_suite, eval_suite_path, export_html, export_markdown, run_suite, Agent, AgentConfig,
-    McpClient, McpServerConfig, OpenAiCompatibleConfig, OpenAiCompatibleProvider, SkillRegistry,
-    SqliteSessionStore, TurnEvent,
+    builtin_suite, eval_suite_path, export_html, export_markdown, list_traces, load_trace,
+    run_suite, save_trace, Agent, AgentConfig, McpClient, McpServerConfig, OpenAiCompatibleConfig,
+    OpenAiCompatibleProvider, SkillRegistry, SqliteSessionStore, TraceRecord, TurnEvent,
 };
 use rustyline::error::ReadlineError;
 use std::future::Future;
@@ -301,7 +301,7 @@ async fn run_turn(args: TurnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
     let model = resolve_model(args.model);
     let agent = build_agent(&workspace, &model, false)?;
-    let mut session = Session::new(workspace, model, None);
+    let mut session = Session::new(workspace.clone(), model, None);
     let abort = Arc::new(AtomicBool::new(false));
     let abort_flag = Arc::clone(&abort);
     tokio::spawn(async move {
@@ -346,6 +346,11 @@ async fn run_turn(args: TurnArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(audit) = audit.lock() {
         println!("[审计] 记录 {} 条", audit.entries.len());
     }
+    let root = ensure_data_root(None, &workspace);
+    let trace = TraceRecord::from_outcome(&session, &outcome);
+    if let Ok(path) = save_trace(&root.join("traces"), &trace) {
+        println!("[trace] {}", display_path(&path));
+    }
     Ok(())
 }
 
@@ -355,7 +360,11 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let agent = build_agent(&workspace, &model, false)?;
     let root = ensure_data_root(None, &workspace);
     let store = SqliteSessionStore::open(&root.join("index.db"))?;
-    let state = Arc::new(owo_agent_server::AppState::new(agent, store));
+    let state = Arc::new(owo_agent_server::AppState::new(
+        agent,
+        store,
+        root.join("traces"),
+    ));
     let app = owo_agent_server::build_router(state);
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -640,6 +649,8 @@ impl Repl {
                 "redo" => self.redo_session().await?,
                 "tree" => self.show_tree(),
                 "share" => self.share_session(parts.next())?,
+                "traces" => self.list_traces(),
+                "trace" => self.show_trace(parts.next())?,
                 "status" => self.show_status(),
                 "permissions" => self.show_permissions(),
                 "audit" => self.show_audit(),
@@ -915,6 +926,41 @@ impl Repl {
         Ok(())
     }
 
+    fn list_traces(&self) {
+        let traces = list_traces(&self.data_root.join("traces"));
+        if traces.is_empty() {
+            println!("暂无 trace（完成回合后自动记录）");
+            return;
+        }
+        for (index, path) in traces.iter().enumerate() {
+            if let Ok(trace) = load_trace(path) {
+                let preview: String = trace.prompt.chars().take(40).collect();
+                println!(
+                    "{}: {} steps={} {}ms final={}",
+                    index,
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    trace.steps,
+                    trace.duration_ms,
+                    trace.final_text.is_some()
+                );
+                println!("      {}", preview.dimmed());
+            }
+        }
+    }
+
+    fn show_trace(&self, index: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let index: usize = index
+            .ok_or("用法：/trace <序号>（/traces 查看）")?
+            .parse()?;
+        let traces = list_traces(&self.data_root.join("traces"));
+        let path = traces
+            .get(index)
+            .ok_or_else(|| format!("trace 序号越界（共 {} 条）", traces.len()))?;
+        let trace = load_trace(path)?;
+        println!("{}", serde_json::to_string_pretty(&trace)?);
+        Ok(())
+    }
+
     fn list_sessions(&self) {
         let ids = self.store.list();
         if ids.is_empty() {
@@ -1119,6 +1165,11 @@ impl Repl {
         if let Some(session) = &self.session {
             self.store.save(session)?;
         }
+        let trace =
+            TraceRecord::from_outcome(self.session.as_ref().expect("session saved"), &outcome);
+        if let Ok(path) = save_trace(&self.data_root.join("traces"), &trace) {
+            println!("[trace] {}", display_path(&path));
+        }
         println!(
             "{} 工具步数 {}，审计 {} 条，改动 {} 个文件（/diff 查看，/undo 回滚）",
             "✓".green(),
@@ -1145,6 +1196,7 @@ fn print_help() {
     println!("  /redo               恢复最近一次 rewind");
     println!("  /tree               查看会话树");
     println!("  /share [html]       导出会话分享（Markdown/HTML）");
+    println!("  /traces | /trace <n>  列出/回放回合轨迹");
     println!("  /model [名称]       查看/切换模型");
     println!("  /plan | /build      切换只读规划模式 / 执行模式");
     println!("  /diff               查看本次会话文件改动");

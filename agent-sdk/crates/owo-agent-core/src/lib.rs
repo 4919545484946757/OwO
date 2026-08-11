@@ -15,6 +15,7 @@ pub mod skill;
 pub mod sqlite_store;
 pub mod subagent;
 pub mod tools;
+pub mod trace;
 
 pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
 pub use audit::{AuditEntry, AuditLog};
@@ -31,3 +32,4 @@ pub use share::{export_html, export_markdown};
 pub use skill::{Skill, SkillRegistry};
 pub use sqlite_store::SqliteSessionStore;
 pub use tools::{Tool, ToolContext, ToolRegistry, ToolSpec};
+pub use trace::{list_traces, load_trace, save_trace, TraceRecord};

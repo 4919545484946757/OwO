@@ -8,6 +8,7 @@ use crate::skill::SkillRegistry;
 use crate::subagent::SubagentRunner;
 use crate::tools::{ToolContext, ToolRegistry};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -34,7 +35,8 @@ impl Default for AgentConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum TurnEvent {
     ModelCall,
     TokenDelta {
@@ -59,11 +61,14 @@ pub enum TurnEvent {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnOutcome {
     pub final_text: Option<String>,
     pub steps: usize,
     pub events: Vec<TurnEvent>,
+    pub prompt: String,
+    pub started_at: String,
+    pub duration_ms: u64,
 }
 
 /// Agent 核心：执行循环 + 工具注册表 + 权限策略 + 审计。
@@ -126,6 +131,8 @@ impl Agent {
         abort: &AtomicBool,
         on_event: &mut (dyn FnMut(&TurnEvent) + Send),
     ) -> Result<TurnOutcome, AgentError> {
+        let started_at = Utc::now().to_rfc3339();
+        let started = std::time::Instant::now();
         let rules = load_project_rules(&session.workspace);
         let mut system = build_system_prompt(session.system_prompt.as_deref(), &rules);
         if !self.skills.list().is_empty() {
@@ -286,6 +293,9 @@ impl Agent {
             final_text,
             steps,
             events,
+            prompt: prompt.to_string(),
+            started_at,
+            duration_ms: started.elapsed().as_millis() as u64,
         })
     }
 
