@@ -9,8 +9,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::{
-    export_html, export_markdown, Agent, JsonSessionStore, McpClient, McpServerConfig,
-    SkillRegistry, TurnEvent,
+    export_html, export_markdown, Agent, McpClient, McpServerConfig, SkillRegistry,
+    SqliteSessionStore, TurnEvent,
 };
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -48,7 +48,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
     let model = resolve_model(args.model);
     let read_only = args.agent == "plan";
     let root = ensure_data_root(args.data_dir, &workspace);
-    let store = JsonSessionStore::new(root.join("sessions"));
+    let store = SqliteSessionStore::open(&root.join("index.db"))?;
     let mcp_configs = load_mcp_configs(&root);
     let mcp_clients = runtime.block_on(connect_mcp_clients(&mcp_configs));
     let skills = SkillRegistry::discover(&workspace, &root);
@@ -117,7 +117,7 @@ struct TuiApp {
     read_only: bool,
     no_approval: bool,
     data_root: PathBuf,
-    store: JsonSessionStore,
+    store: SqliteSessionStore,
     session: Option<Session>,
     agent: Arc<Agent>,
     abort: Arc<AtomicBool>,
@@ -143,7 +143,7 @@ impl TuiApp {
         read_only: bool,
         no_approval: bool,
         data_root: PathBuf,
-        store: JsonSessionStore,
+        store: SqliteSessionStore,
         agent: Arc<Agent>,
         mcp_configs: Vec<McpServerConfig>,
         mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
@@ -1057,7 +1057,10 @@ mod tests {
         std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9");
         std::env::set_var("OPENAI_MODEL", "mock");
         let workspace = std::env::temp_dir();
-        let store = JsonSessionStore::new(workspace.join("owo-tui-test-sessions"));
+        let store = SqliteSessionStore::open(
+            &std::env::temp_dir().join(format!("owo-tui-test-{}.db", uuid::Uuid::new_v4())),
+        )
+        .unwrap();
         let agent = Arc::new(crate::build_agent(&workspace, "mock", false).unwrap());
         TuiApp::new(
             workspace,

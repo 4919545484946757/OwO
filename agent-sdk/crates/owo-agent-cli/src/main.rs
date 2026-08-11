@@ -5,8 +5,8 @@ use owo_agent_core::permissions::{Approver, AutoApprover, Decision, PermissionRe
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
-    export_html, export_markdown, Agent, AgentConfig, JsonSessionStore, McpClient, McpServerConfig,
-    OpenAiCompatibleConfig, OpenAiCompatibleProvider, SkillRegistry, TurnEvent,
+    export_html, export_markdown, Agent, AgentConfig, McpClient, McpServerConfig,
+    OpenAiCompatibleConfig, OpenAiCompatibleProvider, SkillRegistry, SqliteSessionStore, TurnEvent,
 };
 use rustyline::error::ReadlineError;
 use std::future::Future;
@@ -320,7 +320,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let model = resolve_model(None);
     let agent = build_agent(&workspace, &model, false)?;
     let root = ensure_data_root(None, &workspace);
-    let store = JsonSessionStore::new(root.join("sessions"));
+    let store = SqliteSessionStore::open(&root.join("index.db"))?;
     let state = Arc::new(owo_agent_server::AppState::new(agent, store));
     let app = owo_agent_server::build_router(state);
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
@@ -414,7 +414,7 @@ struct Repl {
     read_only: bool,
     no_approval: bool,
     data_root: PathBuf,
-    store: JsonSessionStore,
+    store: SqliteSessionStore,
     session: Option<Session>,
     agent: Arc<Agent>,
     abort: Arc<AtomicBool>,
@@ -430,7 +430,7 @@ impl Repl {
         let model = resolve_model(args.model);
         let read_only = args.agent == "plan";
         let root = ensure_data_root(args.data_dir, &workspace);
-        let store = JsonSessionStore::new(root.join("sessions"));
+        let store = SqliteSessionStore::open(&root.join("index.db"))?;
         let mcp_configs = load_mcp_configs(&root);
         let mcp_clients = connect_mcp_clients(&mcp_configs).await;
         let skills = SkillRegistry::discover(&workspace, &root);
