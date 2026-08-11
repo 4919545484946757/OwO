@@ -5,8 +5,8 @@ use owo_agent_core::permissions::{Approver, AutoApprover, Decision, PermissionRe
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
-    Agent, AgentConfig, JsonSessionStore, McpClient, McpServerConfig, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider, SkillRegistry, TurnEvent,
+    export_html, export_markdown, Agent, AgentConfig, JsonSessionStore, McpClient, McpServerConfig,
+    OpenAiCompatibleConfig, OpenAiCompatibleProvider, SkillRegistry, TurnEvent,
 };
 use rustyline::error::ReadlineError;
 use std::future::Future;
@@ -605,6 +605,7 @@ impl Repl {
                 }
                 "redo" => self.redo_session().await?,
                 "tree" => self.show_tree(),
+                "share" => self.share_session(parts.next())?,
                 "status" => self.show_status(),
                 "permissions" => self.show_permissions(),
                 "audit" => self.show_audit(),
@@ -841,6 +842,31 @@ impl Repl {
         }
     }
 
+    fn share_session(&self, format: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(session) = &self.session else {
+            println!("暂无会话");
+            return Ok(());
+        };
+        let format = format.unwrap_or("md");
+        let shares = self.data_root.join("shares");
+        std::fs::create_dir_all(&shares)?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let path = match format {
+            "html" => shares.join(format!("{}-{stamp}.html", session.id)),
+            _ => shares.join(format!("{}-{stamp}.md", session.id)),
+        };
+        let content = match format {
+            "html" => export_html(session),
+            _ => export_markdown(session),
+        };
+        std::fs::write(&path, content)?;
+        println!("{} 会话已导出：{}", "已分享".green(), display_path(&path));
+        Ok(())
+    }
+
     fn list_sessions(&self) {
         let ids = self.store.list();
         if ids.is_empty() {
@@ -1070,6 +1096,7 @@ fn print_help() {
     println!("  /rewind <条数>      回退会话历史（文件改动一并撤销）");
     println!("  /redo               恢复最近一次 rewind");
     println!("  /tree               查看会话树");
+    println!("  /share [html]       导出会话分享（Markdown/HTML）");
     println!("  /model [名称]       查看/切换模型");
     println!("  /plan | /build      切换只读规划模式 / 执行模式");
     println!("  /diff               查看本次会话文件改动");

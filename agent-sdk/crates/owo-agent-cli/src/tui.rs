@@ -9,7 +9,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::{
-    Agent, JsonSessionStore, McpClient, McpServerConfig, SkillRegistry, TurnEvent,
+    export_html, export_markdown, Agent, JsonSessionStore, McpClient, McpServerConfig,
+    SkillRegistry, TurnEvent,
 };
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -659,6 +660,7 @@ impl TuiApp {
             }
             "redo" => self.redo_session()?,
             "tree" => self.show_tree(),
+            "share" => self.share_session(parts.next())?,
             "plan" => {
                 if !self.read_only {
                     self.toggle_mode()?;
@@ -798,6 +800,31 @@ impl TuiApp {
                 self.push_line(line, default());
             }
         }
+    }
+
+    fn share_session(&mut self, format: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(session) = &self.session else {
+            self.push_system("暂无会话".to_string(), dim());
+            return Ok(());
+        };
+        let format = format.unwrap_or("md");
+        let shares = self.data_root.join("shares");
+        std::fs::create_dir_all(&shares)?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let path = match format {
+            "html" => shares.join(format!("{}-{stamp}.html", session.id)),
+            _ => shares.join(format!("{}-{stamp}.md", session.id)),
+        };
+        let content = match format {
+            "html" => export_html(session),
+            _ => export_markdown(session),
+        };
+        std::fs::write(&path, content)?;
+        self.push_system(format!("已导出会话分享：{}", display_path(&path)), green());
+        Ok(())
     }
 
     fn handle_mcp(
@@ -960,6 +987,7 @@ impl TuiApp {
             "直接输入文字 发起任务",
             "/new /sessions /resume <id>  会话管理",
             "/fork [序号] /rewind <条数> /redo /tree  会话分支/回退/恢复/树",
+            "/share [html]  导出会话分享",
             "/model [名称]  查看/切换模型",
             "/plan /build  切换只读/执行模式（或 Tab）",
             "/diff /undo  查看改动 / 回滚",

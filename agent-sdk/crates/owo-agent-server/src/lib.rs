@@ -3,6 +3,7 @@
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
@@ -56,6 +57,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/rewind", post(rewind_session))
         .route("/session/{id}/redo", post(redo_session))
         .route("/session/{id}/children", get(children))
+        .route("/session/{id}/export/{format}", get(export_session))
         .with_state(state)
 }
 
@@ -66,6 +68,20 @@ fn to_session_info(session: &Session) -> SessionInfo {
         model: session.model.clone(),
         created_at: session.created_at.clone(),
     }
+}
+
+fn load_session(state: &AppState, id: &str) -> Result<Session, (StatusCode, String)> {
+    if let Ok(sessions) = state.sessions.lock() {
+        if let Some(session) = sessions.get(id) {
+            return Ok(session.clone());
+        }
+    }
+    state.store.load(id).map_err(|error| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("会话不存在：{id}（{error}）"),
+        )
+    })
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -111,13 +127,7 @@ async fn turn(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<TurnRequest>,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, String)> {
-    let session = {
-        let sessions = state.sessions.lock().map_err(poison)?;
-        sessions
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("会话不存在：{id}")))?
-    };
+    let session = load_session(&state, &id)?;
 
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
     let approver = ChannelApprover {
@@ -215,10 +225,7 @@ async fn diff(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Vec<FileDiff>>, (StatusCode, String)> {
-    let sessions = state.sessions.lock().map_err(poison)?;
-    let session = sessions
-        .get(&id)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("会话不存在：{id}")))?;
+    let session = load_session(&state, &id)?;
     Ok(Json(session.diff()))
 }
 
@@ -226,13 +233,7 @@ async fn revert(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let mut session = {
-        let sessions = state.sessions.lock().map_err(poison)?;
-        sessions
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("会话不存在：{id}")))?
-    };
+    let mut session = load_session(&state, &id)?;
     let restored = session
         .revert()
         .await
@@ -254,13 +255,7 @@ async fn fork_session(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<ForkRequest>,
 ) -> Result<Json<SessionInfo>, (StatusCode, String)> {
-    let session = {
-        let sessions = state.sessions.lock().map_err(poison)?;
-        sessions
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("会话不存在：{id}")))?
-    };
+    let session = load_session(&state, &id)?;
     let child = session.fork(request.message_index);
     state
         .store
@@ -279,13 +274,7 @@ async fn rewind_session(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<RewindRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let mut session = {
-        let sessions = state.sessions.lock().map_err(poison)?;
-        sessions
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("会话不存在：{id}")))?
-    };
+    let mut session = load_session(&state, &id)?;
     let removed = session.rewind(request.keep);
     state
         .store
@@ -303,13 +292,7 @@ async fn redo_session(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let mut session = {
-        let sessions = state.sessions.lock().map_err(poison)?;
-        sessions
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("会话不存在：{id}")))?
-    };
+    let mut session = load_session(&state, &id)?;
     let restored = session.redo().map(|tail| tail.len()).unwrap_or(0);
     state
         .store
@@ -336,6 +319,30 @@ async fn children(
         }
     }
     Ok(Json(result))
+}
+
+async fn export_session(
+    State(state): State<Arc<AppState>>,
+    AxumPath((id, format)): AxumPath<(String, String)>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let session = load_session(&state, &id)?;
+    let (body, content_type) = match format.as_str() {
+        "md" | "markdown" => (
+            owo_agent_core::export_markdown(&session),
+            "text/markdown; charset=utf-8",
+        ),
+        "html" => (
+            owo_agent_core::export_html(&session),
+            "text/html; charset=utf-8",
+        ),
+        _ => return Err((StatusCode::BAD_REQUEST, "格式仅支持 md / html".to_string())),
+    };
+    Ok((
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        body,
+    )
+        .into_response())
 }
 
 struct ChannelApprover {
