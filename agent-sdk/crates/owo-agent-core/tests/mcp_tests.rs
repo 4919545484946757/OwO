@@ -2,6 +2,7 @@ use owo_agent_core::audit::AuditLog;
 use owo_agent_core::mcp::{McpClient, McpServerConfig};
 use owo_agent_core::permissions::Policy;
 use owo_agent_core::session::Session;
+use owo_agent_core::skill::SkillRegistry;
 use owo_agent_core::tools::{ToolContext, ToolRegistry};
 use serde_json::json;
 use std::sync::Arc;
@@ -56,12 +57,14 @@ async fn mcp_tools_are_registered_and_callable() {
     let mut session = Session::new(&workspace, "mock".to_string(), None);
     let audit = Arc::new(std::sync::Mutex::new(AuditLog::default()));
     let policy = Policy::new(&workspace);
+    let skills = SkillRegistry::default();
     let mut context = ToolContext {
         workspace: &workspace,
         policy: &policy,
         session: &mut session,
         audit: &audit,
         subagent: None,
+        skills: &skills,
     };
     let result = registry
         .execute("test_echo", &mut context, json!({ "text": "ok" }))

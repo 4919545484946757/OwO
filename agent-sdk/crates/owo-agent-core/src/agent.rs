@@ -4,6 +4,7 @@ use crate::error::AgentError;
 use crate::gateway::{ChatMessage, ModelOutput, ModelProvider};
 use crate::permissions::{Approver, Decision, PermissionRequest, Policy};
 use crate::session::Session;
+use crate::skill::SkillRegistry;
 use crate::subagent::SubagentRunner;
 use crate::tools::{ToolContext, ToolRegistry};
 use chrono::Utc;
@@ -63,6 +64,7 @@ pub struct Agent {
     policy: Policy,
     audit: Arc<Mutex<AuditLog>>,
     config: AgentConfig,
+    skills: SkillRegistry,
 }
 
 impl Agent {
@@ -78,7 +80,16 @@ impl Agent {
             policy,
             audit: Arc::new(Mutex::new(AuditLog::default())),
             config,
+            skills: SkillRegistry::default(),
         }
+    }
+
+    pub fn set_skills(&mut self, skills: SkillRegistry) {
+        self.skills = skills;
+    }
+
+    pub fn skills(&self) -> &SkillRegistry {
+        &self.skills
     }
 
     pub fn audit_log(&self) -> Arc<Mutex<AuditLog>> {
@@ -103,10 +114,16 @@ impl Agent {
         on_event: &mut (dyn FnMut(&TurnEvent) + Send),
     ) -> Result<TurnOutcome, AgentError> {
         let rules = load_project_rules(&session.workspace);
-        let mut messages = vec![ChatMessage::system(build_system_prompt(
-            session.system_prompt.as_deref(),
-            &rules,
-        ))];
+        let mut system = build_system_prompt(session.system_prompt.as_deref(), &rules);
+        if !self.skills.list().is_empty() {
+            let mut catalog = vec!["可用技能（通过 use_skill 工具按名调用）：".to_string()];
+            for skill in self.skills.list() {
+                catalog.push(format!("- {}：{}", skill.name, skill.description));
+            }
+            system.push_str("\n\n");
+            system.push_str(&catalog.join("\n"));
+        }
+        let mut messages = vec![ChatMessage::system(system)];
         messages.extend(session.messages.iter().cloned());
         messages.push(ChatMessage::user(prompt.to_string()));
         let tools = self.registry.specs();
@@ -199,6 +216,7 @@ impl Agent {
                                 session,
                                 audit: &self.audit,
                                 subagent: Some(subagent),
+                                skills: &self.skills,
                             };
                             let outcome = self
                                 .registry

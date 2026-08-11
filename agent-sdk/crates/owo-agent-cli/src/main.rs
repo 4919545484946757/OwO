@@ -6,7 +6,7 @@ use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
     Agent, AgentConfig, JsonSessionStore, McpClient, McpServerConfig, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider, TurnEvent,
+    OpenAiCompatibleProvider, SkillRegistry, TurnEvent,
 };
 use rustyline::error::ReadlineError;
 use std::future::Future;
@@ -152,7 +152,9 @@ fn build_agent(
     model: &str,
     read_only: bool,
 ) -> Result<Agent, Box<dyn std::error::Error>> {
-    build_agent_with_mcp(workspace, model, read_only, &[])
+    let root = ensure_data_root(None, workspace);
+    let skills = SkillRegistry::discover(workspace, &root);
+    build_agent_with_mcp(workspace, model, read_only, &[], &skills)
 }
 
 fn build_agent_with_mcp(
@@ -160,6 +162,7 @@ fn build_agent_with_mcp(
     model: &str,
     read_only: bool,
     mcp_clients: &[(String, Arc<tokio::sync::Mutex<McpClient>>)],
+    skills: &SkillRegistry,
 ) -> Result<Agent, Box<dyn std::error::Error>> {
     let mut config = OpenAiCompatibleConfig::from_env()?;
     config.model = model.to_string();
@@ -177,12 +180,9 @@ fn build_agent_with_mcp(
             .tools();
         registry.register_mcp_tools(server_name, Arc::clone(client), tools);
     }
-    Ok(Agent::new(
-        provider,
-        registry,
-        policy,
-        AgentConfig::default(),
-    ))
+    let mut agent = Agent::new(provider, registry, policy, AgentConfig::default());
+    agent.set_skills(skills.clone());
+    Ok(agent)
 }
 
 async fn connect_mcp_clients(
@@ -407,6 +407,7 @@ struct Repl {
     stdin: SharedStdin,
     mcp_configs: Vec<McpServerConfig>,
     mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
+    skills: SkillRegistry,
 }
 
 impl Repl {
@@ -418,11 +419,13 @@ impl Repl {
         let store = JsonSessionStore::new(root.join("sessions"));
         let mcp_configs = load_mcp_configs(&root);
         let mcp_clients = connect_mcp_clients(&mcp_configs).await;
+        let skills = SkillRegistry::discover(&workspace, &root);
         let agent = Arc::new(build_agent_with_mcp(
             &workspace,
             &model,
             read_only,
             &mcp_clients,
+            &skills,
         )?);
         let mut repl = Repl {
             workspace,
@@ -437,6 +440,7 @@ impl Repl {
             stdin: SharedStdin::new(),
             mcp_configs,
             mcp_clients,
+            skills,
         };
 
         println!(
@@ -579,6 +583,7 @@ impl Repl {
                 "diff" => self.show_diff(),
                 "undo" | "revert" => self.undo().await?,
                 "mcp" => self.handle_mcp(command).await?,
+                "skills" => self.list_skills(),
                 "status" => self.show_status(),
                 "permissions" => self.show_permissions(),
                 "audit" => self.show_audit(),
@@ -624,8 +629,23 @@ impl Repl {
             &self.model,
             self.read_only,
             &self.mcp_clients,
+            &self.skills,
         )?);
         Ok(())
+    }
+
+    fn list_skills(&self) {
+        let skills = self.agent.skills().list();
+        if skills.is_empty() {
+            println!(
+                "暂无技能（放置到 {}/skills 或 .agents/skills/，每技能一个含 SKILL.md 的目录）",
+                display_path(&self.data_root)
+            );
+            return;
+        }
+        for skill in skills {
+            println!("{}：{}", skill.name.cyan(), skill.description);
+        }
     }
 
     async fn handle_mcp(&mut self, command: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -948,6 +968,8 @@ fn print_help() {
     println!("  /status             查看工作区/模型/会话状态");
     println!("  /permissions        查看权限策略");
     println!("  /audit              查看最近审计记录");
+    println!("  /mcp add|list|remove  管理 MCP 服务器");
+    println!("  /skills             列出已加载技能");
     println!("  /init               生成 AGENTS.md");
     println!("  /abort              中止当前回合");
     println!("  /clear              清屏");

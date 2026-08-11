@@ -2,6 +2,7 @@ use crate::audit::AuditLog;
 use crate::mcp::{McpClient, McpTool};
 use crate::permissions::Policy;
 use crate::session::Session;
+use crate::skill::SkillRegistry;
 use crate::subagent::SubagentRunner;
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -23,6 +24,7 @@ pub struct ToolContext<'a> {
     pub session: &'a mut Session,
     pub audit: &'a Arc<Mutex<AuditLog>>,
     pub subagent: Option<SubagentRunner<'a>>,
+    pub skills: &'a SkillRegistry,
 }
 
 #[async_trait]
@@ -45,6 +47,7 @@ impl ToolRegistry {
         registry.register(RunCommandTool);
         registry.register(ExploreTool);
         registry.register(SubagentTool);
+        registry.register(UseSkillTool);
         registry
     }
 
@@ -435,5 +438,49 @@ impl Tool for SubagentTool {
         let runner = ctx.subagent.as_ref().ok_or("子代理运行时不可用")?;
         let text = runner.run(ctx.workspace, task, false).await?;
         Ok(json!({ "mode": "general", "text": text }))
+    }
+}
+
+struct UseSkillTool;
+
+#[async_trait]
+impl Tool for UseSkillTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "use_skill".into(),
+            description: "读取已加载技能（SKILL.md）的完整指令并按其流程执行；名称可通过 /skills 或技能清单查看".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "task": { "type": "string" }
+                },
+                "required": ["name"]
+            }),
+        }
+    }
+
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let name = args
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("参数缺少字符串字段：name")?;
+        let Some(skill) = ctx.skills.get(name) else {
+            let available = ctx
+                .skills
+                .list()
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!("未找到技能 {name}；可用技能：{available}"));
+        };
+        let task = args.get("task").and_then(Value::as_str).unwrap_or_default();
+        Ok(json!({
+            "skill": skill.name,
+            "description": skill.description,
+            "task": task,
+            "instructions": skill.instructions,
+        }))
     }
 }

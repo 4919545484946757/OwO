@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
-use owo_agent_core::{Agent, JsonSessionStore, McpClient, McpServerConfig, TurnEvent};
+use owo_agent_core::{
+    Agent, JsonSessionStore, McpClient, McpServerConfig, SkillRegistry, TurnEvent,
+};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -48,11 +50,13 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = JsonSessionStore::new(root.join("sessions"));
     let mcp_configs = load_mcp_configs(&root);
     let mcp_clients = runtime.block_on(connect_mcp_clients(&mcp_configs));
+    let skills = SkillRegistry::discover(&workspace, &root);
     let agent = Arc::new(build_agent_with_mcp(
         &workspace,
         &model,
         read_only,
         &mcp_clients,
+        &skills,
     )?);
     let mut app = TuiApp::new(
         workspace,
@@ -64,6 +68,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         agent,
         mcp_configs,
         mcp_clients,
+        skills,
     );
     let terminal = ratatui::init();
     let result = app.run(&runtime, terminal);
@@ -126,6 +131,7 @@ struct TuiApp {
     status: String,
     mcp_configs: Vec<McpServerConfig>,
     mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
+    skills: SkillRegistry,
 }
 
 impl TuiApp {
@@ -140,6 +146,7 @@ impl TuiApp {
         agent: Arc<Agent>,
         mcp_configs: Vec<McpServerConfig>,
         mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
+        skills: SkillRegistry,
     ) -> Self {
         Self {
             workspace,
@@ -166,6 +173,7 @@ impl TuiApp {
             status: "就绪".to_string(),
             mcp_configs,
             mcp_clients,
+            skills,
         }
     }
 
@@ -561,6 +569,7 @@ impl TuiApp {
             &self.model,
             self.read_only,
             &self.mcp_clients,
+            &self.skills,
         )?);
         Ok(())
     }
@@ -638,6 +647,7 @@ impl TuiApp {
                 }
             }
             "mcp" => self.handle_mcp(command, runtime)?,
+            "skills" => self.list_skills(),
             "plan" => {
                 if !self.read_only {
                     self.toggle_mode()?;
@@ -665,6 +675,29 @@ impl TuiApp {
             other => self.push_system(format!("未知命令：/{other}（/help 查看）"), red()),
         }
         Ok(())
+    }
+
+    fn list_skills(&mut self) {
+        let skills: Vec<(String, String)> = self
+            .agent
+            .skills()
+            .list()
+            .iter()
+            .map(|skill| (skill.name.clone(), skill.description.clone()))
+            .collect();
+        if skills.is_empty() {
+            self.push_system(
+                format!(
+                    "暂无技能（放置到 {}/skills 或 .agents/skills/，每技能一个含 SKILL.md 的目录）",
+                    display_path(&self.data_root)
+                ),
+                dim(),
+            );
+            return;
+        }
+        for (name, description) in skills {
+            self.push_line(format!("{name}：{description}"), default());
+        }
     }
 
     fn handle_mcp(
@@ -830,6 +863,7 @@ impl TuiApp {
             "/plan /build  切换只读/执行模式（或 Tab）",
             "/diff /undo  查看改动 / 回滚",
             "/mcp add/list/remove  MCP 服务器",
+            "/skills  列出已加载技能",
             "/status /init /clear",
             "/exit 退出（或 Ctrl+C）",
         ] {
@@ -892,6 +926,7 @@ mod tests {
             agent,
             Vec::new(),
             Vec::new(),
+            SkillRegistry::default(),
         )
     }
 

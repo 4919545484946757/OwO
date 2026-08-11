@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use owo_agent_core::permissions::{AutoApprover, Policy};
+use owo_agent_core::skill::SkillRegistry;
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
     Agent, AgentConfig, ChatMessage, ModelOutput, ModelProvider, Session, ToolCall, ToolSpec,
@@ -15,6 +16,30 @@ struct ScriptedProvider {
 
 struct StreamingProvider {
     output: String,
+}
+
+struct RecordingProvider {
+    script: Mutex<VecDeque<ModelOutput>>,
+    recorded: Arc<Mutex<Vec<ChatMessage>>>,
+}
+
+#[async_trait]
+impl ModelProvider for RecordingProvider {
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        self.recorded
+            .lock()
+            .unwrap()
+            .extend(messages.iter().cloned());
+        self.script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| "脚本输出耗尽".to_string())
+    }
 }
 
 #[async_trait]
@@ -316,4 +341,65 @@ async fn read_only_registry_has_no_write_or_delegate_tools() {
             "write_file" | "run_command" | "explore" | "subagent"
         )
     }));
+}
+
+#[tokio::test]
+async fn skills_are_discovered_injected_and_usable() {
+    let workspace = temp_workspace("skills");
+    let skill_dir = workspace.join(".agents").join("skills").join("demo");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: demo\ndescription: 测试技能\n---\n执行步骤 A。",
+    )
+    .unwrap();
+    let data_root =
+        std::env::temp_dir().join(format!("owo-skill-loop-data-{}", uuid::Uuid::new_v4()));
+    let registry = SkillRegistry::discover(&workspace, &data_root);
+    assert!(registry.get("demo").is_some());
+
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        script: Mutex::new(
+            vec![
+                call("c1", "use_skill", json!({ "name": "demo" })),
+                ModelOutput::Text("done".to_string()),
+            ]
+            .into(),
+        ),
+        recorded: Arc::clone(&recorded),
+    };
+    let mut agent = build_agent(&workspace, provider);
+    agent.set_skills(registry);
+    let mut session = Session::new(&workspace, "mock".to_string(), None);
+    let abort = AtomicBool::new(false);
+    let approver = AutoApprover { allow: true };
+
+    let outcome = agent
+        .run_turn(&mut session, "使用技能", &approver, &abort, &mut |_| {})
+        .await
+        .unwrap();
+    assert_eq!(outcome.final_text.as_deref(), Some("done"));
+
+    let messages = recorded.lock().unwrap();
+    let system = messages
+        .iter()
+        .find(|message| message.role == "system")
+        .expect("存在系统消息");
+    let system = system.content.as_deref().unwrap();
+    assert!(system.contains("可用技能"));
+    assert!(system.contains("demo"));
+    drop(messages);
+
+    let tool_result = session
+        .messages
+        .iter()
+        .find(|message| message.role == "tool")
+        .expect("存在工具结果");
+    assert!(tool_result
+        .content
+        .as_deref()
+        .unwrap()
+        .contains("执行步骤 A"));
+    let _ = std::fs::remove_dir_all(&data_root);
 }

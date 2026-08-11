@@ -9,6 +9,7 @@ pub mod gateway;
 pub mod mcp;
 pub mod permissions;
 pub mod session;
+pub mod skill;
 pub mod subagent;
 pub mod tools;
 
@@ -22,4 +23,5 @@ pub use gateway::{
 pub use mcp::{McpClient, McpServerConfig, McpTool};
 pub use permissions::{Approver, Decision, Level, PermissionRequest, Policy};
 pub use session::{JsonSessionStore, Session, SessionStore};
+pub use skill::{Skill, SkillRegistry};
 pub use tools::{Tool, ToolContext, ToolRegistry, ToolSpec};
