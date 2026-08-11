@@ -77,4 +77,7 @@ pub enum SseEvent {
     TokenDelta {
         delta: String,
     },
+    Compaction {
+        summary: String,
+    },
 }

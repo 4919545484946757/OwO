@@ -13,7 +13,7 @@ pub mod skill;
 pub mod subagent;
 pub mod tools;
 
-pub use agent::{Agent, AgentConfig, TurnEvent, TurnOutcome};
+pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
 pub use audit::{AuditEntry, AuditLog};
 pub use error::AgentError;
 pub use gateway::{

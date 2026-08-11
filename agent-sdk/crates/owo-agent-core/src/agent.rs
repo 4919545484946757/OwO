@@ -16,6 +16,9 @@ pub struct AgentConfig {
     pub max_turns: usize,
     pub context_limit: usize,
     pub subagent_depth: usize,
+    pub token_budget: usize,
+    pub keep_recent: usize,
+    pub compaction_enabled: bool,
 }
 
 impl Default for AgentConfig {
@@ -24,6 +27,9 @@ impl Default for AgentConfig {
             max_turns: 25,
             context_limit: 200,
             subagent_depth: 0,
+            token_budget: 60_000,
+            keep_recent: 20,
+            compaction_enabled: true,
         }
     }
 }
@@ -33,6 +39,9 @@ pub enum TurnEvent {
     ModelCall,
     TokenDelta {
         delta: String,
+    },
+    Compaction {
+        summary: String,
     },
     PermissionRequest(PermissionRequest),
     ToolStart {
@@ -136,8 +145,17 @@ impl Agent {
             if abort.load(Ordering::Relaxed) {
                 return Err(AgentError::Aborted);
             }
+            if let Some(summary) = self.maybe_compact(&mut messages, &session.id).await? {
+                emit(
+                    &mut events,
+                    on_event,
+                    TurnEvent::Compaction {
+                        summary: summary.clone(),
+                    },
+                );
+            }
             if messages.len() > self.config.context_limit {
-                compact(&mut messages, self.config.context_limit);
+                compact_truncate(&mut messages, self.config.context_limit);
             }
 
             emit(&mut events, on_event, TurnEvent::ModelCall);
@@ -266,6 +284,79 @@ impl Agent {
             events,
         })
     }
+
+    /// 当估算 token 超过预算时，用模型把旧历史压缩为摘要（保留最近消息）。
+    async fn maybe_compact(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        session_id: &str,
+    ) -> Result<Option<String>, AgentError> {
+        if !self.config.compaction_enabled || estimate_tokens(messages) <= self.config.token_budget
+        {
+            return Ok(None);
+        }
+        let already_compacted = messages.iter().any(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.starts_with("历史摘要"))
+        });
+        if already_compacted {
+            return Ok(None);
+        }
+        let head_end = messages.len().saturating_sub(self.config.keep_recent);
+        if head_end < 4 {
+            return Ok(None);
+        }
+        let head = messages[1..head_end].to_vec();
+        let prompt = format!(
+            "请把以下 Agent 会话历史压缩成一份简洁的进展摘要（保留：已完成的动作、\
+             未完成事项、关键决策、当前上下文；不要编造新信息）：\n\n{}",
+            serde_json::to_string(&head).unwrap_or_else(|_| "[]".to_string())
+        );
+        let summary = match self
+            .provider
+            .complete(&[ChatMessage::user(prompt)], &[])
+            .await
+        {
+            Ok(crate::gateway::ModelOutput::Text(text)) => text,
+            Ok(_) | Err(_) => return Ok(None),
+        };
+        let mut compacted = vec![messages[0].clone()];
+        compacted.push(ChatMessage::system(format!(
+            "历史摘要（已压缩）：\n{summary}"
+        )));
+        compacted.extend(messages[head_end..].to_vec());
+        *messages = compacted;
+        self.audit
+            .lock()
+            .map_err(|_| AgentError::Session("审计锁中毒".into()))?
+            .record(
+                session_id,
+                "compaction",
+                None,
+                None,
+                format!("压缩 {} 条历史消息", head.len()),
+            );
+        Ok(Some(summary))
+    }
+}
+
+/// 粗略 token 估算：字符数 / 2 + 每条消息固定开销。
+pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| {
+            let chars = message
+                .content
+                .as_deref()
+                .map(str::chars)
+                .map(|chars| chars.count())
+                .unwrap_or(0);
+            chars / 2 + 4
+        })
+        .sum()
 }
 
 fn emit(
@@ -277,7 +368,7 @@ fn emit(
     events.push(event);
 }
 
-fn compact(messages: &mut Vec<ChatMessage>, limit: usize) {
+fn compact_truncate(messages: &mut Vec<ChatMessage>, limit: usize) {
     if messages.len() <= limit {
         return;
     }

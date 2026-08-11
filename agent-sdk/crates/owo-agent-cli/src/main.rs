@@ -180,7 +180,18 @@ fn build_agent_with_mcp(
             .tools();
         registry.register_mcp_tools(server_name, Arc::clone(client), tools);
     }
-    let mut agent = Agent::new(provider, registry, policy, AgentConfig::default());
+    let mut config = AgentConfig::default();
+    if let Ok(value) = std::env::var("OWO_TOKEN_BUDGET") {
+        if let Ok(budget) = value.parse() {
+            config.token_budget = budget;
+        }
+    }
+    if let Ok(value) = std::env::var("OWO_KEEP_RECENT") {
+        if let Ok(keep) = value.parse() {
+            config.keep_recent = keep;
+        }
+    }
+    let mut agent = Agent::new(provider, registry, policy, config);
     agent.set_skills(skills.clone());
     Ok(agent)
 }
@@ -359,6 +370,9 @@ fn print_event(event: &TurnEvent) {
             }
         }
         TurnEvent::TokenDelta { .. } => {}
+        TurnEvent::Compaction { summary } => {
+            println!("  {}（上下文已压缩：{}）", "✦".yellow(), summary);
+        }
         TurnEvent::Final { .. } => {}
     }
 }

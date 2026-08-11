@@ -469,6 +469,10 @@ impl TuiApp {
             TurnEvent::TokenDelta { delta } => {
                 self.streaming.push_str(&delta);
             }
+            TurnEvent::Compaction { summary } => {
+                self.flush_streaming();
+                self.push_system(format!("✦ 上下文已压缩：{summary}"), yellow());
+            }
             TurnEvent::PermissionRequest(request) => {
                 self.flush_streaming();
                 self.pending_order.push(request.request_id.clone());

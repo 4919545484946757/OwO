@@ -3,7 +3,8 @@ use owo_agent_core::permissions::{AutoApprover, Policy};
 use owo_agent_core::skill::SkillRegistry;
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
-    Agent, AgentConfig, ChatMessage, ModelOutput, ModelProvider, Session, ToolCall, ToolSpec,
+    estimate_tokens, Agent, AgentConfig, ChatMessage, ModelOutput, ModelProvider, Session,
+    ToolCall, ToolSpec, TurnEvent,
 };
 use serde_json::json;
 use std::collections::VecDeque;
@@ -402,4 +403,62 @@ async fn skills_are_discovered_injected_and_usable() {
         .unwrap()
         .contains("执行步骤 A"));
     let _ = std::fs::remove_dir_all(&data_root);
+}
+
+#[test]
+fn estimate_tokens_counts_content() {
+    let messages = vec![ChatMessage::user("你好".to_string())];
+    assert!(estimate_tokens(&messages) >= 1);
+}
+
+#[tokio::test]
+async fn context_compaction_summarizes_old_history() {
+    let workspace = temp_workspace("compaction");
+    let mut session = Session::new(&workspace, "mock".to_string(), None);
+    for index in 0..10 {
+        session.push(ChatMessage::user(format!(
+            "历史消息 {index} {}",
+            "很长的内容".repeat(20)
+        )));
+    }
+    let provider = ScriptedProvider::new(vec![
+        ModelOutput::Text("摘要：已完成的动作".to_string()),
+        ModelOutput::Text("done".to_string()),
+    ]);
+    let policy = Policy::new(&workspace);
+    let registry = ToolRegistry::new();
+    let config = AgentConfig {
+        token_budget: 1,
+        keep_recent: 2,
+        compaction_enabled: true,
+        ..Default::default()
+    };
+    let agent = Agent::new(Arc::new(provider), registry, policy, config);
+    let abort = AtomicBool::new(false);
+    let approver = AutoApprover { allow: true };
+
+    let outcome = agent
+        .run_turn(&mut session, "继续", &approver, &abort, &mut |_| {})
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.final_text.as_deref(), Some("done"));
+    assert!(outcome
+        .events
+        .iter()
+        .any(|event| matches!(event, TurnEvent::Compaction { .. })));
+    assert!(session.messages.iter().any(|message| {
+        message.role == "system"
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.starts_with("历史摘要"))
+    }));
+    let audit = agent.audit_log();
+    assert!(audit
+        .lock()
+        .unwrap()
+        .entries
+        .iter()
+        .any(|entry| entry.event == "compaction"));
 }
