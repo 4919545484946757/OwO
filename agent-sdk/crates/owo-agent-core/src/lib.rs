@@ -9,6 +9,7 @@ pub mod eval;
 pub mod gateway;
 pub mod mcp;
 pub mod permissions;
+pub mod plugin;
 pub mod session;
 pub mod settings;
 pub mod share;
@@ -28,6 +29,7 @@ pub use gateway::{
 };
 pub use mcp::{McpClient, McpServerConfig, McpTool};
 pub use permissions::{Approver, Decision, Level, PermissionRequest, Policy};
+pub use plugin::{discover_plugins, PluginManifest};
 pub use session::{JsonSessionStore, Session, SessionStore};
 pub use settings::Settings;
 pub use share::{export_html, export_markdown};

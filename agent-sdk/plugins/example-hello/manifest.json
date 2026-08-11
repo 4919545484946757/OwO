@@ -1,0 +1,13 @@
+{
+  "id": "owo.plugin.example-hello",
+  "name": "Example Hello",
+  "version": "1.0.0",
+  "description": "示例插件：通过 MCP 测试服务器提供 echo/add 工具（需先构建 owo-mcp-test-server）",
+  "permissions": ["agent:tools"],
+  "mcp": {
+    "name": "example-hello",
+    "transport": "stdio",
+    "command": "../../target/debug/owo-mcp-test-server.exe",
+    "args": []
+  }
+}

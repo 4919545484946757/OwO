@@ -5,9 +5,10 @@ use owo_agent_core::permissions::{Approver, AutoApprover, Decision, PermissionRe
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
-    builtin_suite, eval_suite_path, export_html, export_markdown, list_traces, load_trace,
-    run_suite, save_trace, Agent, AgentConfig, McpClient, McpServerConfig, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider, Settings, SkillRegistry, SqliteSessionStore, TraceRecord, TurnEvent,
+    builtin_suite, discover_plugins, eval_suite_path, export_html, export_markdown, list_traces,
+    load_trace, run_suite, save_trace, Agent, AgentConfig, McpClient, McpServerConfig,
+    OpenAiCompatibleConfig, OpenAiCompatibleProvider, PluginManifest, Settings, SkillRegistry,
+    SqliteSessionStore, TraceRecord, TurnEvent,
 };
 use rustyline::error::ReadlineError;
 use std::future::Future;
@@ -372,8 +373,20 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
     let settings = Settings::load(&workspace);
     let model = resolve_model(None, settings.model.as_deref());
-    let agent = build_agent(&workspace, &model, false)?;
     let root = ensure_data_root(None, &workspace);
+    let plugins = discover_plugins(&workspace, &root);
+    let mut mcp_configs = load_mcp_configs(&root);
+    merge_plugin_mcp(&plugins, &mut mcp_configs);
+    let mcp_clients = connect_mcp_clients(&mcp_configs).await;
+    let skills = SkillRegistry::discover(&workspace, &root);
+    let agent = build_agent_with_mcp(
+        &workspace,
+        &model,
+        false,
+        &mcp_clients,
+        &skills,
+        &settings.deny_commands,
+    )?;
     let store = SqliteSessionStore::open(&root.join("index.db"))?;
     let state = Arc::new(owo_agent_server::AppState::new(
         agent,
@@ -386,6 +399,30 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("owo-agent server listening on http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn merge_plugin_mcp(
+    plugins: &[(std::path::PathBuf, PluginManifest)],
+    configs: &mut Vec<McpServerConfig>,
+) {
+    for (manifest_path, manifest) in plugins {
+        if let Some(mcp) = &manifest.mcp {
+            let mut config = mcp.clone();
+            config.name = manifest.id.clone();
+            let command_path = std::path::Path::new(&config.command);
+            if command_path.is_relative() {
+                if let Some(base) = manifest_path.parent() {
+                    let resolved = base.join(command_path);
+                    if resolved.exists() {
+                        config.command = resolved.to_string_lossy().into_owned();
+                    }
+                }
+            }
+            if !configs.iter().any(|existing| existing.name == config.name) {
+                configs.push(config);
+            }
+        }
+    }
 }
 
 fn run_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -481,6 +518,7 @@ struct Repl {
     mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
     skills: SkillRegistry,
     settings: Settings,
+    plugins: Vec<PluginManifest>,
 }
 
 impl Repl {
@@ -497,6 +535,12 @@ impl Repl {
                 mcp_configs.push(server);
             }
         }
+        let discovered_plugins = discover_plugins(&workspace, &root);
+        merge_plugin_mcp(&discovered_plugins, &mut mcp_configs);
+        let plugins: Vec<PluginManifest> = discovered_plugins
+            .into_iter()
+            .map(|(_, manifest)| manifest)
+            .collect();
         let mcp_clients = connect_mcp_clients(&mcp_configs).await;
         let skills = SkillRegistry::discover(&workspace, &root);
         let agent = Arc::new(build_agent_with_mcp(
@@ -522,6 +566,7 @@ impl Repl {
             mcp_clients,
             skills,
             settings,
+            plugins,
         };
 
         println!(
@@ -678,6 +723,7 @@ impl Repl {
                 "traces" => self.list_traces(),
                 "trace" => self.show_trace(parts.next())?,
                 "settings" => self.show_settings(),
+                "plugins" => self.list_plugins(),
                 "status" => self.show_status(),
                 "permissions" => self.show_permissions(),
                 "audit" => self.show_audit(),
@@ -1038,6 +1084,33 @@ impl Repl {
         );
     }
 
+    fn list_plugins(&self) {
+        if self.plugins.is_empty() {
+            println!("未加载插件（放置到 <workspace>/.owo/plugins/ 或 <data>/plugins/，每插件一个含 manifest.json 的目录）");
+            return;
+        }
+        for manifest in &self.plugins {
+            let tool_count = self
+                .mcp_clients
+                .iter()
+                .find(|(name, _)| name == &manifest.id)
+                .and_then(|(_, client)| client.try_lock().ok())
+                .map(|guard| guard.tools().len())
+                .unwrap_or(0);
+            println!(
+                "{} v{}（{}）——{}",
+                manifest.name,
+                manifest.version,
+                manifest.id,
+                if manifest.description.is_empty() {
+                    tool_count.to_string() + " 个工具"
+                } else {
+                    format!("{}，{} 个工具", manifest.description, tool_count)
+                }
+            );
+        }
+    }
+
     fn list_sessions(&self) {
         let ids = self.store.list();
         if ids.is_empty() {
@@ -1277,6 +1350,7 @@ fn print_help() {
     println!("  /share [html]       导出会话分享（Markdown/HTML）");
     println!("  /traces | /trace <n>  列出/回放回合轨迹");
     println!("  /settings           查看工作区 settings.json 配置");
+    println!("  /plugins            列出已加载插件");
     println!("  /model [名称]       查看/切换模型");
     println!("  /plan | /build      切换只读规划模式 / 执行模式");
     println!("  /diff               查看本次会话文件改动");

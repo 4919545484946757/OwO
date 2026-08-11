@@ -9,9 +9,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::{
-    export_html, export_markdown, list_traces, load_trace, save_trace, Agent, McpClient,
-    McpServerConfig, Settings, SkillRegistry, SqliteSessionStore, TraceRecord, TurnEvent,
-    TurnOutcome,
+    discover_plugins, export_html, export_markdown, list_traces, load_trace, save_trace, Agent,
+    McpClient, McpServerConfig, PluginManifest, Settings, SkillRegistry, SqliteSessionStore,
+    TraceRecord, TurnEvent, TurnOutcome,
 };
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -57,6 +57,12 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
             mcp_configs.push(server);
         }
     }
+    let discovered_plugins = discover_plugins(&workspace, &root);
+    crate::merge_plugin_mcp(&discovered_plugins, &mut mcp_configs);
+    let plugins: Vec<PluginManifest> = discovered_plugins
+        .into_iter()
+        .map(|(_, manifest)| manifest)
+        .collect();
     let mcp_clients = runtime.block_on(connect_mcp_clients(&mcp_configs));
     let skills = SkillRegistry::discover(&workspace, &root);
     let agent = Arc::new(build_agent_with_mcp(
@@ -79,6 +85,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         mcp_clients,
         skills,
         settings,
+        plugins,
     );
     let terminal = ratatui::init();
     let result = app.run(&runtime, terminal);
@@ -145,6 +152,7 @@ struct TuiApp {
     mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
     skills: SkillRegistry,
     settings: Settings,
+    plugins: Vec<PluginManifest>,
     theme: Theme,
     keybinds: HashMap<String, KeyEvent>,
 }
@@ -163,6 +171,7 @@ impl TuiApp {
         mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
         skills: SkillRegistry,
         settings: Settings,
+        plugins: Vec<PluginManifest>,
     ) -> Self {
         let theme = theme(settings.theme.as_deref());
         let keybinds = build_keybinds(&settings.keybinds);
@@ -195,6 +204,7 @@ impl TuiApp {
             mcp_clients,
             skills,
             settings,
+            plugins,
             theme,
             keybinds,
         }
@@ -735,6 +745,7 @@ impl TuiApp {
             "traces" => self.list_traces(),
             "trace" => self.show_trace(parts.next())?,
             "settings" => self.show_settings(),
+            "plugins" => self.list_plugins(),
             "theme" => self.set_theme(parts.next()),
             "keybinds" => self.show_keybinds(),
             "plan" => {
@@ -988,6 +999,41 @@ impl TuiApp {
         }
     }
 
+    fn list_plugins(&mut self) {
+        if self.plugins.is_empty() {
+            self.push_system(
+                "未加载插件（放置到 <workspace>/.owo/plugins/ 或 <data>/plugins/）".to_string(),
+                dim(),
+            );
+            return;
+        }
+        let mut lines = Vec::new();
+        for manifest in &self.plugins {
+            let tool_count = self
+                .mcp_clients
+                .iter()
+                .find(|(name, _)| name == &manifest.id)
+                .and_then(|(_, client)| client.try_lock().ok())
+                .map(|guard| guard.tools().len())
+                .unwrap_or(0);
+            lines.push(format!(
+                "{} v{}（{}）——{}，{} 个工具",
+                manifest.name,
+                manifest.version,
+                manifest.id,
+                if manifest.description.is_empty() {
+                    "无描述".to_string()
+                } else {
+                    manifest.description.clone()
+                },
+                tool_count
+            ));
+        }
+        for line in lines {
+            self.push_line(line, default());
+        }
+    }
+
     fn set_theme(&mut self, name: Option<&str>) {
         let name = name.unwrap_or("dark");
         self.theme = theme(Some(name));
@@ -1193,6 +1239,7 @@ impl TuiApp {
             "/share [html]  导出会话分享",
             "/traces /trace <n>  回合轨迹",
             "/settings  查看 settings.json",
+            "/plugins  列出已加载插件",
             "/theme [dark|light] /keybinds  主题与键位",
             "/model [名称]  查看/切换模型",
             "/plan /build  切换只读/执行模式（或 Tab）",
@@ -1376,6 +1423,7 @@ mod tests {
             Vec::new(),
             SkillRegistry::default(),
             Settings::default(),
+            Vec::new(),
         )
     }
 

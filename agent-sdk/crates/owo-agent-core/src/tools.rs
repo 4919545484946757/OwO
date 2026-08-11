@@ -90,7 +90,11 @@ impl ToolRegistry {
         tools: Vec<McpTool>,
     ) {
         for tool in tools {
-            let full_name = format!("{server_name}_{}", tool.name);
+            let full_name = format!(
+                "{}_{}",
+                sanitize_tool_name(server_name),
+                sanitize_tool_name(&tool.name)
+            );
             let spec = ToolSpec {
                 name: full_name.clone(),
                 description: tool.description,
@@ -104,6 +108,34 @@ impl ToolRegistry {
                 client: Arc::clone(&client),
             }));
         }
+    }
+}
+
+/// 工具名只允许字母数字、下划线与连字符（模型 API 约束）。
+fn sanitize_tool_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitizes_tool_names_for_model_api() {
+        assert_eq!(
+            sanitize_tool_name("owo.plugin.example-hello"),
+            "owo_plugin_example-hello"
+        );
+        assert_eq!(sanitize_tool_name("echo"), "echo");
+        assert_eq!(sanitize_tool_name("a b/c"), "a_b_c");
     }
 }
 
