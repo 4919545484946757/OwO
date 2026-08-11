@@ -9,10 +9,13 @@ use owo_agent_core::{
     TurnEvent,
 };
 use rustyline::error::ReadlineError;
+use std::future::Future;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+mod tui;
 
 const DEFAULT_MODEL: &str = "gpt-5.1-codex";
 
@@ -50,6 +53,8 @@ enum Commands {
     Serve(ServeArgs),
     /// 进入交互式终端（默认命令）
     Repl(ReplArgs),
+    /// 进入全屏 TUI（OpenCode 风格）
+    Tui(tui::TuiArgs),
     /// 生成 AGENTS.md 项目规则文件
     Init(InitArgs),
 }
@@ -101,8 +106,7 @@ struct InitArgs {
     force: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -111,22 +115,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     match cli.command {
-        None => {
-            Repl::run(ReplArgs {
-                workspace: PathBuf::from("."),
-                model: None,
-                agent: "build".to_string(),
-                no_approval: false,
-                data_dir: None,
-            })
-            .await?
-        }
-        Some(Commands::Turn(args)) => run_turn(args).await?,
-        Some(Commands::Serve(args)) => run_serve(args).await?,
-        Some(Commands::Repl(args)) => Repl::run(args).await?,
+        None => run_async(Repl::run(ReplArgs {
+            workspace: PathBuf::from("."),
+            model: None,
+            agent: "build".to_string(),
+            no_approval: false,
+            data_dir: None,
+        }))?,
+        Some(Commands::Turn(args)) => run_async(run_turn(args))?,
+        Some(Commands::Serve(args)) => run_async(run_serve(args))?,
+        Some(Commands::Repl(args)) => run_async(Repl::run(args))?,
+        Some(Commands::Tui(args)) => tui::run(args)?,
         Some(Commands::Init(args)) => run_init(args)?,
     }
     Ok(())
+}
+
+fn run_async<F>(future: F) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: Future<Output = Result<(), Box<dyn std::error::Error>>>,
+{
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(future)
 }
 
 fn resolve_model(option: Option<String>) -> String {
@@ -165,6 +177,17 @@ fn data_root(override_dir: Option<PathBuf>) -> PathBuf {
                 .map(|dir| PathBuf::from(dir).join("OwO").join("Agent"))
                 .unwrap_or_else(|_| PathBuf::from("data/agent"))
         })
+}
+
+/// 优先使用默认数据目录；不可写时回退到工作区 `.owo-agent/`。
+fn ensure_data_root(override_dir: Option<PathBuf>, workspace: &std::path::Path) -> PathBuf {
+    let preferred = data_root(override_dir);
+    if std::fs::create_dir_all(&preferred).is_ok() {
+        return preferred;
+    }
+    let fallback = workspace.join(".owo-agent");
+    let _ = std::fs::create_dir_all(&fallback);
+    fallback
 }
 
 fn display_path(path: &std::path::Path) -> String {
@@ -227,7 +250,8 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
     let model = resolve_model(None);
     let agent = build_agent(&workspace, &model, false)?;
-    let store = JsonSessionStore::new(data_root(None).join("sessions"));
+    let root = ensure_data_root(None, &workspace);
+    let store = JsonSessionStore::new(root.join("sessions"));
     let state = Arc::new(owo_agent_server::AppState::new(agent, store));
     let app = owo_agent_server::build_router(state);
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
@@ -297,8 +321,7 @@ impl Repl {
         let workspace = args.workspace.canonicalize()?;
         let model = resolve_model(args.model);
         let read_only = args.agent == "plan";
-        let root = data_root(args.data_dir);
-        std::fs::create_dir_all(&root)?;
+        let root = ensure_data_root(args.data_dir, &workspace);
         let store = JsonSessionStore::new(root.join("sessions"));
         let agent = Arc::new(build_agent(&workspace, &model, read_only)?);
         let mut repl = Repl {

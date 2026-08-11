@@ -30,7 +30,15 @@ cargo test --workspace
 
 ## CLI（OpenCode 式交互终端）
 
-直接运行 `owo-agent repl`（或 `owo-agent`）进入交互式终端：
+**全屏 TUI**（OpenCode 风格，推荐）：
+
+```powershell
+cargo run -p owo-agent-cli -- tui --workspace .
+```
+
+TUI 特性：标题栏（工作区/模型/模式/运行状态）、滚动会话区、输入框、快捷键提示；Tab 切换 build/plan、内联审批（y/n）、Ctrl+C 中止/退出、PgUp/PgDn 滚动、Ctrl+L 清屏。
+
+**交互式 REPL**（文本终端/脚本）：
 
 ```powershell
 cargo run -p owo-agent-cli -- repl --workspace .

@@ -2,6 +2,7 @@
 /out/
 /artifacts/
 target/
+/.owo-agent/
 /.vs/
 /.vscode/
 CMakeUserPresets.json
