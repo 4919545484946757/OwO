@@ -276,7 +276,14 @@ void apply_model_order_with_candidate_tiers(
         if (left_tier != right_tier) return left_tier < right_tier;
         if (left_tier == 1 && original_consumed[left] != original_consumed[right])
             return original_consumed[left] > original_consumed[right];
-        return model_rank(original_candidates[left]) < model_rank(original_candidates[right]);
+        // Fuse the immediate dictionary order with the asynchronous model
+        // order. A model may promote a substantially better alternative, but
+        // a one-position n-gram disagreement must not flip a coherent first
+        // candidate and cause visible post-render churn.
+        const auto left_rank = left + model_rank(original_candidates[left]);
+        const auto right_rank = right + model_rank(original_candidates[right]);
+        if (left_rank != right_rank) return left_rank < right_rank;
+        return left < right;
     });
 
     ordered_candidates.clear();

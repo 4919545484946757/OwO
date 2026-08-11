@@ -21,6 +21,8 @@ struct Candidate {
     InputMatchKind match_kind{InputMatchKind::exact};
     std::vector<std::string> source_segments;
     std::size_t consumed_input_bytes{};
+    std::size_t segment_count{1};
+    std::int64_t coherence_score{};
 
     bool operator==(const Candidate&) const = default;
 };

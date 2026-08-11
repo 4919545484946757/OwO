@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <chrono>
+#include <limits>
 #include <string_view>
 #include <unordered_map>
 
@@ -14,6 +15,7 @@ struct SearchState {
     std::string text;
     std::string previous;
     std::vector<std::string> syllables;
+    std::size_t segment_count{};
     std::int64_t score{};
 };
 
@@ -32,6 +34,8 @@ constexpr std::int64_t kAbbreviationBasePenalty = 8'000;
 constexpr std::int64_t kMixedAbbreviationPhraseBonus = 8'000;
 constexpr std::int64_t kPreferredInitialBonus = 6'000;
 constexpr std::int64_t kCommonInitialSeedBonus = 100'000;
+constexpr std::int64_t kMaximumBoundaryCoherenceBonus = 12'000;
+constexpr std::int64_t kUncoveredBoundaryCharacterPenalty = 12'000;
 
 std::int64_t common_initial_seed_bonus(const char initial,
                                        const std::string_view text) {
@@ -137,6 +141,15 @@ std::size_t utf8_character_count(const std::string_view text) {
         text.begin(), text.end(), [](const unsigned char byte) {
             return (byte & 0xc0U) != 0x80U;
         }));
+}
+
+std::string_view utf8_first_character(const std::string_view text) {
+    if (text.empty()) return {};
+    std::size_t end = 1;
+    while (end < text.size() &&
+           (static_cast<unsigned char>(text[end]) & 0xc0U) == 0x80U)
+        ++end;
+    return text.substr(0, end);
 }
 
 void prioritize_two_character_words(std::vector<Candidate>& candidates) {
@@ -475,6 +488,7 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
                         if (bigram_ != nullptr && !state.previous.empty())
                             next.score += bigram_->score(state.previous, entry.text);
                         next.previous = entry.text;
+                        ++next.segment_count;
                         next.syllables.insert(next.syllables.end(), entry.syllables.begin(),
                                               entry.syllables.end());
                         chart[end].push_back(std::move(next));
@@ -496,7 +510,7 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
             }
             Candidate candidate{std::move(state.text), std::move(state.syllables), state.score,
                                 path.match_kind, raw_segments,
-                                path.syllables.back().end};
+                                path.syllables.back().end, state.segment_count};
             if (path.match_kind == InputMatchKind::exact) exact_candidate_found = true;
             store_candidate(std::move(candidate));
         }
@@ -685,6 +699,85 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
             prefixes.push_back(std::move(candidate));
     }
     std::sort(full.begin(), full.end(), score_less);
+    const auto apply_cross_boundary_coherence = [this, metrics](Candidate& candidate) {
+        constexpr std::size_t kMaximumPhraseCharacters = 4;
+        const auto character_count = candidate.syllables.size();
+        if (character_count < 3 ||
+            utf8_character_count(candidate.text) != character_count)
+            return;
+
+        std::vector<std::size_t> boundaries;
+        boundaries.reserve(character_count + 1);
+        boundaries.push_back(0);
+        for (std::size_t offset = 1; offset < candidate.text.size(); ++offset) {
+            if ((static_cast<unsigned char>(candidate.text[offset]) & 0xc0U) != 0x80U)
+                boundaries.push_back(offset);
+        }
+        boundaries.push_back(candidate.text.size());
+        if (boundaries.size() != character_count + 1) return;
+
+        // Weighted interval scheduling over dictionary phrases gives a phrase
+        // chain such as “以我” + “的想法” a continuity advantage without
+        // repeatedly counting overlapping fragments such as every adjacent
+        // pair in a noisy character sequence.
+        constexpr auto unreachable = (std::numeric_limits<std::int64_t>::min)() / 4;
+        std::vector<std::int64_t> best(character_count + 1, unreachable);
+        best[0] = 0;
+        const auto maximum_phrase = std::min(
+            {kMaximumPhraseCharacters, character_count,
+             lexicon_.maximum_reading_length()});
+        for (std::size_t begin = 0; begin < character_count; ++begin) {
+            if (best[begin] == unreachable) continue;
+            best[begin + 1] = std::max(
+                best[begin + 1],
+                best[begin] - kUncoveredBoundaryCharacterPenalty);
+            std::vector<std::string_view> reading;
+            reading.reserve(maximum_phrase);
+            for (std::size_t end = begin + 1;
+                 end <= character_count && end - begin <= maximum_phrase; ++end) {
+                reading.push_back(candidate.syllables[end - 1]);
+                if (end - begin < 2 || (begin == 0 && end == character_count))
+                    continue;
+                const auto lookup_started = std::chrono::steady_clock::now();
+                const auto entries = lexicon_.lookup(reading);
+                if (metrics != nullptr) {
+                    metrics->lexicon_lookup_us += static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - lookup_started).count());
+                    ++metrics->lexicon_lookup_count;
+                }
+                const auto expected = std::string_view(candidate.text).substr(
+                    boundaries[begin], boundaries[end] - boundaries[begin]);
+                std::int64_t phrase_score = 0;
+                for (const auto& entry : entries) {
+                    if (entry.text != expected) continue;
+                    phrase_score = std::max(
+                        phrase_score,
+                        std::min(kMaximumBoundaryCoherenceBonus,
+                                 unigram_score(entry.frequency) * 3 / 2));
+                }
+                best[end] = std::max(best[end], best[begin] + phrase_score);
+            }
+        }
+        candidate.coherence_score = std::max<std::int64_t>(0, best.back());
+        candidate.score += candidate.coherence_score;
+    };
+    // Only the candidates already close enough to reach the visible/model
+    // comparison set need the more detailed phrase-chain pass.
+    const auto coherence_limit = std::min(
+        full.size(), std::max<std::size_t>(16, limit * 2));
+    for (std::size_t index = 0; index < coherence_limit; ++index)
+        apply_cross_boundary_coherence(full[index]);
+    const auto sentence_less = [](const Candidate& left, const Candidate& right) {
+        constexpr std::int64_t kCoherenceDecisionMargin = 3'000;
+        if (left.segment_count > 1 && right.segment_count > 1) {
+            const auto difference = left.coherence_score - right.coherence_score;
+            if (difference >= kCoherenceDecisionMargin) return true;
+            if (difference <= -kCoherenceDecisionMargin) return false;
+        }
+        return score_less(left, right);
+    };
+    std::sort(full.begin(), full.end(), sentence_less);
     std::sort(prefixes.begin(), prefixes.end(), [](const Candidate& left,
                                                    const Candidate& right) {
         if (left.consumed_input_bytes != right.consumed_input_bytes)
@@ -699,26 +792,70 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
 
     std::vector<Candidate> ordered;
     ordered.reserve(full.size() + prefixes.size());
-    if (pure_initial_sequence) {
-        // A consonant sequence is primarily an abbreviation request. Keep
-        // several complete two-initial candidates together before exposing
-        // one-initial prefix commits; the former ordering hard-coded exactly
-        // one full candidate ahead of every prefix candidate.
-        for (auto& candidate : full) ordered.push_back(std::move(candidate));
-        for (auto& candidate : prefixes) ordered.push_back(std::move(candidate));
-    } else {
-        if (!full.empty()) {
-            ordered.push_back(std::move(full.front()));
-            full.erase(full.begin());
+    const bool multiword_input = !pure_initial_sequence && !full.empty() &&
+                                 full.front().syllables.size() >= 3;
+    if (multiword_input) {
+        constexpr std::int64_t kSecondSentenceCoherenceMargin = 2'000;
+        constexpr std::int64_t kSecondSentenceScoreMargin = 4'000;
+        std::size_t sentence_count = 1;
+        if (full.size() >= 2) {
+            const auto& first = full[0];
+            const auto& second = full[1];
+            const auto coherence_gap = first.coherence_score >= second.coherence_score
+                ? first.coherence_score - second.coherence_score
+                : second.coherence_score - first.coherence_score;
+            const auto score_gap = first.score >= second.score
+                ? first.score - second.score : second.score - first.score;
+            const auto first_head = utf8_first_character(first.text);
+            const auto second_head = utf8_first_character(second.text);
+            const auto first_tail = std::string_view(first.text).substr(first_head.size());
+            const auto second_tail = std::string_view(second.text).substr(second_head.size());
+            // A homophone substitution followed by the identical suffix is a
+            // generated variant, not a useful second sentence. A genuinely
+            // different sentence may occupy the second slot when both scores
+            // remain close enough.
+            if (first_tail != second_tail &&
+                coherence_gap <= kSecondSentenceCoherenceMargin &&
+                score_gap <= kSecondSentenceScoreMargin)
+                sentence_count = 2;
         }
-        for (auto& candidate : prefixes) ordered.push_back(std::move(candidate));
+        for (std::size_t index = 0; index < sentence_count; ++index)
+            ordered.push_back(std::move(full[index]));
+
+        const auto leading_text = utf8_first_character(ordered.front().text);
+        std::vector<Candidate> initial_characters;
+        std::vector<Candidate> repeated_initial;
+        std::vector<Candidate> other_prefixes;
+        for (auto& candidate : prefixes) {
+            if (candidate.syllables.size() == 1 &&
+                utf8_character_count(candidate.text) == 1) {
+                if (candidate.text == leading_text)
+                    repeated_initial.push_back(std::move(candidate));
+                else
+                    initial_characters.push_back(std::move(candidate));
+            } else {
+                other_prefixes.push_back(std::move(candidate));
+            }
+        }
+        std::sort(initial_characters.begin(), initial_characters.end(), score_less);
+        for (auto& candidate : initial_characters)
+            ordered.push_back(std::move(candidate));
+        for (auto& candidate : other_prefixes)
+            ordered.push_back(std::move(candidate));
+        // Keep the single character already used by the sentence available
+        // for partial commit, but place it after non-duplicate alternatives.
+        for (auto& candidate : repeated_initial)
+            ordered.push_back(std::move(candidate));
+    } else {
         for (auto& candidate : full) ordered.push_back(std::move(candidate));
+        for (auto& candidate : prefixes) ordered.push_back(std::move(candidate));
     }
     // The pure-initial branch already groups complete abbreviation matches
     // ahead of prefix commits. The general word-length reorder intentionally
     // preserves only its first leading whole-input candidate, which would
     // recreate the old one-double-initial-candidate limit.
-    if (!pure_initial_sequence) prioritize_two_character_words(ordered);
+    if (!pure_initial_sequence && !multiword_input)
+        prioritize_two_character_words(ordered);
     if (ordered.size() > limit) ordered.resize(limit);
     if (metrics != nullptr)
         metrics->sort_us += static_cast<std::uint64_t>(

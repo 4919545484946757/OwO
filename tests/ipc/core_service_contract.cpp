@@ -150,11 +150,11 @@ int main() {
         !valid_response(learned, 104, 8, {"你号", "你好"}) ||
         !nihao_ranged.validation ||
         nihao_ranged.message.candidates !=
-            std::vector<std::string>{"你好世界", "你好", "你号", "你号世界"} ||
+            std::vector<std::string>{"你好世界", "你好", "你号"} ||
         nihao_ranged.message.syllables !=
             std::vector<std::string>{"ni", "hao", "shi", "jie"} ||
         nihao_ranged.message.candidate_consumed !=
-            std::vector<std::uint64_t>{14, 6, 6, 14} ||
+            std::vector<std::uint64_t>{14, 6, 6} ||
         !valid_response(corrected, 110, 8, {"你好", "你号"}, {"ni", "aho"}) ||
         !stable_xingb.validation ||
         stable_xingb.message.syllables != std::vector<std::string>{"xing", "b"} ||

@@ -261,6 +261,27 @@ int main() {
     if (segmented.empty() || segmented[0].text != "你好")
         return fail("over-segmentation outranked whole word");
 
+    const owo::engine::MemoryLexicon boundary_coherence_lexicon({
+        {{"yi"}, "一", 1000000},
+        {{"yi"}, "以", 100},
+        {{"wo"}, "我", 1000},
+        {{"de"}, "的", 1000},
+        {{"shi", "jiao"}, "视角", 1000},
+        {{"yi", "wo", "de"}, "以我的", 1000},
+    });
+    const owo::engine::CandidateGenerator boundary_coherence_generator(
+        boundary_coherence_lexicon);
+    const auto coherent = boundary_coherence_generator.generate(
+        schema.parse("yiwodeshijiao"));
+    const auto coherent_sentences = std::count_if(
+        coherent.begin(), coherent.end(), [&coherent](const auto& candidate) {
+            return candidate.consumed_input_bytes ==
+                   coherent.front().consumed_input_bytes;
+        });
+    if (coherent.size() < 2 || coherent.front().text != "以我的视角" ||
+        coherent[1].text != "一" || coherent_sentences != 1)
+        return fail("cross-boundary dictionary coherence was ignored");
+
     const owo::engine::MemoryLexicon compositional({
         {{"ni"}, "你", 1000}, {{"ni"}, "泥", 950},
         {{"hao"}, "好", 1000}, {{"hao"}, "号", 950},

@@ -48,7 +48,7 @@ $tsfDll = if ($explicitBuildDirectory -or $null -eq $deployedTsf) {
     $deployedTsf.FullName
 }
 $settingsCenter = Join-Path $projectRoot `
-    'apps/settings_center/bin/Release/net10.0-windows10.0.26100.0/win-x64/OwO.Settings.exe'
+    'apps/settings_center/bin/x64/Release/net10.0-windows10.0.26100.0/win-x64/OwO.Settings.exe'
 
 foreach ($required in @($coreService, $profileCheck, $tsfDll)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
