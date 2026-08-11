@@ -135,6 +135,8 @@ struct TuiApp {
     event_rx: Option<Receiver<TuiMsg>>,
     input: String,
     transcript: Vec<(String, Style)>,
+    diff_view: Vec<(String, Style)>,
+    show_diff_panel: bool,
     streaming: String,
     scroll: usize,
     running: bool,
@@ -183,6 +185,8 @@ impl TuiApp {
                     .to_string(),
                 dim(),
             )],
+            diff_view: Vec::new(),
+            show_diff_panel: false,
             streaming: String::new(),
             scroll: 0,
             running: false,
@@ -267,11 +271,25 @@ impl TuiApp {
                     Color::Green
                 }),
             ),
+            Span::raw(" | "),
+            Span::styled(
+                if self.show_diff_panel { "diff" } else { "chat" },
+                Style::default().fg(if self.show_diff_panel {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                }),
+            ),
         ]);
         frame.render_widget(Paragraph::new(title), chunks[0]);
 
+        let source = if self.show_diff_panel {
+            &self.diff_view
+        } else {
+            &self.transcript
+        };
         let mut visible = self
-            .visible_lines(chunks[1].height as usize)
+            .visible_lines_of(source, chunks[1].height as usize)
             .into_iter()
             .collect::<Vec<_>>();
         if !self.streaming.is_empty() {
@@ -318,11 +336,16 @@ impl TuiApp {
         frame.render_widget(Paragraph::new(status_line), chunks[3]);
     }
 
-    fn visible_lines(&self, height: usize) -> Vec<(String, Style)> {
+    fn visible_lines_of(&self, source: &[(String, Style)], height: usize) -> Vec<(String, Style)> {
         let viewport = height.saturating_sub(2).max(1);
-        let end = self.transcript.len().saturating_sub(self.scroll);
+        let end = source.len().saturating_sub(self.scroll);
         let start = end.saturating_sub(viewport);
-        self.transcript[start..end].to_vec()
+        source[start..end].to_vec()
+    }
+
+    #[cfg(test)]
+    fn visible_lines(&self, height: usize) -> Vec<(String, Style)> {
+        self.visible_lines_of(&self.transcript, height)
     }
 
     fn handle_key(
@@ -352,7 +375,14 @@ impl TuiApp {
             KeyCode::Backspace => {
                 self.input.pop();
             }
-            KeyCode::Esc => self.input.clear(),
+            KeyCode::Esc => {
+                if self.show_diff_panel {
+                    self.show_diff_panel = false;
+                    self.status = "就绪".to_string();
+                } else {
+                    self.input.clear();
+                }
+            }
             _ => {}
         }
         if self.matches("toggle_mode", &key) {
@@ -366,6 +396,9 @@ impl TuiApp {
         }
         if self.matches("clear", &key) {
             self.transcript.clear();
+        }
+        if self.matches("toggle_diff", &key) && !self.diff_view.is_empty() {
+            self.show_diff_panel = !self.show_diff_panel;
         }
         Ok(false)
     }
@@ -673,7 +706,7 @@ impl TuiApp {
                 }
                 None => self.push_system(format!("当前模型：{}", self.model), dim()),
             },
-            "diff" => self.show_diff(),
+            "diff" => self.refresh_diff(),
             "undo" | "revert" => {
                 let Some(session) = &mut self.session else {
                     self.push_system("暂无会话".to_string(), dim());
@@ -1077,12 +1110,14 @@ impl TuiApp {
         Ok(())
     }
 
-    fn show_diff(&mut self) {
+    fn refresh_diff(&mut self) {
         let mut lines = vec![("当前会话没有未回滚的改动".to_string(), dim())];
+        let mut active = false;
         if let Some(session) = &self.session {
             let diffs = session.diff();
             if !diffs.is_empty() {
                 lines.clear();
+                active = true;
                 for diff in diffs {
                     lines.push((format!("● {}", diff.path), cyan()));
                     if let Some(before) = diff.before {
@@ -1102,7 +1137,12 @@ impl TuiApp {
                 }
             }
         }
-        self.transcript.extend(lines);
+        self.diff_view = lines;
+        self.show_diff_panel = active;
+        if active {
+            self.scroll = 0;
+            self.status = "差异视图（Esc 返回）".to_string();
+        }
     }
 
     fn push_status(&mut self) {
@@ -1156,7 +1196,7 @@ impl TuiApp {
             "/theme [dark|light] /keybinds  主题与键位",
             "/model [名称]  查看/切换模型",
             "/plan /build  切换只读/执行模式（或 Tab）",
-            "/diff /undo  查看改动 / 回滚",
+            "/diff（d 差异视图）/undo  查看改动 / 回滚",
             "/mcp add/list/remove  MCP 服务器",
             "/skills  列出已加载技能",
             "/status /init /clear",
@@ -1239,6 +1279,7 @@ fn build_keybinds(configured: &HashMap<String, String>) -> HashMap<String, KeyEv
         ("scroll_up", "pageup"),
         ("scroll_down", "pagedown"),
         ("clear", "ctrl+l"),
+        ("toggle_diff", "d"),
     ];
     let mut map = HashMap::new();
     for (action, spec) in defaults {
@@ -1389,5 +1430,31 @@ mod tests {
         assert_eq!(binds.get("toggle_mode").unwrap().code, KeyCode::F(2));
         assert_eq!(binds.get("abort").unwrap().code, KeyCode::Char('c'));
         assert_eq!(format_key(binds.get("scroll_up").unwrap()), "pageup");
+    }
+
+    #[test]
+    fn refresh_diff_builds_panel_and_activates_view() {
+        let mut app = test_app();
+        let workspace = std::env::temp_dir().join(format!("owo-tui-diff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = workspace.join("a.txt");
+        std::fs::write(&path, "after").unwrap();
+        let mut session = Session::new(&workspace, "mock", None);
+        let key = path.to_string_lossy().replace('\\', "/");
+        session.snapshots.insert(
+            key,
+            owo_agent_core::session::SnapshotEntry {
+                original_b64: Some("YmVmb3Jl".to_string()),
+            },
+        );
+        app.session = Some(session);
+        app.refresh_diff();
+        assert!(app.show_diff_panel);
+        assert!(app.diff_view.iter().any(|(text, _)| text.contains("after")));
+        assert!(app
+            .diff_view
+            .iter()
+            .any(|(text, _)| text.contains("before")));
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 }

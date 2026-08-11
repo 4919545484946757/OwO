@@ -99,6 +99,7 @@ cargo run -p owo-agent-cli -- serve --port 4096
 - SQLite 存储：会话默认持久化到 `<data>/index.db`（rusqlite bundled），跨进程可恢复；JSON 存储保留用于测试/兼容。
 - Evals：内置 5 用例演示套件（读/写/列目录/搜索/子代理），临时工作区隔离，输出成功率/耗时报告；`owo-agent eval` 与 HTTP `POST /eval/run`。
 - Traces：每回合结构化轨迹（模型调用/流式 token/工具/审批/压缩/最终文本 + 耗时）自动写入 `<data>/traces/`，`/traces` 与 `/trace <n>` 回放，服务端回合同样落盘。
+- CI 评估门禁：`scripts/run-eval-gate.ps1 [-Suite <json>] [-Threshold 0.8]` 运行 eval 并按通过率阈值退出 0/1。
 - 交互式 CLI：build/plan 模式、会话、diff/undo、审批、审计、AGENTS.md 初始化。
 
 ## 尚未实现（M2+）
