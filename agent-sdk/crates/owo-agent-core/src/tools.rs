@@ -124,21 +124,6 @@ fn sanitize_tool_name(name: &str) -> String {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sanitizes_tool_names_for_model_api() {
-        assert_eq!(
-            sanitize_tool_name("owo.plugin.example-hello"),
-            "owo_plugin_example-hello"
-        );
-        assert_eq!(sanitize_tool_name("echo"), "echo");
-        assert_eq!(sanitize_tool_name("a b/c"), "a_b_c");
-    }
-}
-
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
@@ -514,5 +499,20 @@ impl Tool for UseSkillTool {
             "task": task,
             "instructions": skill.instructions,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitizes_tool_names_for_model_api() {
+        assert_eq!(
+            sanitize_tool_name("owo.plugin.example-hello"),
+            "owo_plugin_example-hello"
+        );
+        assert_eq!(sanitize_tool_name("echo"), "echo");
+        assert_eq!(sanitize_tool_name("a b/c"), "a_b_c");
     }
 }
