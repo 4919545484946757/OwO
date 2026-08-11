@@ -485,6 +485,68 @@ private:
                        CandidateCacheKeyHash> entries_;
 };
 
+bool is_double_initial_input(const std::string_view input) {
+    if (input.size() != 2) return false;
+    constexpr std::string_view vowels = "aeiouv";
+    return std::all_of(input.begin(), input.end(), [vowels](char value) {
+        if (value >= 'A' && value <= 'Z')
+            value = static_cast<char>(value - 'A' + 'a');
+        return value >= 'a' && value <= 'z' &&
+               vowels.find(value) == std::string_view::npos;
+    });
+}
+
+void arrange_double_initial_pages(std::vector<engine::Candidate>& candidates,
+                                  const std::size_t page_size,
+                                  const std::size_t full_input_bytes) {
+    if (page_size == 0 || candidates.empty()) return;
+    std::vector<engine::Candidate> dictionary;
+    std::vector<engine::Candidate> prefixes;
+    dictionary.reserve(candidates.size());
+    prefixes.reserve(candidates.size());
+    for (auto& candidate : candidates) {
+        if (candidate.consumed_input_bytes == full_input_bytes)
+            dictionary.push_back(std::move(candidate));
+        else
+            prefixes.push_back(std::move(candidate));
+    }
+
+    const auto left_count = (page_size + 1) / 2;
+    const auto right_count = page_size / 2;
+    std::vector<engine::Candidate> paged;
+    paged.reserve(dictionary.size() + prefixes.size());
+    std::size_t dictionary_index = 0;
+    std::size_t prefix_index = 0;
+    while (dictionary_index < dictionary.size() || prefix_index < prefixes.size()) {
+        const auto dictionary_end = std::min(dictionary.size(),
+                                             dictionary_index + left_count);
+        while (dictionary_index < dictionary_end)
+            paged.push_back(std::move(dictionary[dictionary_index++]));
+        const auto prefix_end = std::min(prefixes.size(), prefix_index + right_count);
+        while (prefix_index < prefix_end)
+            paged.push_back(std::move(prefixes[prefix_index++]));
+
+        // If one source is exhausted, keep the configured page length stable
+        // by filling its unused slots from the remaining source. Normal pages
+        // with both sources available always retain ceil/2 on the left and
+        // floor/2 on the right.
+        const auto row_remainder = paged.size() % page_size;
+        if (row_remainder != 0 &&
+            (dictionary_index == dictionary.size() || prefix_index == prefixes.size())) {
+            auto missing = page_size - row_remainder;
+            while (missing != 0 && dictionary_index < dictionary.size()) {
+                paged.push_back(std::move(dictionary[dictionary_index++]));
+                --missing;
+            }
+            while (missing != 0 && prefix_index < prefixes.size()) {
+                paged.push_back(std::move(prefixes[prefix_index++]));
+                --missing;
+            }
+        }
+    }
+    candidates = std::move(paged);
+}
+
 HANDLE open_pipe_with_deadline(const wchar_t* pipe_name,
                                const std::chrono::steady_clock::time_point deadline) {
     for (;;) {
@@ -755,7 +817,22 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                                       : std::size_t{16};
                     engine::FullPinyinParseMetrics parse_metrics;
                     engine::CandidateGenerationMetrics generation_metrics;
-                    const auto result_limit = begin + result_size + 1;
+                    const bool double_initial_request =
+                        is_double_initial_input(decoded.message.text);
+                    auto result_limit = begin + result_size + 1;
+                    if (double_initial_request) {
+                        const auto requested_pages = decoded.message.expanded
+                                                         ? expanded_pages
+                                                         : page + 1;
+                        const auto left_per_page = (page_size + 1) / 2;
+                        // The generator alternates its two independently
+                        // ranked sources. Ask for enough of both to give every
+                        // requested odd-sized page its extra left candidate,
+                        // plus one dictionary look-ahead for has_more.
+                        const auto required_left =
+                            requested_pages * left_per_page + 1;
+                        result_limit = std::max(result_limit, required_left * 2);
+                    }
                     CandidateCacheKey cache_key{
                         decoded.message.text,
                         decoded.message.context,
@@ -861,6 +938,10 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                                 candidates = std::move(corrected_candidates);
                             }
                         }
+                        if (!cancelled() && double_initial_request)
+                            arrange_double_initial_pages(
+                                candidates, page_size,
+                                parsed.normalized_input.size());
                         if (!cancelled())
                             candidate_cache.put(cache_key, {parsed, candidates});
                     }
@@ -888,10 +969,35 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                     if (begin < candidates.size()) {
                         response.candidates.reserve(end - begin);
                         response.candidate_consumed.reserve(end - begin);
-                        for (std::size_t index = begin; index < end; ++index) {
+                        const auto append_candidate = [&response, &candidates](
+                                                          const std::size_t index) {
                             response.candidates.push_back(candidates[index].text);
                             response.candidate_consumed.push_back(
                                 candidates[index].consumed_input_bytes);
+                        };
+                        if (double_initial_request) {
+                            // The generator alternates sources so every page
+                            // receives an even share. Group each delivered page
+                            // afterward so TSF can render dictionary words in
+                            // the left half and first-initial characters in the
+                            // right half with contiguous numeric shortcuts.
+                            for (std::size_t row_begin = begin; row_begin < end;
+                                 row_begin += page_size) {
+                                const auto row_end = std::min(end, row_begin + page_size);
+                                for (std::size_t index = row_begin; index < row_end; ++index) {
+                                    if (candidates[index].consumed_input_bytes ==
+                                        full_input_bytes)
+                                        append_candidate(index);
+                                }
+                                for (std::size_t index = row_begin; index < row_end; ++index) {
+                                    if (candidates[index].consumed_input_bytes !=
+                                        full_input_bytes)
+                                        append_candidate(index);
+                                }
+                            }
+                        } else {
+                            for (std::size_t index = begin; index < end; ++index)
+                                append_candidate(index);
                         }
                     }
                     const auto parse_us = parse_phase_us;
@@ -929,6 +1035,7 @@ int run_core_server(const wchar_t* pipe_name, const engine::Lexicon& lexicon,
                 // TSF owns a paged candidate list later in P2.1.
                 if (!response.candidates.empty()) response.text = response.candidates.front();
                 if (external_model_ranking_enabled && !response.candidates.empty() &&
+                    !is_double_initial_input(decoded.message.text) &&
                     model_requests.size() < 128) {
                     model::ModelMessage model_request;
                     model_request.type = model::ModelMessageType::rank_request;

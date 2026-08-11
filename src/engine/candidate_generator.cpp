@@ -215,6 +215,13 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
     // entries. This gives d -> 的/都/对/等/到/但... instead of allowing one
     // completion path to fill the whole result budget.
     constexpr std::string_view vowels = "aeiouv";
+    const bool pure_initial_sequence = parsed.normalized_input.size() >= 2 &&
+        parsed.normalized_input.size() <= 256 &&
+        std::all_of(parsed.normalized_input.begin(), parsed.normalized_input.end(),
+                    [vowels](const char value) {
+            return value >= 'a' && value <= 'z' &&
+                   vowels.find(value) == std::string_view::npos;
+        });
     const bool single_initial = parsed.normalized_input.size() == 1 &&
         parsed.normalized_input.front() >= 'a' &&
         parsed.normalized_input.front() <= 'z' &&
@@ -269,6 +276,121 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
         return candidates;
     }
 
+    const bool double_initial = pure_initial_sequence &&
+                                parsed.normalized_input.size() == 2;
+    if (double_initial) {
+        // A double-initial request has two distinct candidate sources:
+        // real two-character dictionary words and common characters for the
+        // first initial. Never synthesize the first group by combining
+        // arbitrary characters. Alternation derives the ratio from the
+        // requested result count, so no candidate page size is hard-coded.
+        std::unordered_map<std::string, Candidate> dictionary_unique;
+        std::unordered_map<std::string, Candidate> prefix_unique;
+        const auto store_better = [](auto& destination, Candidate candidate) {
+            const auto found = destination.find(candidate.text);
+            if (found == destination.end() ||
+                candidate_better(candidate, found->second))
+                destination.insert_or_assign(candidate.text, std::move(candidate));
+        };
+
+        const auto lookup_started = std::chrono::steady_clock::now();
+        auto dictionary_matches = lexicon_.lookup_mixed_abbreviation(
+            parsed.normalized_input, std::max<std::size_t>(64, search_limit * 16));
+        auto prefix_entries = lexicon_.lookup_initial(
+            parsed.normalized_input.front(),
+            std::max<std::size_t>(64, search_limit * 8));
+        if (metrics != nullptr) {
+            metrics->lexicon_lookup_us += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - lookup_started).count());
+            metrics->lexicon_lookup_count += 2;
+        }
+
+        for (auto& match : dictionary_matches) {
+            if (cancelled && cancelled()) return {};
+            if (match.entry.syllables.size() != 2 ||
+                match.source_segments.size() != 2 ||
+                utf8_character_count(match.entry.text) != 2)
+                continue;
+            auto score = unigram_score(match.entry.frequency) +
+                         kMixedAbbreviationPhraseBonus -
+                         static_cast<std::int64_t>(
+                             match.entry.syllables[0].size() +
+                             match.entry.syllables[1].size() - 2) *
+                             kIncompleteCharacterPenalty;
+            if (user_frequency_ != nullptr) {
+                score += user_frequency_->score(match.entry.text);
+                if (contextual_ranking)
+                    score += user_frequency_->contextual_score(
+                        parsed.normalized_input, match.entry.text);
+                if (contextual_ranking && !language_context.empty())
+                    score += user_frequency_->language_context_score(
+                        language_context, parsed.normalized_input,
+                        match.entry.text);
+            }
+            store_better(dictionary_unique,
+                         Candidate{std::move(match.entry.text),
+                                   std::move(match.entry.syllables), score,
+                                   InputMatchKind::abbreviated_completion,
+                                   std::move(match.source_segments), 2});
+        }
+
+        for (const auto& entry : prefix_entries) {
+            if (cancelled && cancelled()) return {};
+            if (entry.syllables.size() != 1 ||
+                utf8_character_count(entry.text) != 1)
+                continue;
+            auto score = unigram_score(entry.frequency);
+            if (user_frequency_ != nullptr) {
+                score += user_frequency_->score(entry.text);
+                if (contextual_ranking)
+                    score += user_frequency_->contextual_score(
+                        std::string_view(parsed.normalized_input).substr(0, 1),
+                        entry.text);
+                if (contextual_ranking && !language_context.empty())
+                    score += user_frequency_->language_context_score(
+                        language_context,
+                        std::string_view(parsed.normalized_input).substr(0, 1),
+                        entry.text);
+            }
+            store_better(prefix_unique,
+                         Candidate{entry.text, entry.syllables, score,
+                                   InputMatchKind::abbreviated_completion,
+                                   {parsed.normalized_input.substr(0, 1)}, 1});
+        }
+
+        std::vector<Candidate> dictionary;
+        std::vector<Candidate> prefixes;
+        dictionary.reserve(dictionary_unique.size());
+        prefixes.reserve(prefix_unique.size());
+        for (auto& [text, candidate] : dictionary_unique)
+            dictionary.push_back(std::move(candidate));
+        for (auto& [text, candidate] : prefix_unique)
+            prefixes.push_back(std::move(candidate));
+        std::sort(dictionary.begin(), dictionary.end(), score_less);
+        std::sort(prefixes.begin(), prefixes.end(), score_less);
+
+        std::vector<Candidate> candidates;
+        candidates.reserve(std::min(limit, dictionary.size() + prefixes.size()));
+        std::size_t dictionary_index = 0;
+        std::size_t prefix_index = 0;
+        bool dictionary_turn = true;
+        while (candidates.size() < limit &&
+               (dictionary_index < dictionary.size() ||
+                prefix_index < prefixes.size())) {
+            if (dictionary_turn && dictionary_index < dictionary.size())
+                candidates.push_back(std::move(dictionary[dictionary_index++]));
+            else if (!dictionary_turn && prefix_index < prefixes.size())
+                candidates.push_back(std::move(prefixes[prefix_index++]));
+            else if (dictionary_index < dictionary.size())
+                candidates.push_back(std::move(dictionary[dictionary_index++]));
+            else
+                candidates.push_back(std::move(prefixes[prefix_index++]));
+            dictionary_turn = !dictionary_turn;
+        }
+        return candidates;
+    }
+
     std::unordered_map<std::string, Candidate> unique;
     const auto store_candidate = [&unique](Candidate candidate) {
         const auto found = unique.find(candidate.text);
@@ -277,12 +399,24 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
     };
     std::vector<const ParsePath*> ordered_paths;
     ordered_paths.reserve(parsed.paths.size());
+    bool preferred_exact_added = false;
     for (const auto kind : {InputMatchKind::exact,
                             InputMatchKind::incomplete_completion,
                             InputMatchKind::corrected,
                             InputMatchKind::abbreviated_completion}) {
         for (const auto& path : parsed.paths) {
-            if (path.match_kind == kind) ordered_paths.push_back(&path);
+            if (path.match_kind != kind) continue;
+            // The first exact path is also the segmentation shown by the
+            // pinyin preview. Evaluating other equally valid segmentations
+            // lets corpus frequency silently replace wan'an with wa'nan (and
+            // nan'an with na'nan), making the candidates contradict the UI.
+            // Assisted paths remain plural because they intentionally offer
+            // alternative completions and corrections.
+            if (kind == InputMatchKind::exact) {
+                if (preferred_exact_added) continue;
+                preferred_exact_added = true;
+            }
+            ordered_paths.push_back(&path);
         }
     }
     bool exact_candidate_found = false;
@@ -421,12 +555,6 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
     // syllables, but users normally intend one abbreviated character per
     // consonant. This lexicon-aware fallback avoids spending the parser's
     // bounded path budget on every possible syllable completion.
-    const bool pure_initial_sequence = parsed.normalized_input.size() >= 2 &&
-        parsed.normalized_input.size() <= 256 &&
-        std::all_of(parsed.normalized_input.begin(), parsed.normalized_input.end(),
-                    [vowels](const char value) {
-            return value >= 'a' && value <= 'z' && vowels.find(value) == std::string_view::npos;
-        });
     if (pure_initial_sequence) {
         std::vector<std::string> raw_segments;
         raw_segments.reserve(parsed.normalized_input.size());
@@ -571,13 +699,26 @@ std::vector<Candidate> CandidateGenerator::generate(const ParseResult& parsed,
 
     std::vector<Candidate> ordered;
     ordered.reserve(full.size() + prefixes.size());
-    if (!full.empty()) {
-        ordered.push_back(std::move(full.front()));
-        full.erase(full.begin());
+    if (pure_initial_sequence) {
+        // A consonant sequence is primarily an abbreviation request. Keep
+        // several complete two-initial candidates together before exposing
+        // one-initial prefix commits; the former ordering hard-coded exactly
+        // one full candidate ahead of every prefix candidate.
+        for (auto& candidate : full) ordered.push_back(std::move(candidate));
+        for (auto& candidate : prefixes) ordered.push_back(std::move(candidate));
+    } else {
+        if (!full.empty()) {
+            ordered.push_back(std::move(full.front()));
+            full.erase(full.begin());
+        }
+        for (auto& candidate : prefixes) ordered.push_back(std::move(candidate));
+        for (auto& candidate : full) ordered.push_back(std::move(candidate));
     }
-    for (auto& candidate : prefixes) ordered.push_back(std::move(candidate));
-    for (auto& candidate : full) ordered.push_back(std::move(candidate));
-    prioritize_two_character_words(ordered);
+    // The pure-initial branch already groups complete abbreviation matches
+    // ahead of prefix commits. The general word-length reorder intentionally
+    // preserves only its first leading whole-input candidate, which would
+    // recreate the old one-double-initial-candidate limit.
+    if (!pure_initial_sequence) prioritize_two_character_words(ordered);
     if (ordered.size() > limit) ordered.resize(limit);
     if (metrics != nullptr)
         metrics->sort_us += static_cast<std::uint64_t>(

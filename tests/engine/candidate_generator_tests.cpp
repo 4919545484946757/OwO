@@ -165,6 +165,7 @@ int main() {
 
     const owo::engine::MemoryLexicon ranged_lexicon({
         {{"ni", "hao"}, "你好", 3000},
+        {{"ni", "ma"}, "你吗", 2600},
         {{"ni"}, "你", 2500},
         {{"ma"}, "吗", 2400},
         {{"shi", "jie"}, "世界", 2800},
@@ -176,6 +177,65 @@ int main() {
         initial_sequence[0].consumed_input_bytes != 2 ||
         initial_sequence[1].text != "你" || initial_sequence[1].consumed_input_bytes != 1)
         return fail("initial sequence did not split into source-aligned characters");
+
+    const owo::engine::MemoryLexicon ambiguous_boundary_lexicon({
+        {{"wan", "an"}, "WAN_AN", 100},
+        {{"wa", "nan"}, "WA_NAN", 1000000},
+        {{"nan", "an"}, "NAN_AN", 100},
+        {{"na", "nan"}, "NA_NAN", 1000000},
+    });
+    const owo::engine::CandidateGenerator ambiguous_boundary_generator(
+        ambiguous_boundary_lexicon);
+    const auto wanan_candidates =
+        ambiguous_boundary_generator.generate(schema.parse("wanan"));
+    const auto nanan_candidates =
+        ambiguous_boundary_generator.generate(schema.parse("nanan"));
+    if (wanan_candidates.empty() || wanan_candidates.front().text != "WAN_AN" ||
+        std::any_of(wanan_candidates.begin(), wanan_candidates.end(), [](const auto& value) {
+            return value.text == "WA_NAN";
+        }) ||
+        nanan_candidates.empty() || nanan_candidates.front().text != "NAN_AN" ||
+        std::any_of(nanan_candidates.begin(), nanan_candidates.end(), [](const auto& value) {
+            return value.text == "NA_NAN";
+        }))
+        return fail("candidate segmentation diverged from the pinyin preview");
+
+    const owo::engine::MemoryLexicon double_initial_lexicon({
+        {{"ga"}, "A", 1000}, {{"ge"}, "B", 900},
+        {{"gou"}, "E", 800}, {{"gu"}, "F", 700},
+        {{"da"}, "C", 1000}, {{"de"}, "D", 900},
+        {{"ga", "da"}, "XY", 2000},
+        {{"ge", "de"}, "UV", 1800},
+        {{"gou", "dong"}, "MN", 1600},
+        {{"gu", "dian"}, "OP", 1400},
+    });
+    const owo::engine::CandidateGenerator double_initial_generator(
+        double_initial_lexicon);
+    const auto double_initial_candidates =
+        double_initial_generator.generate(schema.parse("gd"), 5);
+    if (double_initial_candidates.size() != 5 ||
+        double_initial_candidates[0].consumed_input_bytes != 2 ||
+        double_initial_candidates[1].consumed_input_bytes != 1 ||
+        double_initial_candidates[2].consumed_input_bytes != 2 ||
+        double_initial_candidates[3].consumed_input_bytes != 1 ||
+        double_initial_candidates[4].consumed_input_bytes != 2 ||
+        std::any_of(double_initial_candidates.begin(),
+                    double_initial_candidates.end(), [](const auto& value) {
+            return value.text == "AC" || value.text == "AD" ||
+                   value.text == "BC" || value.text == "BD";
+        }))
+        return fail("double-initial dictionary/prefix candidates were not interleaved");
+    for (std::size_t dynamic_limit = 2; dynamic_limit <= 7; ++dynamic_limit) {
+        const auto dynamic_candidates = double_initial_generator.generate(
+            schema.parse("gd"), dynamic_limit);
+        if (dynamic_candidates.size() != dynamic_limit)
+            return fail("double-initial dynamic candidate limit was not filled");
+        for (std::size_t index = 0; index < dynamic_candidates.size(); ++index) {
+            const auto expected_consumed = index % 2 == 0 ? 2U : 1U;
+            if (dynamic_candidates[index].consumed_input_bytes != expected_consumed)
+                return fail("double-initial ratio depended on a fixed page size");
+        }
+    }
 
     const auto unmodified_initial = ranged_generator.generate(schema.parse("n"));
     if (unmodified_initial.empty() ||

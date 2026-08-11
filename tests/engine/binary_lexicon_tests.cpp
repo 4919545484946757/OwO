@@ -35,6 +35,12 @@ int main() {
     if (abbreviated.size() != 1 || abbreviated.front().entry.text != "BGD" ||
         abbreviated.front().source_segments !=
             std::vector<std::string>{"bu", "g", "d"}) return 1;
+    const auto double_initial = lexicon.lookup_mixed_abbreviation("nh", 8);
+    if (double_initial.size() != 2 ||
+        double_initial.front().source_segments !=
+            std::vector<std::string>{"n", "h"} ||
+        double_initial.front().entry.syllables !=
+            std::vector<std::string>{"ni", "hao"}) return 1;
 
     auto corrupted = left_bytes;
     // Without an installer-created validation cache, V2 verifies its payload

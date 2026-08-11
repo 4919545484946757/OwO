@@ -62,7 +62,14 @@ int main() {
         {{"ce", "shi"}, "测试五", 600}, {{"ce", "shi"}, "测试六", 500},
         {{"ce", "shi"}, "测试七", 400},
         {{"wo", "ai"}, "我爱", 1500}, {{"wo"}, "我", 1400},
-        {{"shi", "jie"}, "世界", 1600}});
+        {{"shi", "jie"}, "世界", 1600},
+        {{"ga"}, "A", 1000}, {{"ge"}, "B", 900},
+        {{"gou"}, "C", 800}, {{"gu"}, "D", 700},
+        {{"gang"}, "E", 600}, {{"gong"}, "F", 500},
+        {{"ga", "da"}, "aa", 2000}, {{"ge", "de"}, "bb", 1900},
+        {{"gou", "dong"}, "cc", 1800}, {{"gu", "dian"}, "dd", 1700},
+        {{"gang", "du"}, "ee", 1600}, {{"gong", "di"}, "ff", 1500},
+        {{"gui", "dao"}, "gg", 1400}});
     owo::engine::BinaryLexicon lexicon;
     const auto loaded = lexicon.load(path);
     owo::engine::UserFrequencyStore user_frequency;
@@ -94,6 +101,13 @@ int main() {
         pipe_name, {owo::protocol::MessageType::candidate_request, 116, 8, "mingd"});
     const auto stable_kenengd = send_request(
         pipe_name, {owo::protocol::MessageType::candidate_request, 117, 8, "kenengd"});
+    const auto double_initial_first = send_request(
+        pipe_name, {owo::protocol::MessageType::candidate_request, 118, 8, "gd"});
+    owo::protocol::Message double_initial_second_request{
+        owo::protocol::MessageType::candidate_request, 119, 8, "gd"};
+    double_initial_second_request.page = 1;
+    const auto double_initial_second = send_request(
+        pipe_name, double_initial_second_request);
     owo::protocol::Message correction_disabled_request{
         owo::protocol::MessageType::candidate_request, 111, 8, "niaho"};
     correction_disabled_request.correction_enabled = false;
@@ -152,6 +166,12 @@ int main() {
         !stable_kenengd.validation ||
         stable_kenengd.message.syllables !=
             std::vector<std::string>{"ke", "neng", "d"} ||
+        !double_initial_first.validation ||
+        double_initial_first.message.candidate_consumed !=
+            std::vector<std::uint64_t>{2, 2, 2, 1, 1} ||
+        !double_initial_second.validation ||
+        double_initial_second.message.candidate_consumed !=
+            std::vector<std::uint64_t>{2, 2, 2, 1, 1} ||
         !correction_disabled.validation ||
         correction_disabled.message.type != owo::protocol::MessageType::candidate_response ||
         correction_disabled.message.correction_enabled ||

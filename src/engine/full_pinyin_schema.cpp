@@ -95,12 +95,20 @@ struct ChunkPath {
     bool incomplete{};
 };
 
-std::size_t internal_vowel_initials(const ChunkPath& path) {
-    constexpr std::string_view vowels = "aeiouv";
+std::size_t unlikely_internal_vowel_syllables(const ChunkPath& path) {
+    // Unseparated a-family syllables are common intentional boundaries:
+    // wanan -> wan'an, nanan -> nan'an, xingan -> xing'an. Penalising every
+    // vowel-leading segment moved the final n/ng to the following syllable.
+    // Standalone e/o-family readings are uncommon in compact multi-syllable
+    // input, however, and retaining a small penalty for them preserves
+    // keneng -> ke'neng instead of ken'eng.
+    constexpr std::array<std::string_view, 7> unlikely{
+        "e", "ei", "en", "eng", "er", "o", "ou"};
     std::size_t count = 0;
     for (std::size_t index = 1; index < path.syllables.size(); ++index) {
         const auto& text = path.syllables[index].text;
-        if (!text.empty() && vowels.find(text.front()) != std::string_view::npos) ++count;
+        if (std::find(unlikely.begin(), unlikely.end(), text) != unlikely.end())
+            ++count;
     }
     return count;
 }
@@ -109,9 +117,9 @@ bool chunk_path_less(const ChunkPath& left, const ChunkPath& right) {
     if (left.incomplete != right.incomplete) return !left.incomplete;
     if (left.syllables.size() != right.syllables.size())
         return left.syllables.size() < right.syllables.size();
-    const auto left_vowels = internal_vowel_initials(left);
-    const auto right_vowels = internal_vowel_initials(right);
-    if (left_vowels != right_vowels) return left_vowels < right_vowels;
+    const auto left_unlikely = unlikely_internal_vowel_syllables(left);
+    const auto right_unlikely = unlikely_internal_vowel_syllables(right);
+    if (left_unlikely != right_unlikely) return left_unlikely < right_unlikely;
     return false;
 }
 
