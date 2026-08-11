@@ -1,0 +1,20 @@
+[package]
+name = "owo-agent-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+owo-agent-core.workspace = true
+owo-agent-server.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+axum.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "owo-agent"
+path = "src/main.rs"

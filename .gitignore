@@ -1,6 +1,7 @@
 /build/
 /out/
 /artifacts/
+target/
 /.vs/
 /.vscode/
 CMakeUserPresets.json
