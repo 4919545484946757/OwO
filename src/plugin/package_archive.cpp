@@ -154,9 +154,144 @@ void append_u64(std::vector<unsigned char>& output, const std::uint64_t value) {
     append_u32(output, static_cast<std::uint32_t>(value >> 32U));
 }
 
+std::uint32_t crc32(const std::span<const unsigned char> data) {
+    std::uint32_t crc = 0xffffffffU;
+    for (const auto byte : data) {
+        crc ^= byte;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1U) ^ (0xedb88320U & (0U - (crc & 1U)));
+    }
+    return ~crc;
+}
+
+bool finalize_inventory(PackageInspection& result) {
+    std::vector<const PackageEntry*> canonical_entries;
+    for (const auto& entry : result.entries) {
+        if (entry.path != "signature.json") canonical_entries.push_back(&entry);
+    }
+    std::sort(canonical_entries.begin(), canonical_entries.end(), [](const auto* left,
+                                                                      const auto* right) {
+        return left->path < right->path;
+    });
+    std::vector<unsigned char> canonical;
+    constexpr std::array<unsigned char, 22> domain{'O','w','O','P','a','c','k','a','g','e','I','n','v','e','n','t','o','r','y','V','1',0};
+    canonical.insert(canonical.end(), domain.begin(), domain.end());
+    append_u32(canonical, static_cast<std::uint32_t>(canonical_entries.size()));
+    for (const auto* entry : canonical_entries) {
+        append_u32(canonical, static_cast<std::uint32_t>(entry->path.size()));
+        canonical.insert(canonical.end(), entry->path.begin(), entry->path.end());
+        append_u16(canonical, entry->compression_method);
+        append_u32(canonical, entry->crc32);
+        append_u64(canonical, entry->compressed_size);
+        append_u64(canonical, entry->uncompressed_size);
+        canonical.insert(canonical.end(), entry->compressed_sha256.begin(),
+                         entry->compressed_sha256.end());
+    }
+    result.inventory_sha256 = sha256(canonical);
+    return !result.inventory_sha256.empty();
+}
+
+std::string generic_utf8(const std::filesystem::path& path) {
+    const auto encoded = path.generic_u8string();
+    return {reinterpret_cast<const char*>(encoded.data()), encoded.size()};
+}
+
+PackageInspection inspect_directory(const std::filesystem::path& source_path) {
+    std::error_code error;
+    const auto source = std::filesystem::absolute(source_path, error).lexically_normal();
+    if (error || source.empty() || !std::filesystem::is_directory(source, error) || error)
+        return failure("plugin folder does not exist or is not a directory");
+#ifdef _WIN32
+    const auto root_attributes = GetFileAttributesW(source.c_str());
+    if (root_attributes == INVALID_FILE_ATTRIBUTES ||
+        (root_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        return failure("plugin folder root must not be a reparse point");
+#endif
+
+    std::vector<std::pair<std::string, std::filesystem::path>> files;
+    std::set<std::string> normalized_paths;
+    std::filesystem::recursive_directory_iterator iterator(
+        source, std::filesystem::directory_options::none, error);
+    const std::filesystem::recursive_directory_iterator end;
+    while (!error && iterator != end) {
+        const auto path = iterator->path();
+#ifdef _WIN32
+        const auto attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+            return failure("cannot inspect plugin folder entry");
+        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            return failure("plugin folders must not contain reparse points or symbolic links");
+#endif
+        if (iterator->is_directory(error)) {
+            if (error) return failure("cannot inspect plugin folder directory");
+        } else if (iterator->is_regular_file(error)) {
+            if (error) return failure("cannot inspect plugin folder file");
+            const auto relative = path.lexically_relative(source);
+            const auto package_path = generic_utf8(relative);
+            if (!safe_package_path(package_path))
+                return failure("unsafe plugin folder path: " + package_path);
+            const auto normalized = ascii_lower(package_path);
+            if (!normalized_paths.insert(normalized).second)
+                return failure("duplicate Windows-normalized plugin folder path: " + package_path);
+            files.emplace_back(package_path, path);
+            if (files.size() > kMaximumEntries)
+                return failure("plugin folder contains too many files");
+        } else {
+            return failure("plugin folders may contain only regular files and directories");
+        }
+        iterator.increment(error);
+    }
+    if (error) return failure("cannot enumerate plugin folder exactly");
+    if (files.empty()) return failure("plugin folder is empty");
+    std::sort(files.begin(), files.end(), [](const auto& left, const auto& right) {
+        return left.first < right.first;
+    });
+
+    auto snapshot = std::make_shared<std::vector<unsigned char>>();
+    PackageInspection result{true, {}, 0, {}, {}, snapshot, {}};
+    result.entries.reserve(files.size());
+    bool has_manifest = false;
+    for (const auto& [package_path, path] : files) {
+        const auto file_size = std::filesystem::file_size(path, error);
+        if (error || file_size > kMaximumFileBytes ||
+            result.total_uncompressed_size > kMaximumExpandedBytes - file_size)
+            return failure("plugin folder expanded size limit exceeded");
+        if (file_size > std::numeric_limits<std::size_t>::max())
+            return failure("plugin folder file is too large for this process");
+        const auto data_offset = snapshot->size();
+        snapshot->resize(data_offset + static_cast<std::size_t>(file_size));
+        std::ifstream input(path, std::ios::binary);
+        if (!input) return failure("cannot open plugin folder file: " + package_path);
+        input.read(reinterpret_cast<char*>(snapshot->data() + data_offset),
+                   static_cast<std::streamsize>(file_size));
+        if (!input || input.peek() != std::char_traits<char>::eof())
+            return failure("cannot snapshot plugin folder file exactly: " + package_path);
+        const auto data = std::span<const unsigned char>(*snapshot).subspan(
+            data_offset, static_cast<std::size_t>(file_size));
+        const auto digest = sha256(data);
+        if (digest.empty()) return failure("SHA-256 is unavailable");
+        result.entries.push_back({package_path, 0, crc32(data), file_size, file_size,
+                                  digest, data_offset});
+        result.total_uncompressed_size += file_size;
+        if (package_path == "manifest.json") has_manifest = true;
+        if (package_path == "signature.json") {
+            if (file_size == 0 || file_size > 32U * 1024U)
+                return failure("signature.json must be non-empty and no larger than 32768 bytes");
+            result.embedded_signature_json.assign(
+                reinterpret_cast<const char*>(data.data()), data.size());
+        }
+    }
+    if (!has_manifest) return failure("root manifest.json is required");
+    if (!finalize_inventory(result)) return failure("cannot hash canonical plugin folder inventory");
+    return result;
+}
+
 }  // namespace
 
 PackageInspection inspect_package(const std::filesystem::path& package_path) {
+    std::error_code source_error;
+    if (std::filesystem::is_directory(package_path, source_error) && !source_error)
+        return inspect_directory(package_path);
     std::error_code error;
     const auto file_size = std::filesystem::file_size(package_path, error);
     if (error || file_size < 22 || file_size > kMaximumPackageBytes)
@@ -280,29 +415,7 @@ PackageInspection inspect_package(const std::filesystem::path& package_path) {
     }
     if (cursor != eocd) return failure("central-directory size does not match entries");
     if (!has_manifest) return failure("root manifest.json is required");
-    std::vector<const PackageEntry*> canonical_entries;
-    for (const auto& entry : result.entries) {
-        if (entry.path != "signature.json") canonical_entries.push_back(&entry);
-    }
-    std::sort(canonical_entries.begin(), canonical_entries.end(), [](const auto* left, const auto* right) {
-        return left->path < right->path;
-    });
-    std::vector<unsigned char> canonical;
-    constexpr std::array<unsigned char, 22> domain{'O','w','O','P','a','c','k','a','g','e','I','n','v','e','n','t','o','r','y','V','1',0};
-    canonical.insert(canonical.end(), domain.begin(), domain.end());
-    append_u32(canonical, static_cast<std::uint32_t>(canonical_entries.size()));
-    for (const auto* entry : canonical_entries) {
-        append_u32(canonical, static_cast<std::uint32_t>(entry->path.size()));
-        canonical.insert(canonical.end(), entry->path.begin(), entry->path.end());
-        append_u16(canonical, entry->compression_method);
-        append_u32(canonical, entry->crc32);
-        append_u64(canonical, entry->compressed_size);
-        append_u64(canonical, entry->uncompressed_size);
-        canonical.insert(canonical.end(), entry->compressed_sha256.begin(),
-                         entry->compressed_sha256.end());
-    }
-    result.inventory_sha256 = sha256(canonical);
-    if (result.inventory_sha256.empty()) return failure("cannot hash canonical package inventory");
+    if (!finalize_inventory(result)) return failure("cannot hash canonical package inventory");
     return result;
 }
 

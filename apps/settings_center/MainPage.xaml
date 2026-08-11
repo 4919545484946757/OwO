@@ -115,8 +115,10 @@
                            TextWrapping="Wrap"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <StackPanel Orientation="Horizontal" Spacing="12">
-                    <Button x:Name="PluginInstallButton" Content="安装插件包…"
+                    <Button x:Name="PluginInstallButton" Content="安装压缩包…"
                             Click="PluginInstallButton_Click" />
+                    <Button x:Name="PluginInstallFolderButton" Content="安装文件夹…"
+                            Click="PluginInstallFolderButton_Click" />
                     <Button x:Name="PluginReloadButton" Content="刷新插件状态"
                             Click="PluginReloadButton_Click" />
                 </StackPanel>

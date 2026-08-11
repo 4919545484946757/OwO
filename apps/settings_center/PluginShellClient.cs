@@ -38,6 +38,13 @@ internal static class PluginUiText
     };
 
     internal static string Permission(string value) => value switch {
+        "candidate.transform" => "候选词变换",
+        "config.read" => "读取插件配置",
+        "config.write" => "修改插件配置",
+        "notification.show" => "显示系统通知",
+        "resource.model.install" => "安装模型包",
+        "resource.sound.install" => "安装声音包",
+        "ui.settings_page" => "提供设置页面",
         "clipboard.read" => "读取剪贴板", "clipboard.write" => "写入剪贴板",
         "input.context" => "读取输入上下文", "input.commit" => "提交文本",
         "input.replace" => "替换用户文本", "network.client" => "访问网络",

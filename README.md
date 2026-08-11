@@ -86,7 +86,7 @@ Core 默认热加载 `%LOCALAPPDATA%\OwO\InputMethod\config\owo.conf`，与设�
 .\scripts\build_settings_center.ps1 -Configuration Release
 ```
 
-开发运行时可设置 `OWO_CONFIG_SHELL_PATH` 指向 `owo_config_shell.exe`，并用 `OWO_CONFIG_PATH` 覆盖默认的 `%LOCALAPPDATA%\OwO\InputMethod\config\owo.conf`。插件管理后端可用 `OWO_PLUGIN_SHELL_PATH` 覆盖，测试仓库可用 `OWO_PLUGIN_STORE_PATH` 覆盖默认的 `%LOCALAPPDATA%\OwO\InputMethod\plugins`。设置中心会先预检 `.owopkg`：受信低风险包确认后安装并启用；第三方、未验证或高权限包必须完成双重知情授权，安装后保持停用，且可逐版本撤销权限。设置中心缺失不影响输入主链路。
+开发运行时可设置 `OWO_CONFIG_SHELL_PATH` 指向 `owo_config_shell.exe`，并用 `OWO_CONFIG_PATH` 覆盖默认的 `%LOCALAPPDATA%\OwO\InputMethod\config\owo.conf`。插件管理后端可用 `OWO_PLUGIN_SHELL_PATH` 覆盖，测试仓库可用 `OWO_PLUGIN_STORE_PATH` 覆盖默认的 `%LOCALAPPDATA%\OwO\InputMethod\plugins`。设置中心会先预检 `.owopkg`、`.zip` 或插件文件夹：受信低风险包确认后安装并启用；第三方、未验证或高权限包必须完成双重知情授权，安装后保持停用，且可逐版本撤销权限。设置中心缺失不影响输入主链路。插件格式、标准服务和权限接口见 [插件 API v1 开发指南](docs/plugins/development.md)。
 
 候选翻页支持 `PageUp`/`PageDown`、紧凑键盘上的 `[`/`]` 和窗口内前后翻页按钮；候选可直接鼠标点击上屏，展开按钮以三列表格显示当前页全部候选。单引号可显式指定音节边界。Core 同时返回整段候选和可消费输入前缀的词语候选；选择前缀候选后只移除对应拼音，并立即为剩余拼音重新生成候选。
 

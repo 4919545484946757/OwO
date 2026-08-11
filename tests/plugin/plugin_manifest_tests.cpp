@@ -57,5 +57,16 @@ int main(const int argc, char** argv) {
     network.replace(network.find("\"network\":false"),
         std::string("\"network\":false").size(), "\"network\":true");
     if (!owo::plugin::parse_manifest(network).ok) return 19;
+    auto extension_api = valid;
+    extension_api.replace(extension_api.find("\"permissions\":[]"),
+        std::string("\"permissions\":[]").size(),
+        "\"permissions\":[\"candidate.transform\",\"config.read\",\"ui.settings_page\"]");
+    if (!owo::plugin::parse_manifest(extension_api).ok) return 20;
+    auto model_resource = valid;
+    model_resource.replace(model_resource.find("\"permissions\":[]"),
+        std::string("\"permissions\":[]").size(),
+        "\"permissions\":[\"resource.model.install\",\"system.full_trust\"]");
+    if (!owo::plugin::parse_manifest(model_resource).ok ||
+        !rejected(model_resource, ",\"system.full_trust\"", "")) return 21;
     return 0;
 }

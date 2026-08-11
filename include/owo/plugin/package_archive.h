@@ -31,7 +31,8 @@ struct PackageInspection {
     std::string diagnostic;
 };
 
-/// Preflights a bounded ZIP-compatible .owopkg without extracting or executing its contents.
+/// Snapshots and preflights a bounded ZIP-compatible archive or a local directory without
+/// executing its contents. Directory reparse points and symbolic links are rejected.
 [[nodiscard]] PackageInspection inspect_package(const std::filesystem::path& package_path);
 
 }  // namespace owo::plugin

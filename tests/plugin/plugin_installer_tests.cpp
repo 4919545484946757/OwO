@@ -153,6 +153,41 @@ int main(const int argc, char** argv) {
             authorization.value, preview.manifest, preview.inventory_sha256,
             std::string(64, '0'), "system.full_trust")) return 15;
 
+    const auto folder_path = package_path.wstring() + L".folder";
+    const auto folder_store = store_root.wstring() + L"-folder";
+    std::filesystem::remove_all(folder_path, error);
+    std::filesystem::remove_all(folder_store, error);
+    std::filesystem::create_directories(
+        std::filesystem::path(folder_path) / "bin", error);
+    if (error) return 17;
+    auto folder_manifest = manifest;
+    const auto version_position = folder_manifest.find("\"version\":\"1.0.0\"");
+    folder_manifest.replace(version_position, std::string("\"version\":\"1.0.0\"").size(),
+                            "\"version\":\"2.0.0\"");
+    {
+        std::ofstream manifest_file(std::filesystem::path(folder_path) / "manifest.json",
+                                    std::ios::binary);
+        std::ofstream executable(std::filesystem::path(folder_path) / "bin" / "plugin.exe",
+                                 std::ios::binary);
+        std::ofstream schema(std::filesystem::path(folder_path) / "config.schema.json",
+                             std::ios::binary);
+        manifest_file << folder_manifest;
+        executable << "MZ";
+        schema << "{}";
+    }
+    const auto folder_preview = owo::plugin::inspect_plugin_install(folder_path);
+    if (!folder_preview.ok || folder_preview.manifest.version != "2.0.0" ||
+        !folder_preview.requires_risk_consent) return 18;
+    consent.inventory_sha256 = folder_preview.inventory_sha256;
+    consent.granted_permissions = folder_preview.manifest.permissions;
+    const auto folder_installed = owo::plugin::install_plugin_package(
+        folder_path, folder_store, consent);
+    if (!folder_installed.ok || folder_installed.activated ||
+        !std::filesystem::is_regular_file(folder_installed.installed_path /
+                                          "bin" / "plugin.exe")) return 19;
+    std::filesystem::remove_all(folder_path, error);
+    std::filesystem::remove_all(folder_store, error);
+
     std::filesystem::remove(package_path, error);
     if (error) return 11;
     return 0;

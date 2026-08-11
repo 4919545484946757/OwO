@@ -318,30 +318,51 @@ public sealed partial class MainPage : Page
             ViewMode = PickerViewMode.List,
         };
         picker.FileTypeFilter.Add(".owopkg");
+        picker.FileTypeFilter.Add(".zip");
         var window = ((App)Microsoft.UI.Xaml.Application.Current).MainWindow;
         WinRT.Interop.InitializeWithWindow.Initialize(
             picker, WinRT.Interop.WindowNative.GetWindowHandle(window));
         var package = await picker.PickSingleFileAsync();
         if (package is null) return;
+        await InstallPluginSourceAsync(package.Name, package.Path);
+    }
 
+    private async void PluginInstallFolderButton_Click(
+        object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        var picker = new FolderPicker {
+            SuggestedStartLocation = PickerLocationId.Downloads,
+            ViewMode = PickerViewMode.List,
+        };
+        picker.FileTypeFilter.Add("*");
+        var window = ((App)Microsoft.UI.Xaml.Application.Current).MainWindow;
+        WinRT.Interop.InitializeWithWindow.Initialize(
+            picker, WinRT.Interop.WindowNative.GetWindowHandle(window));
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null) return;
+        await InstallPluginSourceAsync(folder.Name, folder.Path);
+    }
+
+    private async Task InstallPluginSourceAsync(string sourceName, string sourcePath)
+    {
         SetBusy(true);
         try {
-            var preview = await _pluginClient.InspectInstallAsync(package.Path);
+            var preview = await _pluginClient.InspectInstallAsync(sourcePath);
             PluginInstallSnapshot result;
             if (preview.RequiresRiskConsent) {
                 SetBusy(false);
-                if (!await ConfirmRiskInstallAsync(package.Name, package.Path, preview)) return;
+                if (!await ConfirmRiskInstallAsync(sourceName, sourcePath, preview)) return;
                 SetBusy(true);
-                result = await _pluginClient.InstallRiskAsync(package.Path, preview.InventorySha256);
+                result = await _pluginClient.InstallRiskAsync(sourcePath, preview.InventorySha256);
             } else {
                 SetBusy(false);
-                var message = $"{package.Name}\n{package.Path}\n\n"
+                var message = $"{sourceName}\n{sourcePath}\n\n"
                     + $"插件：{preview.Name} {preview.Version}（{preview.PluginId}）\n"
                     + $"发布者：{PluginUiText.Trust(preview.TrustTier)}\n"
                     + "系统将重新核对精确包摘要，随后原子安装并立即启用。";
                 if (!await ConfirmAsync("安装插件包", message, "验证并安装")) return;
                 SetBusy(true);
-                result = await _pluginClient.InstallAsync(package.Path);
+                result = await _pluginClient.InstallAsync(sourcePath);
             }
             await LoadPluginsAsync();
             var publisher = string.IsNullOrWhiteSpace(result.PublisherDisplayName)
