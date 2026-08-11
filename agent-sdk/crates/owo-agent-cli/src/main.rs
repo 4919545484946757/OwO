@@ -5,8 +5,9 @@ use owo_agent_core::permissions::{Approver, AutoApprover, Decision, PermissionRe
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
-    export_html, export_markdown, Agent, AgentConfig, McpClient, McpServerConfig,
-    OpenAiCompatibleConfig, OpenAiCompatibleProvider, SkillRegistry, SqliteSessionStore, TurnEvent,
+    builtin_suite, eval_suite_path, export_html, export_markdown, run_suite, Agent, AgentConfig,
+    McpClient, McpServerConfig, OpenAiCompatibleConfig, OpenAiCompatibleProvider, SkillRegistry,
+    SqliteSessionStore, TurnEvent,
 };
 use rustyline::error::ReadlineError;
 use std::future::Future;
@@ -57,6 +58,8 @@ enum Commands {
     Tui(tui::TuiArgs),
     /// 生成 AGENTS.md 项目规则文件
     Init(InitArgs),
+    /// 运行评估套件（内置 demo 或自定义 JSON）
+    Eval(EvalArgs),
 }
 
 #[derive(Args)]
@@ -106,6 +109,15 @@ struct InitArgs {
     force: bool,
 }
 
+#[derive(Args)]
+struct EvalArgs {
+    /// 自定义套件 JSON 路径（缺省使用内置 demo 套件）
+    #[arg(long)]
+    suite: Option<PathBuf>,
+    #[arg(long)]
+    model: Option<String>,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -127,7 +139,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Repl(args)) => run_async(Repl::run(args))?,
         Some(Commands::Tui(args)) => tui::run(args)?,
         Some(Commands::Init(args)) => run_init(args)?,
+        Some(Commands::Eval(args)) => run_async(run_eval(args))?,
     }
+    Ok(())
+}
+
+async fn run_eval(args: EvalArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let model = resolve_model(args.model);
+    let mut config = OpenAiCompatibleConfig::from_env()?;
+    config.model = model.clone();
+    let provider = std::sync::Arc::new(OpenAiCompatibleProvider::new(config)?);
+    let suite = match args.suite {
+        Some(path) => {
+            eval_suite_path(&path).ok_or_else(|| format!("评估套件解析失败：{}", path.display()))?
+        }
+        None => builtin_suite(),
+    };
+    println!(
+        "运行评估套件：{}（{} 个用例）",
+        suite.name,
+        suite.cases.len()
+    );
+    let report = run_suite(provider, &model, &suite).await;
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

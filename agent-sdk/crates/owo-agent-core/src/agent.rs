@@ -101,6 +101,10 @@ impl Agent {
         &self.skills
     }
 
+    pub fn provider(&self) -> Arc<dyn ModelProvider> {
+        Arc::clone(&self.provider)
+    }
+
     pub fn audit_log(&self) -> Arc<Mutex<AuditLog>> {
         Arc::clone(&self.audit)
     }

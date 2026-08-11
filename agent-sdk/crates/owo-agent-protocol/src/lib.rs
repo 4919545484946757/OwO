@@ -36,6 +36,11 @@ pub struct RewindRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalRunRequest {
+    pub suite_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionResponse {
     pub allow: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

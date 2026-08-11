@@ -5,6 +5,7 @@ pub mod agent;
 pub mod audit;
 pub mod context;
 pub mod error;
+pub mod eval;
 pub mod gateway;
 pub mod mcp;
 pub mod permissions;
@@ -18,6 +19,7 @@ pub mod tools;
 pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
 pub use audit::{AuditEntry, AuditLog};
 pub use error::AgentError;
+pub use eval::{builtin_suite, eval_suite_path, run_suite, EvalCase, EvalReport, EvalSuite};
 pub use gateway::{
     ChatMessage, ModelOutput, ModelProvider, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     ToolCall,

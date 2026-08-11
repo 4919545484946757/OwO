@@ -10,8 +10,8 @@ use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::Agent;
 use owo_agent_protocol::{
-    CreateSessionRequest, FileDiff, ForkRequest, HealthResponse, PermissionResponse, RewindRequest,
-    SessionInfo, SseEvent, TurnRequest,
+    CreateSessionRequest, EvalRunRequest, FileDiff, ForkRequest, HealthResponse,
+    PermissionResponse, RewindRequest, SessionInfo, SseEvent, TurnRequest,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -58,6 +58,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/redo", post(redo_session))
         .route("/session/{id}/children", get(children))
         .route("/session/{id}/export/{format}", get(export_session))
+        .route("/eval/run", post(run_eval))
         .with_state(state)
 }
 
@@ -343,6 +344,25 @@ async fn export_session(
         body,
     )
         .into_response())
+}
+
+async fn run_eval(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<EvalRunRequest>,
+) -> Result<Json<owo_agent_core::EvalReport>, (StatusCode, String)> {
+    let suite = match request.suite_id.as_str() {
+        "builtin" | "builtin-demo" => owo_agent_core::builtin_suite(),
+        _ => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("未知评估套件：{}", request.suite_id),
+            ))
+        }
+    };
+    let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.1-codex".to_string());
+    let provider = state.agent.provider();
+    let report = owo_agent_core::run_suite(provider, &model, &suite).await;
+    Ok(Json(report))
 }
 
 struct ChannelApprover {

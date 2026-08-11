@@ -94,9 +94,10 @@ cargo run -p owo-agent-cli -- serve --port 4096
 - 会话 fork/redo：`/fork [消息序号]` 派生子会话（parent/fork_point 持久化）、`/rewind <条数>` 回退历史并撤销文件改动、`/redo` 恢复、`/tree` 查看会话树；HTTP 服务同步提供对应端点。
 - 会话分享：`/share [html]` 导出自包含 Markdown/HTML 会话记录（`<data>/shares/`），HTTP 端点 `GET /session/{id}/export/{md|html}`。
 - SQLite 存储：会话默认持久化到 `<data>/index.db`（rusqlite bundled），跨进程可恢复；JSON 存储保留用于测试/兼容。
+- Evals：内置 5 用例演示套件（读/写/列目录/搜索/子代理），临时工作区隔离，输出成功率/耗时报告；`owo-agent eval` 与 HTTP `POST /eval/run`。
 - 交互式 CLI：build/plan 模式、会话、diff/undo、审批、审计、AGENTS.md 初始化。
 
 ## 尚未实现（M2+）
 
-- AGENTS.md 已注入；审计/用量入库（FTS5/向量索引）为后续增强。
+- AGENTS.md 已注入；审计/用量入库（FTS5/向量索引）、桌面工作台、云执行为后续阶段。
 - 上下文压缩（仅截断）、SQLite 存储、云执行、沙箱 OS 隔离、traces/evals 平台。
