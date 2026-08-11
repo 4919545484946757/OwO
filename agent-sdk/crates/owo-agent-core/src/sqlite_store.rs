@@ -1,5 +1,6 @@
 //! SQLite 会话存储：`<appdata>/index.db`（对应技术文档 5.7）。
 
+use crate::audit::AuditEntry;
 use crate::error::AgentError;
 use crate::session::{Session, SessionStore, SnapshotEntry};
 use rusqlite::{params, Connection};
@@ -188,6 +189,44 @@ impl SessionStore for SqliteSessionStore {
     }
 }
 
+impl SqliteSessionStore {
+    /// 追加审计记录（回合结束后调用）。
+    pub fn append_audit(&self, session_id: &str, entries: &[AuditEntry]) -> Result<(), AgentError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| AgentError::Session("SQLite 锁中毒".into()))?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS audit (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 ts TEXT NOT NULL,
+                 session_id TEXT NOT NULL,
+                 event TEXT NOT NULL,
+                 tool TEXT,
+                 approved INTEGER,
+                 detail TEXT NOT NULL
+             );",
+        )
+        .map_err(sqlite_error)?;
+        for entry in entries {
+            conn.execute(
+                "INSERT INTO audit (ts, session_id, event, tool, approved, detail)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    entry.ts,
+                    session_id,
+                    entry.event,
+                    entry.tool,
+                    entry.approved.map(|approved| approved as i64),
+                    entry.detail,
+                ],
+            )
+            .map_err(sqlite_error)?;
+        }
+        Ok(())
+    }
+}
+
 fn sqlite_error(error: rusqlite::Error) -> AgentError {
     AgentError::Session(format!("SQLite 错误：{error}"))
 }
@@ -257,6 +296,30 @@ mod tests {
         let loaded = store.load("legacy").unwrap();
         assert!(loaded.message_redo_stack.is_empty());
         assert_eq!(loaded.model, "mock");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn appends_audit_entries_to_sqlite() {
+        let path =
+            std::env::temp_dir().join(format!("owo-sqlite-audit-{}.db", uuid::Uuid::new_v4()));
+        let store = SqliteSessionStore::open(&path).unwrap();
+        let entry = AuditEntry {
+            ts: "2026-08-11T00:00:00Z".to_string(),
+            session_id: "s1".to_string(),
+            event: "tool_call".to_string(),
+            tool: Some("read_file".to_string()),
+            approved: None,
+            detail: "ok".to_string(),
+        };
+        store.append_audit("s1", &[entry]).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));

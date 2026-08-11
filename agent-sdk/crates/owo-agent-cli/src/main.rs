@@ -6,9 +6,9 @@ use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
     builtin_suite, discover_plugins, eval_suite_path, export_html, export_markdown, list_traces,
-    load_trace, run_suite, save_trace, Agent, AgentConfig, McpClient, McpServerConfig,
-    OpenAiCompatibleConfig, OpenAiCompatibleProvider, PluginManifest, Settings, SkillRegistry,
-    SqliteSessionStore, TraceRecord, TurnEvent,
+    load_trace, run_suite, save_trace, Agent, AgentConfig, ChatMessage, McpClient, McpServerConfig,
+    ModelOutput, ModelProvider, OpenAiCompatibleConfig, OpenAiCompatibleProvider, PluginManifest,
+    Settings, SkillRegistry, SqliteSessionStore, ToolSpec, TraceRecord, TurnEvent,
 };
 use rustyline::error::ReadlineError;
 use std::future::Future;
@@ -61,6 +61,8 @@ enum Commands {
     Init(InitArgs),
     /// 运行评估套件（内置 demo 或自定义 JSON）
     Eval(EvalArgs),
+    /// 本机 IPC 往返延迟基准
+    Bench(BenchArgs),
 }
 
 #[derive(Args)]
@@ -119,6 +121,12 @@ struct EvalArgs {
     model: Option<String>,
 }
 
+#[derive(Args)]
+struct BenchArgs {
+    #[arg(long, default_value_t = 200)]
+    requests: usize,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -141,6 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Tui(args)) => tui::run(args)?,
         Some(Commands::Init(args)) => run_init(args)?,
         Some(Commands::Eval(args)) => run_async(run_eval(args))?,
+        Some(Commands::Bench(args)) => run_async(run_bench(args))?,
     }
     Ok(())
 }
@@ -163,6 +172,62 @@ async fn run_eval(args: EvalArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     let report = run_suite(provider, &model, &suite).await;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+struct StubProvider;
+
+#[async_trait]
+impl ModelProvider for StubProvider {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        Err("bench stub".to_string())
+    }
+}
+
+async fn run_bench(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = std::sync::Arc::new(StubProvider);
+    let registry = ToolRegistry::new();
+    let policy = Policy::new(std::env::temp_dir());
+    let agent = Agent::new(provider, registry, policy, AgentConfig::default());
+    let root = std::env::temp_dir().join(format!("owo-bench-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root)?;
+    let store = SqliteSessionStore::open(&root.join("index.db"))?;
+    let state = Arc::new(owo_agent_server::AppState::new(
+        agent,
+        store,
+        root.join("traces"),
+    ));
+    let app = owo_agent_server::build_router(state);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let client = reqwest::Client::new();
+    let mut durations = Vec::new();
+    for _ in 0..args.requests {
+        let start = std::time::Instant::now();
+        let response = client.get(format!("http://{addr}/health")).send().await?;
+        assert_eq!(response.status().as_u16(), 200);
+        durations.push(start.elapsed().as_micros() as u64);
+    }
+    durations.sort_unstable();
+    let p50 = durations[durations.len() / 2];
+    let index95 = ((durations.len() as f64 * 0.95) as usize).saturating_sub(1);
+    let p95 = durations[index95].max(p50);
+    println!(
+        "{}",
+        serde_json::json!({
+            "requests": durations.len(),
+            "p50_us": p50,
+            "p95_us": p95,
+            "max_us": durations.last().copied().unwrap_or(0),
+        })
+    );
+    server.abort();
+    let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
 
@@ -366,6 +431,14 @@ async fn run_turn(args: TurnArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(path) = save_trace(&root.join("traces"), &trace) {
         println!("[trace] {}", display_path(&path));
     }
+    let audit_entries = agent
+        .audit_log()
+        .lock()
+        .map(|guard| guard.entries.clone())
+        .unwrap_or_default();
+    if let Ok(store) = SqliteSessionStore::open(&root.join("index.db")) {
+        let _ = store.append_audit(&session.id, &audit_entries);
+    }
     Ok(())
 }
 
@@ -519,6 +592,7 @@ struct Repl {
     skills: SkillRegistry,
     settings: Settings,
     plugins: Vec<PluginManifest>,
+    audit_flushed: usize,
 }
 
 impl Repl {
@@ -567,6 +641,7 @@ impl Repl {
             skills,
             settings,
             plugins,
+            audit_flushed: 0,
         };
 
         println!(
@@ -717,7 +792,12 @@ impl Repl {
                 "diff" => self.show_diff(),
                 "undo" | "revert" => self.undo().await?,
                 "mcp" => self.handle_mcp(command).await?,
-                "skills" => self.list_skills(),
+                "skills" => match parts.next() {
+                    Some("reload") => {
+                        self.reload_skills()?;
+                    }
+                    _ => self.list_skills(),
+                },
                 "fork" => self.fork_session(parts.next()).await?,
                 "rewind" => {
                     let keep = parts.next().ok_or("用法：/rewind <保留消息数>")?;
@@ -772,6 +852,7 @@ impl Repl {
     }
 
     fn rebuild_agent(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.audit_flushed = 0;
         self.agent = Arc::new(build_agent_with_mcp(
             &self.workspace,
             &self.model,
@@ -795,6 +876,17 @@ impl Repl {
         for skill in skills {
             println!("{}：{}", skill.name.cyan(), skill.description);
         }
+    }
+
+    fn reload_skills(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.skills = SkillRegistry::discover(&self.workspace, &self.data_root);
+        self.rebuild_agent()?;
+        println!(
+            "{} 已重新加载 {} 个技能",
+            "✓".green(),
+            self.skills.list().len()
+        );
+        Ok(())
     }
 
     async fn handle_mcp(&mut self, command: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1327,6 +1419,20 @@ impl Repl {
             TraceRecord::from_outcome(self.session.as_ref().expect("session saved"), &outcome);
         if let Ok(path) = save_trace(&self.data_root.join("traces"), &trace) {
             println!("[trace] {}", display_path(&path));
+        }
+        let audit_entries = self
+            .agent
+            .audit_log()
+            .lock()
+            .map(|guard| guard.entries.clone())
+            .unwrap_or_default();
+        if audit_entries.len() > self.audit_flushed {
+            if let Some(session) = &self.session {
+                let _ = self
+                    .store
+                    .append_audit(&session.id, &audit_entries[self.audit_flushed..]);
+            }
+            self.audit_flushed = audit_entries.len();
         }
         println!(
             "{} 工具步数 {}，审计 {} 条，改动 {} 个文件（/diff 查看，/undo 回滚）",

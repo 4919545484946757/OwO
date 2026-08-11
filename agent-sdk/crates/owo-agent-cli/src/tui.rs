@@ -86,6 +86,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         skills,
         settings,
         plugins,
+        0,
     );
     let terminal = ratatui::init();
     let result = app.run(&runtime, terminal);
@@ -153,6 +154,7 @@ struct TuiApp {
     skills: SkillRegistry,
     settings: Settings,
     plugins: Vec<PluginManifest>,
+    audit_flushed: usize,
     theme: Theme,
     keybinds: HashMap<String, KeyEvent>,
 }
@@ -172,6 +174,7 @@ impl TuiApp {
         skills: SkillRegistry,
         settings: Settings,
         plugins: Vec<PluginManifest>,
+        audit_flushed: usize,
     ) -> Self {
         let theme = theme(settings.theme.as_deref());
         let keybinds = build_keybinds(&settings.keybinds);
@@ -205,6 +208,7 @@ impl TuiApp {
             skills,
             settings,
             plugins,
+            audit_flushed,
             theme,
             keybinds,
         }
@@ -542,6 +546,19 @@ impl TuiApp {
                             if let Some(session) = &self.session {
                                 let trace = TraceRecord::from_outcome(session, &outcome);
                                 let _ = save_trace(&self.data_root.join("traces"), &trace);
+                                let audit_entries = self
+                                    .agent
+                                    .audit_log()
+                                    .lock()
+                                    .map(|guard| guard.entries.clone())
+                                    .unwrap_or_default();
+                                if audit_entries.len() > self.audit_flushed {
+                                    let _ = self.store.append_audit(
+                                        &session.id,
+                                        &audit_entries[self.audit_flushed..],
+                                    );
+                                    self.audit_flushed = audit_entries.len();
+                                }
                             }
                             let changed = self
                                 .session
@@ -679,6 +696,7 @@ impl TuiApp {
     }
 
     fn rebuild_agent(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.audit_flushed = 0;
         self.agent = Arc::new(build_agent_with_mcp(
             &self.workspace,
             &self.model,
@@ -763,7 +781,12 @@ impl TuiApp {
                 }
             }
             "mcp" => self.handle_mcp(command, runtime)?,
-            "skills" => self.list_skills(),
+            "skills" => match parts.next() {
+                Some("reload") => {
+                    self.reload_skills()?;
+                }
+                _ => self.list_skills(),
+            },
             "fork" => self.fork_session(parts.next())?,
             "rewind" => {
                 let keep = parts.next().ok_or("用法：/rewind <保留消息数>")?;
@@ -830,6 +853,16 @@ impl TuiApp {
         for (name, description) in skills {
             self.push_line(format!("{name}：{description}"), default());
         }
+    }
+
+    fn reload_skills(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.skills = SkillRegistry::discover(&self.workspace, &self.data_root);
+        self.rebuild_agent()?;
+        self.push_system(
+            format!("已重新加载 {} 个技能", self.skills.list().len()),
+            green(),
+        );
+        Ok(())
     }
 
     fn fork_session(&mut self, index: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -1457,6 +1490,7 @@ mod tests {
             SkillRegistry::default(),
             Settings::default(),
             Vec::new(),
+            0,
         )
     }
 

@@ -1142,6 +1142,7 @@ dependencies = [
  "owo-agent-core",
  "owo-agent-server",
  "ratatui",
+ "reqwest",
  "rustyline",
  "serde_json",
  "tokio",
