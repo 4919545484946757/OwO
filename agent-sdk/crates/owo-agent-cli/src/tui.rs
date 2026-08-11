@@ -143,6 +143,8 @@ struct TuiApp {
     mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
     skills: SkillRegistry,
     settings: Settings,
+    theme: Theme,
+    keybinds: HashMap<String, KeyEvent>,
 }
 
 impl TuiApp {
@@ -160,6 +162,8 @@ impl TuiApp {
         skills: SkillRegistry,
         settings: Settings,
     ) -> Self {
+        let theme = theme(settings.theme.as_deref());
+        let keybinds = build_keybinds(&settings.keybinds);
         Self {
             workspace,
             model,
@@ -187,6 +191,8 @@ impl TuiApp {
             mcp_clients,
             skills,
             settings,
+            theme,
+            keybinds,
         }
     }
 
@@ -229,7 +235,7 @@ impl TuiApp {
                 " OwO Agent ",
                 Style::default()
                     .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .bg(self.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
@@ -301,11 +307,11 @@ impl TuiApp {
         );
 
         let status_line = Line::from(vec![
-            Span::styled(" Tab ", Style::default().fg(Color::Cyan)),
+            Span::styled(" Tab ", Style::default().fg(self.theme.accent)),
             Span::raw("模式 "),
-            Span::styled(" Ctrl+C ", Style::default().fg(Color::Cyan)),
+            Span::styled(" Ctrl+C ", Style::default().fg(self.theme.accent)),
             Span::raw("中止/退出 "),
-            Span::styled(" PgUp/PgDn ", Style::default().fg(Color::Cyan)),
+            Span::styled(" PgUp/PgDn ", Style::default().fg(self.theme.accent)),
             Span::raw("滚动 | "),
             Span::styled(&self.status, Style::default().fg(Color::Yellow)),
         ]);
@@ -328,7 +334,7 @@ impl TuiApp {
             match key.code {
                 KeyCode::Char('y' | 'Y') => self.respond_approval(true),
                 KeyCode::Char('n' | 'N') => self.respond_approval(false),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                _ if self.matches("abort", &key) => {
                     self.abort.store(true, Ordering::Relaxed);
                     self.push_system("正在中止当前回合…".to_string(), yellow());
                 }
@@ -339,23 +345,36 @@ impl TuiApp {
 
         match key.code {
             KeyCode::Enter => self.submit(runtime)?,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            _ if self.matches("abort", &key) => {
                 return Ok(true);
-            }
-            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.transcript.clear();
             }
             KeyCode::Char(c) => self.input.push(c),
             KeyCode::Backspace => {
                 self.input.pop();
             }
-            KeyCode::Tab => self.toggle_mode()?,
             KeyCode::Esc => self.input.clear(),
-            KeyCode::PageUp => self.scroll += 8,
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(8),
             _ => {}
         }
+        if self.matches("toggle_mode", &key) {
+            self.toggle_mode()?;
+        }
+        if self.matches("scroll_up", &key) {
+            self.scroll += 8;
+        }
+        if self.matches("scroll_down", &key) {
+            self.scroll = self.scroll.saturating_sub(8);
+        }
+        if self.matches("clear", &key) {
+            self.transcript.clear();
+        }
         Ok(false)
+    }
+
+    fn matches(&self, action: &str, key: &KeyEvent) -> bool {
+        self.keybinds
+            .get(action)
+            .map(|expected| expected == key)
+            .unwrap_or(false)
     }
 
     fn submit(
@@ -683,6 +702,8 @@ impl TuiApp {
             "traces" => self.list_traces(),
             "trace" => self.show_trace(parts.next())?,
             "settings" => self.show_settings(),
+            "theme" => self.set_theme(parts.next()),
+            "keybinds" => self.show_keybinds(),
             "plan" => {
                 if !self.read_only {
                     self.toggle_mode()?;
@@ -934,6 +955,26 @@ impl TuiApp {
         }
     }
 
+    fn set_theme(&mut self, name: Option<&str>) {
+        let name = name.unwrap_or("dark");
+        self.theme = theme(Some(name));
+        self.push_system(format!("已切换主题：{name}"), green());
+    }
+
+    fn show_keybinds(&mut self) {
+        let mut lines = Vec::new();
+        let mut actions: Vec<&String> = self.keybinds.keys().collect();
+        actions.sort();
+        for action in actions {
+            if let Some(key) = self.keybinds.get(action) {
+                lines.push(format!("{action} = {}", format_key(key)));
+            }
+        }
+        for line in lines {
+            self.push_line(line, default());
+        }
+    }
+
     fn handle_mcp(
         &mut self,
         command: &str,
@@ -1112,6 +1153,7 @@ impl TuiApp {
             "/share [html]  导出会话分享",
             "/traces /trace <n>  回合轨迹",
             "/settings  查看 settings.json",
+            "/theme [dark|light] /keybinds  主题与键位",
             "/model [名称]  查看/切换模型",
             "/plan /build  切换只读/执行模式（或 Tab）",
             "/diff /undo  查看改动 / 回滚",
@@ -1131,6 +1173,115 @@ impl TuiApp {
     fn push_system(&mut self, text: String, style: Style) {
         self.push_line(text, style);
     }
+}
+
+#[derive(Clone, Copy)]
+struct Theme {
+    accent: Color,
+}
+
+fn theme(name: Option<&str>) -> Theme {
+    match name {
+        Some("light") => Theme {
+            accent: Color::Blue,
+        },
+        _ => Theme {
+            accent: Color::Cyan,
+        },
+    }
+}
+
+fn parse_keybind(spec: &str) -> Option<KeyEvent> {
+    let tokens: Vec<&str> = spec.split('+').map(str::trim).collect();
+    let key_token = *tokens.last()?;
+    if key_token.is_empty() {
+        return None;
+    }
+    let mut modifiers = KeyModifiers::NONE;
+    for token in &tokens[..tokens.len().saturating_sub(1)] {
+        match token.to_lowercase().as_str() {
+            "ctrl" | "control" => modifiers.insert(KeyModifiers::CONTROL),
+            "alt" => modifiers.insert(KeyModifiers::ALT),
+            "shift" => modifiers.insert(KeyModifiers::SHIFT),
+            _ => {}
+        }
+    }
+    let lower = key_token.to_lowercase();
+    let code = match lower.as_str() {
+        "tab" => KeyCode::Tab,
+        "enter" => KeyCode::Enter,
+        "esc" => KeyCode::Esc,
+        "backspace" => KeyCode::Backspace,
+        "pageup" => KeyCode::PageUp,
+        "pagedown" => KeyCode::PageDown,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "space" => KeyCode::Char(' '),
+        _ if key_token.len() >= 2 && key_token.starts_with('f') => {
+            let number: u8 = key_token[1..].parse().ok()?;
+            if (1..=12).contains(&number) {
+                KeyCode::F(number)
+            } else {
+                KeyCode::Char(key_token.chars().next()?)
+            }
+        }
+        _ => KeyCode::Char(key_token.chars().next()?),
+    };
+    Some(KeyEvent::new(code, modifiers))
+}
+
+fn build_keybinds(configured: &HashMap<String, String>) -> HashMap<String, KeyEvent> {
+    let defaults = [
+        ("toggle_mode", "tab"),
+        ("abort", "ctrl+c"),
+        ("scroll_up", "pageup"),
+        ("scroll_down", "pagedown"),
+        ("clear", "ctrl+l"),
+    ];
+    let mut map = HashMap::new();
+    for (action, spec) in defaults {
+        if let Some(key) = parse_keybind(spec) {
+            map.insert(action.to_string(), key);
+        }
+    }
+    for (action, spec) in configured {
+        if let Some(key) = parse_keybind(spec) {
+            map.insert(action.clone(), key);
+        }
+    }
+    map
+}
+
+fn format_key(event: &KeyEvent) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if event.modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("ctrl".to_string());
+    }
+    if event.modifiers.contains(KeyModifiers::ALT) {
+        parts.push("alt".to_string());
+    }
+    if event.modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("shift".to_string());
+    }
+    let key = match event.code {
+        KeyCode::Tab => "tab".to_string(),
+        KeyCode::Enter => "enter".to_string(),
+        KeyCode::Esc => "esc".to_string(),
+        KeyCode::Backspace => "backspace".to_string(),
+        KeyCode::PageUp => "pageup".to_string(),
+        KeyCode::PageDown => "pagedown".to_string(),
+        KeyCode::Up => "up".to_string(),
+        KeyCode::Down => "down".to_string(),
+        KeyCode::Left => "left".to_string(),
+        KeyCode::Right => "right".to_string(),
+        KeyCode::F(number) => format!("f{number}"),
+        KeyCode::Char(character) => character.to_string(),
+        other => format!("{other:?}").to_lowercase(),
+    };
+    parts.push(key);
+    parts.join("+")
 }
 
 fn default() -> Style {
@@ -1220,5 +1371,23 @@ mod tests {
         assert_eq!(app.visible_lines(5).last().unwrap().0, "line 19");
         app.scroll = 5;
         assert_eq!(app.visible_lines(5).last().unwrap().0, "line 14");
+    }
+
+    #[test]
+    fn parses_keybind_specs_and_builds_defaults() {
+        let ctrl_c = parse_keybind("ctrl+c").unwrap();
+        assert_eq!(ctrl_c.code, KeyCode::Char('c'));
+        assert!(ctrl_c.modifiers.contains(KeyModifiers::CONTROL));
+        assert_eq!(parse_keybind("f2").unwrap().code, KeyCode::F(2));
+        assert_eq!(parse_keybind("tab").unwrap().code, KeyCode::Tab);
+        assert!(parse_keybind("").is_none());
+        assert!(parse_keybind("+").is_none());
+
+        let mut configured = HashMap::new();
+        configured.insert("toggle_mode".to_string(), "f2".to_string());
+        let binds = build_keybinds(&configured);
+        assert_eq!(binds.get("toggle_mode").unwrap().code, KeyCode::F(2));
+        assert_eq!(binds.get("abort").unwrap().code, KeyCode::Char('c'));
+        assert_eq!(format_key(binds.get("scroll_up").unwrap()), "pageup");
     }
 }

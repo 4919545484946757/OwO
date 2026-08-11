@@ -2,6 +2,14 @@
   "model": "deepseek-v4-pro",
   "read_only": false,
   "deny_commands": ["git push", "shutdown"],
+  "theme": "dark",
+  "keybinds": {
+    "toggle_mode": "tab",
+    "abort": "ctrl+c",
+    "scroll_up": "pageup",
+    "scroll_down": "pagedown",
+    "clear": "ctrl+l"
+  },
   "mcp_servers": [
     {
       "name": "files",

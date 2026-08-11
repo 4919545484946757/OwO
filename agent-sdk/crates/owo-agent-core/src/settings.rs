@@ -2,6 +2,7 @@
 
 use crate::mcp::McpServerConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -18,6 +19,12 @@ pub struct Settings {
     /// 启动时自动连接的 MCP 服务器。
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// TUI 主题：dark / light。
+    #[serde(default)]
+    pub theme: Option<String>,
+    /// TUI 键位：action → 按键描述（如 "tab"、"ctrl+c"、"f2"）。
+    #[serde(default)]
+    pub keybinds: HashMap<String, String>,
 }
 
 impl Settings {
@@ -47,7 +54,9 @@ mod tests {
                 "deny_commands": ["git push"],
                 "mcp_servers": [
                     { "name": "files", "transport": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
-                ]
+                ],
+                "theme": "light",
+                "keybinds": { "toggle_mode": "f2" }
             }"#,
         )
         .unwrap();
@@ -57,6 +66,11 @@ mod tests {
         assert_eq!(settings.deny_commands, vec!["git push"]);
         assert_eq!(settings.mcp_servers.len(), 1);
         assert_eq!(settings.mcp_servers[0].name, "files");
+        assert_eq!(settings.theme.as_deref(), Some("light"));
+        assert_eq!(
+            settings.keybinds.get("toggle_mode").map(String::as_str),
+            Some("f2")
+        );
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
@@ -69,6 +83,8 @@ mod tests {
         assert!(settings.model.is_none());
         assert!(!settings.read_only);
         assert!(settings.deny_commands.is_empty());
+        assert!(settings.theme.is_none());
+        assert!(settings.keybinds.is_empty());
         let _ = std::fs::remove_dir_all(&workspace);
     }
 }
