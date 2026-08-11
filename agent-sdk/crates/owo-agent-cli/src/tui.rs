@@ -107,7 +107,7 @@ impl Approver for TuiApprover {
 
 enum TuiMsg {
     Event(TurnEvent),
-    Finished(Result<(usize, Option<String>), String>, Session),
+    Finished(Result<(usize, Option<String>), String>, Box<Session>),
 }
 
 struct TuiApp {
@@ -414,7 +414,7 @@ impl TuiApp {
             let result = outcome
                 .map(|outcome| (outcome.steps, outcome.final_text))
                 .map_err(|error| error.to_string());
-            let _ = tx.send(TuiMsg::Finished(result, session));
+            let _ = tx.send(TuiMsg::Finished(result, Box::new(session)));
         });
     }
 
@@ -426,7 +426,7 @@ impl TuiApp {
                 Some(TuiMsg::Finished(result, session)) => {
                     self.running = false;
                     self.event_rx = None;
-                    self.session = Some(session);
+                    self.session = Some(*session);
                     if let Some(session) = &self.session {
                         let _ = self.store.save(session);
                     }
@@ -652,6 +652,13 @@ impl TuiApp {
             }
             "mcp" => self.handle_mcp(command, runtime)?,
             "skills" => self.list_skills(),
+            "fork" => self.fork_session(parts.next())?,
+            "rewind" => {
+                let keep = parts.next().ok_or("用法：/rewind <保留消息数>")?;
+                self.rewind_session(keep)?;
+            }
+            "redo" => self.redo_session()?,
+            "tree" => self.show_tree(),
             "plan" => {
                 if !self.read_only {
                     self.toggle_mode()?;
@@ -701,6 +708,95 @@ impl TuiApp {
         }
         for (name, description) in skills {
             self.push_line(format!("{name}：{description}"), default());
+        }
+    }
+
+    fn fork_session(&mut self, index: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(current) = &self.session else {
+            self.push_system("暂无会话".to_string(), dim());
+            return Ok(());
+        };
+        let index = match index {
+            Some(value) => value.parse().map_err(|_| "消息序号需为数字".to_string())?,
+            None => current.messages.len().saturating_sub(1),
+        };
+        let child = current.fork(index);
+        self.store.save(&child)?;
+        let id = child.id.clone();
+        self.session = Some(child);
+        self.push_system(
+            format!("已创建子会话 {id}（消息 {index} 处 fork）"),
+            green(),
+        );
+        Ok(())
+    }
+
+    fn rewind_session(&mut self, keep: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(session) = &mut self.session else {
+            self.push_system("暂无会话".to_string(), dim());
+            return Ok(());
+        };
+        let keep: usize = keep.parse().map_err(|_| "保留消息数需为数字".to_string())?;
+        let removed = session.rewind(keep);
+        self.store.save(session)?;
+        self.push_system(
+            format!(
+                "已回退到 {keep} 条消息（移除 {} 条，/redo 可恢复）",
+                removed.len()
+            ),
+            yellow(),
+        );
+        Ok(())
+    }
+
+    fn redo_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(session) = &mut self.session else {
+            self.push_system("暂无会话".to_string(), dim());
+            return Ok(());
+        };
+        let restored = session.redo().map(|tail| tail.len()).unwrap_or(0);
+        self.store.save(session)?;
+        if restored == 0 {
+            self.push_system("没有可恢复的历史".to_string(), dim());
+        } else {
+            self.push_system(format!("已恢复 {restored} 条消息"), green());
+        }
+        Ok(())
+    }
+
+    fn show_tree(&mut self) {
+        let mut lines = Vec::new();
+        for id in self.store.list() {
+            if let Ok(session) = self.store.load(&id) {
+                let active = self
+                    .session
+                    .as_ref()
+                    .map(|current| current.id == id)
+                    .unwrap_or(false);
+                let parent = session
+                    .parent_id
+                    .clone()
+                    .unwrap_or_else(|| "(根)".to_string());
+                let fork = session
+                    .fork_point
+                    .map(|point| point.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                lines.push(format!(
+                    "{}{} parent={} fork@{} msgs={}",
+                    if active { "▶ " } else { "  " },
+                    id,
+                    parent,
+                    fork,
+                    session.messages.len()
+                ));
+            }
+        }
+        if lines.is_empty() {
+            self.push_system("暂无会话".to_string(), dim());
+        } else {
+            for line in lines {
+                self.push_line(line, default());
+            }
         }
     }
 
@@ -863,6 +959,7 @@ impl TuiApp {
         for line in [
             "直接输入文字 发起任务",
             "/new /sessions /resume <id>  会话管理",
+            "/fork [序号] /rewind <条数> /redo /tree  会话分支/回退/恢复/树",
             "/model [名称]  查看/切换模型",
             "/plan /build  切换只读/执行模式（或 Tab）",
             "/diff /undo  查看改动 / 回滚",

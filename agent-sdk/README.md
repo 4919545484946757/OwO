@@ -84,9 +84,10 @@ cargo run -p owo-agent-cli -- serve --port 4096
 - 子代理：`explore`（只读调查，独立子会话）与 `subagent`（通用委派，完整工具需审批），深度限制 2 层，共享中止/审批。
 - Skills：发现工作区 `.agents/skills/` 与 `<data>/skills/` 下的 SKILL.md（Agent Skills 开放标准），清单注入系统提示，`use_skill` 工具按需取用；仓库自带 `demo-summary` 示例技能。
 - 上下文压缩：估算 token 超预算时用模型把旧历史压成摘要（保留最近 N 条），压缩事件上屏并审计；可用 `OWO_TOKEN_BUDGET` / `OWO_KEEP_RECENT` 调参。
+- 会话 fork/redo：`/fork [消息序号]` 派生子会话（parent/fork_point 持久化）、`/rewind <条数>` 回退历史并撤销文件改动、`/redo` 恢复、`/tree` 查看会话树；HTTP 服务同步提供对应端点。
 - 交互式 CLI：build/plan 模式、会话、diff/undo、审批、审计、AGENTS.md 初始化。
 
 ## 尚未实现（M2+）
 
-- AGENTS.md 已注入；MCP HTTP 传输、SQLite 存储尚未实现。
+- AGENTS.md 已注入；MCP HTTP 传输、SQLite 存储、`/share` 尚未实现。
 - 上下文压缩（仅截断）、SQLite 存储、云执行、沙箱 OS 隔离、traces/evals 平台。

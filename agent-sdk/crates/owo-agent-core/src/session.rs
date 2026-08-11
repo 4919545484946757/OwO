@@ -25,6 +25,15 @@ pub struct Session {
     pub snapshots: HashMap<String, SnapshotEntry>,
     pub created_at: String,
     pub updated_at: String,
+    /// 父会话（由 fork 产生时）。
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// fork 时的消息下标（含）。
+    #[serde(default)]
+    pub fork_point: Option<usize>,
+    /// 被 /rewind 截断的历史，可 /redo 恢复。
+    #[serde(default)]
+    pub redo_stack: Vec<Vec<ChatMessage>>,
 }
 
 impl Session {
@@ -43,6 +52,9 @@ impl Session {
             snapshots: HashMap::new(),
             created_at: now.clone(),
             updated_at: now,
+            parent_id: None,
+            fork_point: None,
+            redo_stack: Vec::new(),
         }
     }
 
@@ -99,6 +111,45 @@ impl Session {
         self.snapshots.clear();
         self.updated_at = Utc::now().to_rfc3339();
         Ok(restored)
+    }
+
+    /// 在指定消息处派生一个子会话（继承历史，快照与 redo 栈清空）。
+    pub fn fork(&self, message_index: usize) -> Session {
+        let end = message_index.min(self.messages.len().saturating_sub(1));
+        let now = Utc::now().to_rfc3339();
+        Session {
+            id: uuid::Uuid::new_v4().to_string(),
+            workspace: self.workspace.clone(),
+            model: self.model.clone(),
+            system_prompt: self.system_prompt.clone(),
+            messages: self.messages[..=end].to_vec(),
+            snapshots: HashMap::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            parent_id: Some(self.id.clone()),
+            fork_point: Some(end),
+            redo_stack: Vec::new(),
+        }
+    }
+
+    /// 回退到仅保留前 `keep` 条消息，同时清空文件快照；返回被移除的历史。
+    pub fn rewind(&mut self, keep: usize) -> Vec<ChatMessage> {
+        if keep >= self.messages.len() {
+            return Vec::new();
+        }
+        let removed = self.messages.split_off(keep);
+        self.redo_stack.push(removed.clone());
+        self.snapshots.clear();
+        self.updated_at = Utc::now().to_rfc3339();
+        removed
+    }
+
+    /// 恢复最近一次 rewind 移除的历史。
+    pub fn redo(&mut self) -> Option<Vec<ChatMessage>> {
+        let tail = self.redo_stack.pop()?;
+        self.messages.extend(tail.iter().cloned());
+        self.updated_at = Utc::now().to_rfc3339();
+        Some(tail)
     }
 }
 
@@ -199,6 +250,7 @@ impl SessionStore for JsonSessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::ChatMessage;
 
     #[test]
     fn session_store_round_trip_and_list() {
@@ -212,5 +264,36 @@ mod tests {
         let loaded = store.load(&session.id).unwrap();
         assert_eq!(loaded.id, session.id);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fork_creates_child_with_history() {
+        let mut session = Session::new(".", "mock", None);
+        session.push(ChatMessage::user("a".to_string()));
+        session.push(ChatMessage::assistant_text("b".to_string()));
+        session.push(ChatMessage::user("c".to_string()));
+
+        let child = session.fork(1);
+        assert_eq!(child.messages.len(), 2);
+        assert_eq!(child.parent_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(child.fork_point, Some(1));
+        assert!(child.snapshots.is_empty());
+        assert!(child.redo_stack.is_empty());
+    }
+
+    #[test]
+    fn rewind_and_redo_round_trip() {
+        let mut session = Session::new(".", "mock", None);
+        for index in 0..5 {
+            session.push(ChatMessage::user(format!("m{index}")));
+        }
+        let removed = session.rewind(2);
+        assert_eq!(removed.len(), 3);
+        assert_eq!(session.messages.len(), 2);
+
+        let restored = session.redo().expect("存在可恢复历史");
+        assert_eq!(restored.len(), 3);
+        assert_eq!(session.messages.len(), 5);
+        assert!(session.redo().is_none());
     }
 }

@@ -598,6 +598,13 @@ impl Repl {
                 "undo" | "revert" => self.undo().await?,
                 "mcp" => self.handle_mcp(command).await?,
                 "skills" => self.list_skills(),
+                "fork" => self.fork_session(parts.next()).await?,
+                "rewind" => {
+                    let keep = parts.next().ok_or("用法：/rewind <保留消息数>")?;
+                    self.rewind_session(keep).await?;
+                }
+                "redo" => self.redo_session().await?,
+                "tree" => self.show_tree(),
                 "status" => self.show_status(),
                 "permissions" => self.show_permissions(),
                 "audit" => self.show_audit(),
@@ -748,6 +755,90 @@ impl Repl {
         println!("{} {}", "新会话：".green(), session.id.dimmed());
         self.session = Some(session);
         Ok(())
+    }
+
+    async fn fork_session(
+        &mut self,
+        index: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(current) = &self.session else {
+            println!("暂无会话");
+            return Ok(());
+        };
+        let index = match index {
+            Some(value) => value.parse().map_err(|_| "消息序号需为数字".to_string())?,
+            None => current.messages.len().saturating_sub(1),
+        };
+        let child = current.fork(index);
+        self.store.save(&child)?;
+        let id = child.id.clone();
+        self.session = Some(child);
+        println!("{} 子会话 {id}（在消息 {index} 处 fork）", "已创建".green());
+        Ok(())
+    }
+
+    async fn rewind_session(&mut self, keep: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(session) = &mut self.session else {
+            println!("暂无会话");
+            return Ok(());
+        };
+        let keep: usize = keep.parse().map_err(|_| "保留消息数需为数字".to_string())?;
+        let removed = session.rewind(keep);
+        self.store.save(session)?;
+        println!(
+            "{} 已回退到 {keep} 条消息（移除 {} 条，/redo 可恢复）",
+            "↶".yellow(),
+            removed.len()
+        );
+        Ok(())
+    }
+
+    async fn redo_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(session) = &mut self.session else {
+            println!("暂无会话");
+            return Ok(());
+        };
+        let restored = session.redo().map(|tail| tail.len()).unwrap_or(0);
+        self.store.save(session)?;
+        if restored == 0 {
+            println!("没有可恢复的历史");
+        } else {
+            println!("{} 已恢复 {restored} 条消息", "↷".green());
+        }
+        Ok(())
+    }
+
+    fn show_tree(&self) {
+        let ids = self.store.list();
+        if ids.is_empty() {
+            println!("暂无会话");
+            return;
+        }
+        for id in ids {
+            if let Ok(session) = self.store.load(&id) {
+                let active = self
+                    .session
+                    .as_ref()
+                    .map(|current| current.id == id)
+                    .unwrap_or(false);
+                let parent = session.parent_id.as_deref().unwrap_or("(根)");
+                println!(
+                    "{} {} parent={} fork={} msgs={}",
+                    if active {
+                        "▶".green().to_string()
+                    } else {
+                        "  ".to_string()
+                    },
+                    id,
+                    parent,
+                    session
+                        .fork_point
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    session.messages.len()
+                );
+            }
+        }
     }
 
     fn list_sessions(&self) {
@@ -975,6 +1066,10 @@ fn print_help() {
     println!("  /new [模型]         新建会话");
     println!("  /sessions           列出会话");
     println!("  /resume <id>        恢复会话");
+    println!("  /fork [消息序号]     在指定消息处创建子会话");
+    println!("  /rewind <条数>      回退会话历史（文件改动一并撤销）");
+    println!("  /redo               恢复最近一次 rewind");
+    println!("  /tree               查看会话树");
     println!("  /model [名称]       查看/切换模型");
     println!("  /plan | /build      切换只读规划模式 / 执行模式");
     println!("  /diff               查看本次会话文件改动");

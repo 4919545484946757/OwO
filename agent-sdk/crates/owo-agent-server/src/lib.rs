@@ -9,8 +9,8 @@ use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::Agent;
 use owo_agent_protocol::{
-    CreateSessionRequest, FileDiff, HealthResponse, PermissionResponse, SessionInfo, SseEvent,
-    TurnRequest,
+    CreateSessionRequest, FileDiff, ForkRequest, HealthResponse, PermissionResponse, RewindRequest,
+    SessionInfo, SseEvent, TurnRequest,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -52,7 +52,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/abort", post(abort_turn))
         .route("/session/{id}/diff", get(diff))
         .route("/session/{id}/revert", post(revert))
+        .route("/session/{id}/fork", post(fork_session))
+        .route("/session/{id}/rewind", post(rewind_session))
+        .route("/session/{id}/redo", post(redo_session))
+        .route("/session/{id}/children", get(children))
         .with_state(state)
+}
+
+fn to_session_info(session: &Session) -> SessionInfo {
+    SessionInfo {
+        id: session.id.clone(),
+        workspace: session.workspace.to_string_lossy().into_owned(),
+        model: session.model.clone(),
+        created_at: session.created_at.clone(),
+    }
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -234,6 +247,95 @@ async fn revert(
         .map_err(poison)?
         .insert(session.id.clone(), session);
     Ok(Json(json!({ "ok": true, "restored": restored })))
+}
+
+async fn fork_session(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<ForkRequest>,
+) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let session = {
+        let sessions = state.sessions.lock().map_err(poison)?;
+        sessions
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("会话不存在：{id}")))?
+    };
+    let child = session.fork(request.message_index);
+    state
+        .store
+        .save(&child)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    state
+        .sessions
+        .lock()
+        .map_err(poison)?
+        .insert(child.id.clone(), child.clone());
+    Ok(Json(to_session_info(&child)))
+}
+
+async fn rewind_session(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<RewindRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut session = {
+        let sessions = state.sessions.lock().map_err(poison)?;
+        sessions
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("会话不存在：{id}")))?
+    };
+    let removed = session.rewind(request.keep);
+    state
+        .store
+        .save(&session)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    state
+        .sessions
+        .lock()
+        .map_err(poison)?
+        .insert(session.id.clone(), session);
+    Ok(Json(json!({ "ok": true, "removed": removed.len() })))
+}
+
+async fn redo_session(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut session = {
+        let sessions = state.sessions.lock().map_err(poison)?;
+        sessions
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("会话不存在：{id}")))?
+    };
+    let restored = session.redo().map(|tail| tail.len()).unwrap_or(0);
+    state
+        .store
+        .save(&session)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    state
+        .sessions
+        .lock()
+        .map_err(poison)?
+        .insert(session.id.clone(), session);
+    Ok(Json(json!({ "ok": true, "restored": restored })))
+}
+
+async fn children(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Vec<SessionInfo>>, (StatusCode, String)> {
+    let mut result = Vec::new();
+    for session_id in state.store.list() {
+        if let Ok(session) = state.store.load(&session_id) {
+            if session.parent_id.as_deref() == Some(id.as_str()) {
+                result.push(to_session_info(&session));
+            }
+        }
+    }
+    Ok(Json(result))
 }
 
 struct ChannelApprover {

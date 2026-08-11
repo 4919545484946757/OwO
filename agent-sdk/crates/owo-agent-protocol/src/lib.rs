@@ -26,6 +26,16 @@ pub struct TurnRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkRequest {
+    pub message_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RewindRequest {
+    pub keep: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionResponse {
     pub allow: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
