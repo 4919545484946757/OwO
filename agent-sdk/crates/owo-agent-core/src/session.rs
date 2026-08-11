@@ -103,10 +103,15 @@ impl Session {
 }
 
 fn relative_display(workspace: &Path, path: &Path) -> String {
-    path.strip_prefix(workspace)
+    let normalize = |value: &Path| -> String {
+        let raw = value.to_string_lossy().replace('\\', "/");
+        raw.strip_prefix("//?/").unwrap_or(&raw).to_string()
+    };
+    let workspace = normalize(workspace);
+    let path = normalize(path);
+    path.strip_prefix(&workspace)
+        .map(|relative| relative.trim_start_matches('/').to_string())
         .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
 }
 
 pub trait SessionStore: Send + Sync {

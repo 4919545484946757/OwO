@@ -13,6 +13,33 @@ struct ScriptedProvider {
     script: Mutex<VecDeque<ModelOutput>>,
 }
 
+struct StreamingProvider {
+    output: String,
+}
+
+#[async_trait]
+impl ModelProvider for StreamingProvider {
+    async fn complete(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        Ok(ModelOutput::Text(self.output.clone()))
+    }
+
+    async fn complete_stream(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelOutput, String> {
+        for character in self.output.chars() {
+            on_delta(character.to_string());
+        }
+        Ok(ModelOutput::Text(self.output.clone()))
+    }
+}
+
 impl ScriptedProvider {
     fn new(outputs: Vec<ModelOutput>) -> Self {
         Self {
@@ -50,7 +77,10 @@ fn temp_workspace(name: &str) -> std::path::PathBuf {
     dir
 }
 
-fn build_agent(workspace: &std::path::Path, provider: ScriptedProvider) -> Agent {
+fn build_agent<P>(workspace: &std::path::Path, provider: P) -> Agent
+where
+    P: ModelProvider + Send + Sync + 'static,
+{
     let policy = Policy::new(workspace.to_path_buf());
     let registry = ToolRegistry::new();
     Agent::new(Arc::new(provider), registry, policy, AgentConfig::default())
@@ -219,4 +249,32 @@ async fn revert_removes_created_file() {
     assert_eq!(restored, vec!["new.txt"]);
     assert!(!workspace.join("new.txt").exists());
     assert!(session.diff().is_empty());
+}
+
+#[tokio::test]
+async fn streaming_deltas_are_emitted_and_final_text_returned() {
+    let workspace = temp_workspace("streaming");
+    let provider = StreamingProvider {
+        output: "你好".to_string(),
+    };
+    let agent = build_agent(&workspace, provider);
+    let mut session = Session::new(&workspace, "mock".to_string(), None);
+    let abort = AtomicBool::new(false);
+    let approver = AutoApprover { allow: true };
+
+    let outcome = agent
+        .run_turn(&mut session, "hi", &approver, &abort, &mut |_| {})
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.final_text.as_deref(), Some("你好"));
+    let deltas: Vec<String> = outcome
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            owo_agent_core::TurnEvent::TokenDelta { delta } => Some(delta.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deltas, vec!["你".to_string(), "好".to_string()]);
 }

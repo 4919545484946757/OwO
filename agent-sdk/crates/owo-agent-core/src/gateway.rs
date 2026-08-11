@@ -1,7 +1,9 @@
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -81,6 +83,21 @@ pub trait ModelProvider: Send + Sync {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> Result<ModelOutput, String>;
+
+    /// 流式补全：文本增量经 `on_delta` 回调；返回最终输出。
+    /// 默认实现退化为非流式。
+    async fn complete_stream(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelOutput, String> {
+        let output = self.complete(messages, tools).await?;
+        if let ModelOutput::Text(text) = &output {
+            on_delta(text.clone());
+        }
+        Ok(output)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +123,7 @@ impl OpenAiCompatibleConfig {
     }
 }
 
-/// OpenAI-compatible `/chat/completions` 客户端（覆盖 OpenAI、Ollama、多数代理）。
+/// OpenAI-compatible `/chat/completions` 客户端（覆盖 OpenAI、DeepSeek、Ollama、多数代理）。
 pub struct OpenAiCompatibleProvider {
     client: reqwest::Client,
     config: OpenAiCompatibleConfig,
@@ -120,15 +137,8 @@ impl OpenAiCompatibleProvider {
             .map_err(|e| format!("HTTP 客户端创建失败：{e}"))?;
         Ok(Self { client, config })
     }
-}
 
-#[async_trait]
-impl ModelProvider for OpenAiCompatibleProvider {
-    async fn complete(
-        &self,
-        messages: &[ChatMessage],
-        tools: &[ToolSpec],
-    ) -> Result<ModelOutput, String> {
+    fn request_body(&self, messages: &[ChatMessage], tools: &[ToolSpec], stream: bool) -> Value {
         let tool_payload: Vec<Value> = tools
             .iter()
             .map(|spec| {
@@ -142,7 +152,6 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 })
             })
             .collect();
-
         let messages_payload: Vec<Value> = messages
             .iter()
             .map(|message| {
@@ -177,12 +186,116 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let mut body = json!({
             "model": self.config.model,
             "messages": messages_payload,
-            "stream": false,
+            "stream": stream,
         });
         if !tool_payload.is_empty() {
             body["tools"] = Value::Array(tool_payload);
         }
+        body
+    }
+}
 
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct StreamDelta {
+    pub content: Option<String>,
+    /// 原始 tool_calls 增量片段（JSON 值）。
+    pub tool_call_fragments: Vec<Value>,
+}
+
+/// 解析一条 `data:` 负载。空负载/心跳返回 None。
+pub fn parse_sse_payload(payload: &str) -> Option<StreamDelta> {
+    let payload = payload.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return None;
+    }
+    let value: Value = serde_json::from_str(payload).ok()?;
+    let delta = value.pointer("/choices/0/delta")?;
+    let content = delta
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let tool_call_fragments = delta
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if content.is_none() && tool_call_fragments.is_empty() {
+        return None;
+    }
+    Some(StreamDelta {
+        content,
+        tool_call_fragments,
+    })
+}
+
+#[derive(Debug, Default)]
+struct ToolCallAccumulator {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+fn accumulate_tool_fragments(
+    accumulators: &mut HashMap<usize, ToolCallAccumulator>,
+    fragments: &[Value],
+) {
+    for fragment in fragments {
+        let Some(index) = fragment.get("index").and_then(Value::as_u64) else {
+            continue;
+        };
+        let index = index as usize;
+        let entry = accumulators.entry(index).or_default();
+        if let Some(id) = fragment.get("id").and_then(Value::as_str) {
+            entry.id = id.to_string();
+        }
+        if let Some(name) = fragment.pointer("/function/name").and_then(Value::as_str) {
+            entry.name = name.to_string();
+        }
+        if let Some(arguments) = fragment
+            .pointer("/function/arguments")
+            .and_then(Value::as_str)
+        {
+            entry.arguments.push_str(arguments);
+        }
+    }
+}
+
+fn build_tool_calls(
+    accumulators: &mut HashMap<usize, ToolCallAccumulator>,
+) -> Option<Vec<ToolCall>> {
+    if accumulators.is_empty() {
+        return None;
+    }
+    let mut calls: Vec<(usize, ToolCall)> = accumulators
+        .drain()
+        .map(|(index, accum)| {
+            (
+                index,
+                ToolCall {
+                    id: if accum.id.is_empty() {
+                        format!("call_{index}")
+                    } else {
+                        accum.id
+                    },
+                    name: accum.name,
+                    arguments: serde_json::from_str(&accum.arguments).unwrap_or(Value::Null),
+                },
+            )
+        })
+        .collect();
+    calls.sort_by_key(|(index, _)| *index);
+    Some(calls.into_iter().map(|(_, call)| call).collect())
+}
+
+#[async_trait]
+impl ModelProvider for OpenAiCompatibleProvider {
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ModelOutput, String> {
+        let body = self.request_body(messages, tools, false);
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -196,7 +309,6 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .send()
             .await
             .map_err(|e| format!("模型请求失败：{e}"))?;
-
         if !response.status().is_success() {
             let status = response.status();
             let text = response
@@ -213,7 +325,6 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let message = payload
             .pointer("/choices/0/message")
             .ok_or_else(|| "响应缺少 choices[0].message".to_string())?;
-
         let content = message
             .get("content")
             .and_then(Value::as_str)
@@ -249,5 +360,118 @@ impl ModelProvider for OpenAiCompatibleProvider {
         } else {
             Err("模型响应既无文本也无工具调用".to_string())
         }
+    }
+
+    async fn complete_stream(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_delta: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelOutput, String> {
+        let body = self.request_body(messages, tools, true);
+        let url = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.config.api_key)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(180))
+            .send()
+            .await
+            .map_err(|e| format!("模型请求失败：{e}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "无响应体".to_string());
+            return Err(format!("模型返回 {status}：{text}"));
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut content = String::new();
+        let mut accumulators: HashMap<usize, ToolCallAccumulator> = HashMap::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("流式读取失败：{e}"))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            let mut completed = true;
+            while completed {
+                match buffer.find('\n') {
+                    Some(newline) => {
+                        let line = buffer[..newline].trim().to_string();
+                        buffer.drain(..=newline);
+                        if let Some(payload) = line.strip_prefix("data:") {
+                            if payload.trim() == "[DONE]" {
+                                break;
+                            }
+                            if let Some(delta) = parse_sse_payload(payload) {
+                                if let Some(delta_content) = delta.content {
+                                    content.push_str(&delta_content);
+                                    on_delta(delta_content);
+                                }
+                                accumulate_tool_fragments(
+                                    &mut accumulators,
+                                    &delta.tool_call_fragments,
+                                );
+                            }
+                        }
+                    }
+                    None => completed = false,
+                }
+            }
+        }
+
+        if let Some(tool_calls) = build_tool_calls(&mut accumulators) {
+            Ok(ModelOutput::ToolCalls(tool_calls))
+        } else {
+            Ok(ModelOutput::Text(content))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_content_delta() {
+        let delta = parse_sse_payload(r#"{"choices":[{"delta":{"content":"你好"}}]}"#).unwrap();
+        assert_eq!(delta.content.as_deref(), Some("你好"));
+        assert!(delta.tool_call_fragments.is_empty());
+    }
+
+    #[test]
+    fn parses_tool_call_fragments_and_assembles() {
+        let delta = parse_sse_payload(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(delta.content, None);
+        assert_eq!(delta.tool_call_fragments.len(), 1);
+
+        let mut accumulators = HashMap::new();
+        accumulate_tool_fragments(&mut accumulators, &delta.tool_call_fragments);
+        let delta2 = parse_sse_payload(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.txt\"}"}}]}}]}"#,
+        )
+        .unwrap();
+        accumulate_tool_fragments(&mut accumulators, &delta2.tool_call_fragments);
+
+        let calls = build_tool_calls(&mut accumulators).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["path"], "a.txt");
+    }
+
+    #[test]
+    fn ignores_heartbeat_and_done() {
+        assert!(parse_sse_payload("").is_none());
+        assert!(parse_sse_payload("[DONE]").is_none());
+        assert!(parse_sse_payload(": keep-alive").is_none());
     }
 }

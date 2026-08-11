@@ -99,6 +99,7 @@ struct TuiApp {
     event_rx: Option<Receiver<TuiMsg>>,
     input: String,
     transcript: Vec<(String, Style)>,
+    streaming: String,
     scroll: usize,
     running: bool,
     status: String,
@@ -131,6 +132,7 @@ impl TuiApp {
                     .to_string(),
                 dim(),
             )],
+            streaming: String::new(),
             scroll: 0,
             running: false,
             status: "就绪".to_string(),
@@ -211,8 +213,19 @@ impl TuiApp {
         ]);
         frame.render_widget(Paragraph::new(title), chunks[0]);
 
-        let lines: Vec<Line> = self
+        let mut visible = self
             .visible_lines(chunks[1].height as usize)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if !self.streaming.is_empty() {
+            visible.push((
+                format!("▍{}", self.streaming),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        }
+        let lines: Vec<Line> = visible
             .iter()
             .map(|(text, style)| Line::from(Span::styled(text.clone(), *style)))
             .collect();
@@ -331,6 +344,7 @@ impl TuiApp {
         self.scroll = 0;
         self.running = true;
         self.status = "调用模型…".to_string();
+        self.streaming.clear();
         self.push_line(format!("▶ {prompt}"), cyan());
 
         let agent = Arc::clone(&self.agent);
@@ -410,8 +424,15 @@ impl TuiApp {
 
     fn push_event(&mut self, event: TurnEvent) {
         match event {
-            TurnEvent::ModelCall => self.push_system("↻ 调用模型…".to_string(), dim()),
+            TurnEvent::ModelCall => {
+                self.flush_streaming();
+                self.push_system("↻ 调用模型…".to_string(), dim());
+            }
+            TurnEvent::TokenDelta { delta } => {
+                self.streaming.push_str(&delta);
+            }
             TurnEvent::PermissionRequest(request) => {
+                self.flush_streaming();
                 self.pending_order.push(request.request_id.clone());
                 self.push_line(
                     format!(
@@ -425,11 +446,13 @@ impl TuiApp {
                 self.status = "等待审批（y/n）".to_string();
             }
             TurnEvent::ToolStart { tool, .. } => {
+                self.flush_streaming();
                 self.push_line(format!("▶ {tool} …"), blue());
             }
             TurnEvent::ToolResult {
                 tool, ok, error, ..
             } => {
+                self.flush_streaming();
                 if ok {
                     self.push_line(format!("✔ {tool}"), green());
                 } else {
@@ -440,9 +463,20 @@ impl TuiApp {
                 }
             }
             TurnEvent::Final { text } => {
-                self.push_line("── 结果 ──".to_string(), bold());
-                self.push_line(text, default());
+                if self.streaming.is_empty() {
+                    self.push_line("── 结果 ──".to_string(), bold());
+                    self.push_line(text, default());
+                } else {
+                    self.flush_streaming();
+                }
             }
+        }
+    }
+
+    fn flush_streaming(&mut self) {
+        if !self.streaming.is_empty() {
+            let text = std::mem::take(&mut self.streaming);
+            self.push_line(text, default());
         }
     }
 

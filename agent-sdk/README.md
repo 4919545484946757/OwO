@@ -71,6 +71,7 @@ cargo run -p owo-agent-cli -- serve --port 4096
 - 会话：JSON 持久化、diff、revert（回滚写操作）。
 - 审计：内存审计记录（事件、工具、审批、结果）。
 - 模型网关：OpenAI-compatible chat completions（工具调用）。
+- 模型流式输出：SSE token 增量实时上屏（REPL/TUI 打字机效果），工具调用片段流式组装。
 - 交互式 CLI：build/plan 模式、会话、diff/undo、审批、审计、AGENTS.md 初始化。
 
 ## 尚未实现（M2+）

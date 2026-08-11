@@ -216,7 +216,8 @@ async fn run_turn(args: TurnArgs) -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
-    let mut on_event = |event: &TurnEvent| print_event(event);
+    let mut printer = EventPrinter::new();
+    let mut on_event = |event: &TurnEvent| printer.print(event);
     let outcome = agent
         .run_turn(
             &mut session,
@@ -300,7 +301,39 @@ fn print_event(event: &TurnEvent) {
                 );
             }
         }
-        TurnEvent::Final { text } => println!("\n{}\n{text}", "── 结果 ──".bold()),
+        TurnEvent::TokenDelta { .. } => {}
+        TurnEvent::Final { .. } => {}
+    }
+}
+
+/// 事件打印器：把流式增量逐字输出，Final 只收尾不重复打印。
+struct EventPrinter {
+    streamed: bool,
+}
+
+impl EventPrinter {
+    fn new() -> Self {
+        Self { streamed: false }
+    }
+
+    fn print(&mut self, event: &TurnEvent) {
+        match event {
+            TurnEvent::TokenDelta { delta } => {
+                use std::io::Write;
+                self.streamed = true;
+                print!("{delta}");
+                let _ = std::io::stdout().flush();
+            }
+            TurnEvent::Final { text } => {
+                if self.streamed {
+                    println!();
+                    self.streamed = false;
+                } else {
+                    println!("\n{}\n{text}", "── 结果 ──".bold());
+                }
+            }
+            other => print_event(other),
+        }
     }
 }
 
@@ -707,7 +740,8 @@ impl Repl {
 
         println!("{} {}", "▶".green(), prompt.dimmed());
         let task = tokio::spawn(async move {
-            let mut on_event = |event: &TurnEvent| print_event(event);
+            let mut printer = EventPrinter::new();
+            let mut on_event = |event: &TurnEvent| printer.print(event);
             let outcome = agent
                 .run_turn(
                     &mut session,

@@ -27,6 +27,9 @@ impl Default for AgentConfig {
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
     ModelCall,
+    TokenDelta {
+        delta: String,
+    },
     PermissionRequest(PermissionRequest),
     ToolStart {
         id: String,
@@ -118,9 +121,17 @@ impl Agent {
             }
 
             emit(&mut events, on_event, TurnEvent::ModelCall);
+            let on_event_reborrow = &mut *on_event;
+            let mut emit_delta = |delta: String| {
+                emit(
+                    &mut events,
+                    on_event_reborrow,
+                    TurnEvent::TokenDelta { delta },
+                );
+            };
             let output = self
                 .provider
-                .complete(&messages, &tools)
+                .complete_stream(&messages, &tools, &mut emit_delta)
                 .await
                 .map_err(AgentError::Gateway)?;
 

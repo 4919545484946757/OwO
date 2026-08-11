@@ -278,6 +278,9 @@ fn to_sse(event: &owo_agent_core::TurnEvent) -> Option<SseEvent> {
         owo_agent_core::TurnEvent::ModelCall => Some(SseEvent::Progress {
             message: "模型调用".to_string(),
         }),
+        owo_agent_core::TurnEvent::TokenDelta { delta } => Some(SseEvent::TokenDelta {
+            delta: delta.clone(),
+        }),
         owo_agent_core::TurnEvent::PermissionRequest(request) => {
             Some(SseEvent::PermissionRequest {
                 request_id: request.request_id.clone(),
@@ -317,6 +320,7 @@ fn to_event(sse: SseEvent) -> Result<Event, Infallible> {
         SseEvent::ToolResult { .. } => "tool_result",
         SseEvent::PermissionRequest { .. } => "permission_request",
         SseEvent::Final { .. } => "final",
+        SseEvent::TokenDelta { .. } => "token_delta",
     };
     let data = serde_json::to_string(&sse).unwrap_or_else(|_| "{}".to_string());
     Ok(Event::default().event(name).data(data))

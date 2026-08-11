@@ -74,4 +74,7 @@ pub enum SseEvent {
     Final {
         text: String,
     },
+    TokenDelta {
+        delta: String,
+    },
 }
