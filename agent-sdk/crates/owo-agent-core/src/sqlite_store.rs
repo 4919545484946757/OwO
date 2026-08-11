@@ -27,10 +27,12 @@ impl SqliteSessionStore {
                  updated_at TEXT NOT NULL,
                  parent_id TEXT,
                  fork_point INTEGER,
-                 redo_json TEXT NOT NULL
+                 redo_json TEXT NOT NULL,
+                 message_redo_json TEXT NOT NULL DEFAULT '[]'
              );",
         )
         .map_err(sqlite_error)?;
+        ensure_message_redo_column(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -40,8 +42,8 @@ impl SqliteSessionStore {
         conn.execute(
             "INSERT INTO sessions (
                  id, workspace, model, system_prompt, messages_json, snapshots_json,
-                 created_at, updated_at, parent_id, fork_point, redo_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 created_at, updated_at, parent_id, fork_point, redo_json, message_redo_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                  workspace=excluded.workspace,
                  model=excluded.model,
@@ -51,7 +53,8 @@ impl SqliteSessionStore {
                  updated_at=excluded.updated_at,
                  parent_id=excluded.parent_id,
                  fork_point=excluded.fork_point,
-                 redo_json=excluded.redo_json",
+                 redo_json=excluded.redo_json,
+                 message_redo_json=excluded.message_redo_json",
             params![
                 session.id,
                 session.workspace.to_string_lossy(),
@@ -64,6 +67,7 @@ impl SqliteSessionStore {
                 session.parent_id,
                 session.fork_point.map(|point| point as i64),
                 serde_json::to_string(&session.redo_stack).map_err(json_error)?,
+                serde_json::to_string(&session.message_redo_stack).map_err(json_error)?,
             ],
         )
         .map_err(sqlite_error)?;
@@ -74,7 +78,7 @@ impl SqliteSessionStore {
         let row = conn
             .query_row(
                 "SELECT id, workspace, model, system_prompt, messages_json, snapshots_json,
-                        created_at, updated_at, parent_id, fork_point, redo_json
+                        created_at, updated_at, parent_id, fork_point, redo_json, message_redo_json
                  FROM sessions WHERE id = ?1",
                 [id],
                 |row| {
@@ -90,6 +94,7 @@ impl SqliteSessionStore {
                         row.get::<_, Option<String>>(8)?,
                         row.get::<_, Option<i64>>(9)?,
                         row.get::<_, String>(10)?,
+                        row.get::<_, String>(11)?,
                     ))
                 },
             )
@@ -112,8 +117,27 @@ impl SqliteSessionStore {
             parent_id: row.8,
             fork_point: row.9.map(|point| point as usize),
             redo_stack: serde_json::from_str(&row.10).map_err(json_error)?,
+            message_redo_stack: serde_json::from_str(&row.11).map_err(json_error)?,
         })
     }
+}
+
+fn ensure_message_redo_column(conn: &Connection) -> Result<(), AgentError> {
+    let mut statement = conn
+        .prepare("PRAGMA table_info(sessions)")
+        .map_err(sqlite_error)?;
+    let columns: Vec<String> = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sqlite_error)?
+        .filter_map(Result::ok)
+        .collect();
+    if !columns.iter().any(|column| column == "message_redo_json") {
+        conn.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN message_redo_json TEXT NOT NULL DEFAULT '[]'",
+        )
+        .map_err(sqlite_error)?;
+    }
+    Ok(())
 }
 
 impl SessionStore for SqliteSessionStore {
@@ -176,6 +200,7 @@ fn json_error(error: serde_json::Error) -> AgentError {
 mod tests {
     use super::*;
     use crate::gateway::ChatMessage;
+    use rusqlite::Connection;
 
     #[test]
     fn sqlite_session_round_trip_and_list() {
@@ -196,6 +221,42 @@ mod tests {
         assert_eq!(loaded_child.parent_id.as_deref(), Some(session.id.as_str()));
         assert_eq!(loaded_child.fork_point, Some(1));
         assert_eq!(store.list().len(), 2);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn migrates_legacy_database_without_message_redo_column() {
+        let path =
+            std::env::temp_dir().join(format!("owo-sqlite-legacy-{}.db", uuid::Uuid::new_v4()));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY,
+                 workspace TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 system_prompt TEXT,
+                 messages_json TEXT NOT NULL,
+                 snapshots_json TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 parent_id TEXT,
+                 fork_point INTEGER,
+                 redo_json TEXT NOT NULL
+             );
+             INSERT INTO sessions VALUES (
+                 'legacy', '.', 'mock', NULL, '[]', '{}',
+                 '2026-08-11T00:00:00Z', '2026-08-11T00:00:00Z', NULL, NULL, '[]'
+             );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = SqliteSessionStore::open(&path).unwrap();
+        let loaded = store.load("legacy").unwrap();
+        assert!(loaded.message_redo_stack.is_empty());
+        assert_eq!(loaded.model, "mock");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));

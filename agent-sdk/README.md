@@ -92,6 +92,7 @@ cargo run -p owo-agent-cli -- serve --port 4096
 - Skills：发现工作区 `.agents/skills/` 与 `<data>/skills/` 下的 SKILL.md（Agent Skills 开放标准），清单注入系统提示，`use_skill` 工具按需取用；仓库自带 `demo-summary` 示例技能。
 - 上下文压缩：估算 token 超预算时用模型把旧历史压成摘要（保留最近 N 条），压缩事件上屏并审计；可用 `OWO_TOKEN_BUDGET` / `OWO_KEEP_RECENT` 调参。
 - 会话 fork/redo：`/fork [消息序号]` 派生子会话（parent/fork_point 持久化）、`/rewind <条数>` 回退历史并撤销文件改动、`/redo` 恢复、`/tree` 查看会话树；HTTP 服务同步提供对应端点。
+- 消息级撤销/重做：`/undo-msg [n]` 移除最近 n 条对话消息，`/redo-msg` 恢复；与文件级 `/undo` 相互独立。
 - 会话分享：`/share [html]` 导出自包含 Markdown/HTML 会话记录（`<data>/shares/`），HTTP 端点 `GET /session/{id}/export/{md|html}`。
 - SQLite 存储：会话默认持久化到 `<data>/index.db`（rusqlite bundled），跨进程可恢复；JSON 存储保留用于测试/兼容。
 - Evals：内置 5 用例演示套件（读/写/列目录/搜索/子代理），临时工作区隔离，输出成功率/耗时报告；`owo-agent eval` 与 HTTP `POST /eval/run`。

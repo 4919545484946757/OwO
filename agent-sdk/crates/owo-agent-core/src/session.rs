@@ -34,6 +34,9 @@ pub struct Session {
     /// 被 /rewind 截断的历史，可 /redo 恢复。
     #[serde(default)]
     pub redo_stack: Vec<Vec<ChatMessage>>,
+    /// 被 /undo-msg 移除的消息，可 /redo-msg 恢复。
+    #[serde(default)]
+    pub message_redo_stack: Vec<Vec<ChatMessage>>,
 }
 
 impl Session {
@@ -55,6 +58,7 @@ impl Session {
             parent_id: None,
             fork_point: None,
             redo_stack: Vec::new(),
+            message_redo_stack: Vec::new(),
         }
     }
 
@@ -129,6 +133,7 @@ impl Session {
             parent_id: Some(self.id.clone()),
             fork_point: Some(end),
             redo_stack: Vec::new(),
+            message_redo_stack: Vec::new(),
         }
     }
 
@@ -147,6 +152,27 @@ impl Session {
     /// 恢复最近一次 rewind 移除的历史。
     pub fn redo(&mut self) -> Option<Vec<ChatMessage>> {
         let tail = self.redo_stack.pop()?;
+        self.messages.extend(tail.iter().cloned());
+        self.updated_at = Utc::now().to_rfc3339();
+        Some(tail)
+    }
+
+    /// 移除最近 `count` 条消息（消息级撤销），压入可恢复栈。
+    pub fn undo_message(&mut self, count: usize) -> Option<Vec<ChatMessage>> {
+        let count = count.min(self.messages.len());
+        if count == 0 {
+            return None;
+        }
+        let split_at = self.messages.len() - count;
+        let removed = self.messages.split_off(split_at);
+        self.message_redo_stack.push(removed.clone());
+        self.updated_at = Utc::now().to_rfc3339();
+        Some(removed)
+    }
+
+    /// 恢复最近一次消息级撤销。
+    pub fn redo_message(&mut self) -> Option<Vec<ChatMessage>> {
+        let tail = self.message_redo_stack.pop()?;
         self.messages.extend(tail.iter().cloned());
         self.updated_at = Utc::now().to_rfc3339();
         Some(tail)
@@ -295,5 +321,22 @@ mod tests {
         assert_eq!(restored.len(), 3);
         assert_eq!(session.messages.len(), 5);
         assert!(session.redo().is_none());
+    }
+
+    #[test]
+    fn message_undo_and_redo_round_trip() {
+        let mut session = Session::new(".", "mock", None);
+        for index in 0..4 {
+            session.push(ChatMessage::user(format!("m{index}")));
+        }
+        let removed = session.undo_message(2).expect("存在可撤销消息");
+        assert_eq!(removed.len(), 2);
+        assert_eq!(session.messages.len(), 2);
+        assert!(session.undo_message(0).is_none());
+
+        let restored = session.redo_message().expect("存在可恢复消息");
+        assert_eq!(restored.len(), 2);
+        assert_eq!(session.messages.len(), 4);
+        assert!(session.redo_message().is_none());
     }
 }

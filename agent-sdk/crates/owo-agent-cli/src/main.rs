@@ -647,6 +647,8 @@ impl Repl {
                     self.rewind_session(keep).await?;
                 }
                 "redo" => self.redo_session().await?,
+                "undo-msg" => self.undo_message(parts.next()).await?,
+                "redo-msg" => self.redo_message().await?,
                 "tree" => self.show_tree(),
                 "share" => self.share_session(parts.next())?,
                 "traces" => self.list_traces(),
@@ -862,6 +864,48 @@ impl Repl {
         self.store.save(session)?;
         if restored == 0 {
             println!("没有可恢复的历史");
+        } else {
+            println!("{} 已恢复 {restored} 条消息", "↷".green());
+        }
+        Ok(())
+    }
+
+    async fn undo_message(
+        &mut self,
+        count: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(session) = &mut self.session else {
+            println!("暂无会话");
+            return Ok(());
+        };
+        let count = match count {
+            Some(value) => value.parse().map_err(|_| "数量需为数字".to_string())?,
+            None => 1,
+        };
+        let removed = session.undo_message(count);
+        match removed {
+            Some(messages) => {
+                self.store.save(session)?;
+                println!(
+                    "{} 已撤销 {} 条消息（/redo-msg 恢复）",
+                    "↶".yellow(),
+                    messages.len()
+                );
+            }
+            None => println!("没有可撤销的消息"),
+        }
+        Ok(())
+    }
+
+    async fn redo_message(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(session) = &mut self.session else {
+            println!("暂无会话");
+            return Ok(());
+        };
+        let restored = session.redo_message().map(|tail| tail.len()).unwrap_or(0);
+        self.store.save(session)?;
+        if restored == 0 {
+            println!("没有可恢复的消息");
         } else {
             println!("{} 已恢复 {restored} 条消息", "↷".green());
         }
@@ -1194,6 +1238,8 @@ fn print_help() {
     println!("  /fork [消息序号]     在指定消息处创建子会话");
     println!("  /rewind <条数>      回退会话历史（文件改动一并撤销）");
     println!("  /redo               恢复最近一次 rewind");
+    println!("  /undo-msg [n]       撤销最近 n 条对话消息");
+    println!("  /redo-msg           恢复最近一次消息撤销");
     println!("  /tree               查看会话树");
     println!("  /share [html]       导出会话分享（Markdown/HTML）");
     println!("  /traces | /trace <n>  列出/回放回合轨迹");

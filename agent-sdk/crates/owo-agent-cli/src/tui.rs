@@ -663,6 +663,8 @@ impl TuiApp {
                 self.rewind_session(keep)?;
             }
             "redo" => self.redo_session()?,
+            "undo-msg" => self.undo_message(parts.next())?,
+            "redo-msg" => self.redo_message()?,
             "tree" => self.show_tree(),
             "share" => self.share_session(parts.next())?,
             "traces" => self.list_traces(),
@@ -766,6 +768,44 @@ impl TuiApp {
         self.store.save(session)?;
         if restored == 0 {
             self.push_system("没有可恢复的历史".to_string(), dim());
+        } else {
+            self.push_system(format!("已恢复 {restored} 条消息"), green());
+        }
+        Ok(())
+    }
+
+    fn undo_message(&mut self, count: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(session) = &mut self.session else {
+            self.push_system("暂无会话".to_string(), dim());
+            return Ok(());
+        };
+        let count = match count {
+            Some(value) => value.parse().map_err(|_| "数量需为数字".to_string())?,
+            None => 1,
+        };
+        let removed = session.undo_message(count);
+        match removed {
+            Some(messages) => {
+                self.store.save(session)?;
+                self.push_system(
+                    format!("已撤销 {} 条消息（/redo-msg 恢复）", messages.len()),
+                    yellow(),
+                );
+            }
+            None => self.push_system("没有可撤销的消息".to_string(), dim()),
+        }
+        Ok(())
+    }
+
+    fn redo_message(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(session) = &mut self.session else {
+            self.push_system("暂无会话".to_string(), dim());
+            return Ok(());
+        };
+        let restored = session.redo_message().map(|tail| tail.len()).unwrap_or(0);
+        self.store.save(session)?;
+        if restored == 0 {
+            self.push_system("没有可恢复的消息".to_string(), dim());
         } else {
             self.push_system(format!("已恢复 {restored} 条消息"), green());
         }
@@ -1047,6 +1087,7 @@ impl TuiApp {
             "直接输入文字 发起任务",
             "/new /sessions /resume <id>  会话管理",
             "/fork [序号] /rewind <条数> /redo /tree  会话分支/回退/恢复/树",
+            "/undo-msg [n] /redo-msg  消息级撤销/重做",
             "/share [html]  导出会话分享",
             "/traces /trace <n>  回合轨迹",
             "/model [名称]  查看/切换模型",
