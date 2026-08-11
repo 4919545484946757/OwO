@@ -102,7 +102,7 @@ int main(const int argc, char** argv) {
         "schema_version=1\ncandidate_page_size=6\nuser_learning_enabled=false\n"
         "model_ranking_enabled=true\nmodel_timeout_ms=75\n");
     if (!legacy.ok || legacy.value.candidate_page_size != 6 ||
-        legacy.value.correction_shortcuts != std::vector<std::string>{"Ctrl+Alt+Shift"} ||
+        legacy.value.correction_shortcuts != std::vector<std::string>{"Ctrl+Q"} ||
         legacy.value.language_shortcuts != std::vector<std::string>{"Ctrl+Space"} ||
         legacy.value.raw_input_shortcuts != std::vector<std::string>{"Enter"} ||
         legacy.value.cursor_left_shortcuts != std::vector<std::string>{"Shift+Left"} ||

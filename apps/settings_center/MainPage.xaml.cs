@@ -44,7 +44,7 @@ public sealed partial class MainPage : Page
     {
         _shortcutCaptureHookProc = ShortcutCaptureHook;
         InitializeComponent();
-        SetShortcutBindings("correction", ["Ctrl+Alt+Shift"]);
+        SetShortcutBindings("correction", ["Ctrl+Q"]);
         SetShortcutBindings("language", ["Ctrl+Space"]);
         SetShortcutBindings("raw", ["Enter"]);
         SetShortcutBindings("cursor-left", ["Shift+Left"]);

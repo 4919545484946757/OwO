@@ -18,7 +18,7 @@ struct AppConfig {
     bool model_ranking_enabled{false};
     std::uint32_t model_timeout_ms{50};
     bool correction_shortcut_enabled{true};
-    std::vector<std::string> correction_shortcuts{"Ctrl+Alt+Shift"};
+    std::vector<std::string> correction_shortcuts{"Ctrl+Q"};
     bool language_shortcut_enabled{true};
     std::vector<std::string> language_shortcuts{"Ctrl+Space"};
     bool raw_input_shortcut_enabled{true};
