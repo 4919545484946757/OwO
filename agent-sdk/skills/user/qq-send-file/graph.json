@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "start": "search",
+  "nodes": [
+    {
+      "id": "search",
+      "action_type": "type",
+      "anchor": { "app_id": "qq", "role": "edit", "name": "联系人搜索框" },
+      "value_template": "{contact}",
+      "verify": null
+    },
+    {
+      "id": "enter",
+      "action_type": "click",
+      "anchor": { "app_id": "qq", "role": "listitem", "name": "会话项" },
+      "value_template": null,
+      "verify": null
+    },
+    {
+      "id": "attach",
+      "action_type": "click",
+      "anchor": { "app_id": "qq", "role": "button", "name": "发送文件" },
+      "value_template": null,
+      "verify": null
+    },
+    {
+      "id": "file",
+      "action_type": "type",
+      "anchor": { "app_id": "qq", "role": "edit", "name": "文件名" },
+      "value_template": "{file}",
+      "verify": null
+    },
+    {
+      "id": "send",
+      "action_type": "click",
+      "anchor": { "app_id": "qq", "role": "button", "name": "发送" },
+      "value_template": null,
+      "verify": null
+    }
+  ],
+  "edges": [
+    { "from": "search", "to": "enter", "precondition": null, "verify": "窗口/标题变化" },
+    { "from": "enter", "to": "attach", "precondition": null, "verify": null },
+    { "from": "attach", "to": "file", "precondition": null, "verify": null },
+    { "from": "file", "to": "send", "precondition": null, "verify": null }
+  ]
+}

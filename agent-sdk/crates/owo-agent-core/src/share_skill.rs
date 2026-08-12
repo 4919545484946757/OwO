@@ -216,4 +216,28 @@ mod tests {
         let error = import_flow_skill_package(&cursor.into_inner()).unwrap_err();
         assert!(error.contains("非法包内路径"));
     }
+
+    #[test]
+    fn qq_send_file_example_package_is_valid_and_round_trips() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../skills/user/qq-send-file");
+        let skill_md = std::fs::read_to_string(root.join("SKILL.md")).unwrap();
+        let graph: ActionGraph =
+            serde_json::from_str(&std::fs::read_to_string(root.join("graph.json")).unwrap())
+                .unwrap();
+        let manifest: FlowSkillManifest =
+            serde_json::from_str(&std::fs::read_to_string(root.join("manifest.json")).unwrap())
+                .unwrap();
+        let package = FlowSkillPackage {
+            manifest,
+            graph,
+            skill_md,
+        };
+        package.validate().unwrap();
+        assert_eq!(package.manifest.variables, vec!["contact", "file"]);
+        let bytes = export_flow_skill_package(&package).unwrap();
+        let imported = import_flow_skill_package(&bytes).unwrap();
+        assert_eq!(imported.manifest.name, "qq-send-file");
+        assert_eq!(imported.graph.nodes.len(), 5);
+    }
 }
