@@ -57,6 +57,25 @@
       <ul id="packageList" class="list"></ul>
     </section>
     <section>
+      <h2>自动化</h2>
+      <form id="automationForm" class="stack">
+        <input id="autoName" placeholder="任务名（如 每小时提醒）" required>
+        <select id="autoKind">
+          <option value="interval">间隔（秒）</option>
+          <option value="daily">每天（HH:MM）</option>
+          <option value="oneshot">单次（RFC3339）</option>
+        </select>
+        <input id="autoValue" placeholder="60 / 09:00 / 2026-08-12T12:00:00Z" required>
+        <input id="autoReminder" placeholder="提醒内容" required>
+        <button type="submit">创建任务</button>
+      </form>
+      <ul id="automationList" class="list"></ul>
+      <div class="inline" style="margin-top:6px">
+        <button id="clearReminders">清除提醒</button>
+      </div>
+      <ul id="reminderList" class="list"></ul>
+    </section>
+    <section>
       <h2>应用白名单</h2>
       <ul id="whitelistList" class="list"></ul>
       <form id="whitelistForm" class="inline">

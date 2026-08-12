@@ -32,6 +32,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - P3 桌面闭环 UI（`desktop/web`）：操作学习面板（开始/暂停/恢复/结束/清空录制、沉淀技能包、流程技能包列表与一键执行）+ 主动建议区（学习/执行一次/忽略/静默 四选）；接口 `/learn/start|stop|packages|sink|execute-package`、`/proactive/suggestions`。
 - P3 执行审批：`/learn/execute` 与 `/learn/execute-package` 服务端强制 `confirm: true`（首次执行必须确认），确认与分步结果写入审计；录制自动观察（`start_observer`）在录制中每 2s 采样前台/剪贴板掩码事件（前台变化去重、剪贴板按序列号去重）。
 - P3 高敏感二次确认：`sensitivity=high` 的流程技能包执行还需 `high_risk_ack: true`，否则 400；确认写入审计。
+- 自动化面板（P1）：`automation.rs` 定时任务（单次/间隔/每天）+ 提醒动作，持久化 `<data>/automations.json`，常驻循环每秒检查、触发写审计；接口 `GET/POST /automations`、`POST /automations/{id}/toggle`、`DELETE /automations/{id}`、`GET /automations/reminders`、`POST /automations/reminders/clear`；Web 工作台自动化面板（创建/启停/删除/提醒列表）。
 - 流程技能包分享（D26）：`share_skill.rs` 导出/导入 `.owskill`（ZIP，含 SKILL.md/graph.json/manifest.json/versions.json）；导入校验顺序为 schema → 权限白名单（默认 deny）→ 敏感度必填 → 变量/动作图合法，zip-slip 拒绝；接口 `GET /learn/export/{name}`、`POST /learn/import`（raw ZIP），Web 工作台支持导出/导入。
 - 语音输入（本地优先）：Web 工作台 🎤 按钮用 WebAudio 采集麦克风 → 16k WAV → `POST /stt/transcribe`（SenseVoice-Small 本地推理）→ 转写进输入框；本地 STT 不可用（模型缺失/权限拒绝）时自动回退系统 Web Speech；最长录 10 秒自动停止。
 - 桌面自启：Tauri 托盘新增“开机自启：开/关”，写入/删除 HKCU Run 注册表项，启动时自动拉起核心服务常驻。

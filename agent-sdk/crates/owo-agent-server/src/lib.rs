@@ -11,6 +11,7 @@ use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use owo_agent_core::automation::{AutomationAction, AutomationStore, AutomationTask, Schedule};
 use owo_agent_core::learn::{
     ActionType, LearnPipeline, LearnState, ProactiveEngine, ProactiveSuggestion, RecordedAction,
     SemanticAnchor, Sensitivity, SuggestionAction,
@@ -49,6 +50,7 @@ pub struct AppState {
     pub pipeline: Arc<Mutex<LearnPipeline>>,
     pub proactive: Arc<Mutex<ProactiveEngine>>,
     pub stt: owo_agent_core::LocalStt,
+    pub automations: Arc<Mutex<AutomationStore>>,
 }
 
 impl AppState {
@@ -56,7 +58,7 @@ impl AppState {
         agent: Agent,
         store: impl SessionStore + 'static,
         traces_dir: PathBuf,
-        flow_skills_root: PathBuf,
+        data_root: PathBuf,
     ) -> Self {
         Self {
             agent: Arc::new(agent),
@@ -67,9 +69,12 @@ impl AppState {
             traces_dir,
             perception: Arc::new(Mutex::new(SituationStore::new())),
             whitelist: Arc::new(Mutex::new(Whitelist::default())),
-            pipeline: Arc::new(Mutex::new(LearnPipeline::new(flow_skills_root))),
+            pipeline: Arc::new(Mutex::new(LearnPipeline::new(
+                data_root.join("skills").join("user"),
+            ))),
             proactive: Arc::new(Mutex::new(ProactiveEngine::new(Default::default()))),
             stt: owo_agent_core::LocalStt::default_local(),
+            automations: Arc::new(Mutex::new(AutomationStore::new(data_root))),
         }
     }
 }
@@ -117,6 +122,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/proactive/decide", post(proactive_decide))
         .route("/proactive/suggestions", get(proactive_suggestions))
         .route("/stt/transcribe", post(stt_transcribe))
+        .route("/automations", get(automations_list))
+        .route("/automations", post(automations_create))
+        .route("/automations/{id}/toggle", post(automations_toggle))
+        .route(
+            "/automations/{id}",
+            axum::routing::delete(automations_delete),
+        )
+        .route("/automations/reminders", get(automations_reminders))
+        .route(
+            "/automations/reminders/clear",
+            post(automations_clear_reminders),
+        )
         .route("/whitelist", get(whitelist_list))
         .route("/whitelist/manage", post(whitelist_manage))
         .fallback_service(ServeDir::new(desktop_web_dir()))
@@ -184,6 +201,11 @@ async fn openapi_spec() -> Json<Value> {
             "/proactive/decide": { "post": { "operationId": "proactiveDecide", "responses": { "200": { "description": "ok" } } } },
             "/proactive/suggestions": { "get": { "operationId": "proactiveSuggestions", "responses": { "200": { "description": "suggestion list" } } } },
             "/stt/transcribe": { "post": { "operationId": "sttTranscribe", "responses": { "200": { "description": "transcription text" } } } },
+            "/automations": { "get": { "operationId": "automationsList", "responses": { "200": { "description": "automation tasks" } } }, "post": { "operationId": "automationsCreate", "responses": { "200": { "description": "created task" } } } },
+            "/automations/{id}/toggle": { "post": { "operationId": "automationsToggle", "parameters": [path_param("id")], "responses": { "200": { "description": "enabled state" } } } },
+            "/automations/{id}": { "delete": { "operationId": "automationsDelete", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
+            "/automations/reminders": { "get": { "operationId": "automationsReminders", "responses": { "200": { "description": "pending reminders" } } } },
+            "/automations/reminders/clear": { "post": { "operationId": "automationsClearReminders", "responses": { "200": { "description": "ok" } } } },
             "/whitelist": { "get": { "operationId": "whitelistList", "responses": { "200": { "description": "whitelist entries" } } } },
             "/whitelist/manage": { "post": { "operationId": "whitelistManage", "responses": { "200": { "description": "whitelist entries" } } } }
         },
@@ -1041,6 +1063,106 @@ async fn stt_transcribe(
         "elapsed_ms": outcome.elapsed_ms,
         "engine": state.stt.engine(),
     })))
+}
+
+// ---------- 自动化 ----------
+
+#[derive(serde::Deserialize)]
+struct CreateAutomationRequest {
+    name: String,
+    schedule: Schedule,
+    reminder: String,
+}
+
+async fn automations_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<AutomationTask>>, (StatusCode, String)> {
+    let automations = state.automations.lock().map_err(poison)?;
+    Ok(Json(automations.list()))
+}
+
+async fn automations_create(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateAutomationRequest>,
+) -> Result<Json<AutomationTask>, (StatusCode, String)> {
+    let task = AutomationTask::new(
+        &request.name,
+        request.schedule,
+        AutomationAction::Reminder {
+            text: request.reminder,
+        },
+    );
+    let mut automations = state.automations.lock().map_err(poison)?;
+    automations
+        .upsert(task.clone())
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    Ok(Json(task))
+}
+
+async fn automations_toggle(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut automations = state.automations.lock().map_err(poison)?;
+    let enabled = automations
+        .toggle(&id)
+        .map_err(|error| (StatusCode::NOT_FOUND, error))?;
+    Ok(Json(json!({ "id": id, "enabled": enabled })))
+}
+
+async fn automations_delete(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut automations = state.automations.lock().map_err(poison)?;
+    automations
+        .remove(&id)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn automations_reminders(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    let automations = state.automations.lock().map_err(poison)?;
+    Ok(Json(automations.reminders().to_vec()))
+}
+
+async fn automations_clear_reminders(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut automations = state.automations.lock().map_err(poison)?;
+    automations
+        .clear_reminders()
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 自动化常驻循环：每秒检查到期任务，触发提醒并写审计。
+pub async fn start_automation_loop(state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        let fired = {
+            let mut automations = state
+                .automations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = chrono::Utc::now();
+            let mut fired = Vec::new();
+            for id in automations.due_tasks(now) {
+                if let Ok(text) = automations.fire(&id, now) {
+                    fired.push(text);
+                }
+            }
+            fired
+        };
+        if !fired.is_empty() {
+            if let Ok(mut audit) = state.agent.audit_log().lock() {
+                audit.record("automation", "fire", None, Some(true), fired.join(" | "));
+            }
+        }
+    }
 }
 
 async fn whitelist_list(

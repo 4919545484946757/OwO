@@ -244,6 +244,88 @@ async function importPackage(file) {
   }
 }
 
+async function refreshAutomations() {
+  try {
+    const tasks = await api("/automations");
+    const list = $("automationList");
+    list.innerHTML = "";
+    for (const task of tasks) {
+      const li = document.createElement("li");
+      const schedule = JSON.stringify(task.schedule);
+      li.innerHTML = `<strong>${esc(task.name)}</strong><span class="sub">${esc(schedule)} ｜ ${task.enabled ? "启用" : "停用"}</span>`;
+      const toggleBtn = document.createElement("button");
+      toggleBtn.textContent = task.enabled ? "停用" : "启用";
+      toggleBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        await api(`/automations/${task.id}/toggle`, { method: "POST" });
+        await refreshAutomations();
+      });
+      const deleteBtn = document.createElement("button");
+      deleteBtn.textContent = "删除";
+      deleteBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        await fetch(`${API_BASE}/automations/${task.id}`, { method: "DELETE" });
+        await refreshAutomations();
+      });
+      li.appendChild(toggleBtn);
+      li.appendChild(deleteBtn);
+      list.appendChild(li);
+    }
+    if (!tasks.length) list.innerHTML = '<li class="sub">暂无自动化任务</li>';
+  } catch (_) {
+    $("automationList").innerHTML = '<li class="sub">加载失败</li>';
+  }
+}
+
+async function createAutomation() {
+  const name = $("autoName").value.trim();
+  const kind = $("autoKind").value;
+  const value = $("autoValue").value.trim();
+  const reminder = $("autoReminder").value.trim();
+  if (!name || !value || !reminder) return;
+  let schedule;
+  if (kind === "interval") {
+    const everySecs = parseInt(value, 10);
+    if (!Number.isFinite(everySecs) || everySecs <= 0) {
+      addMessage("error", "间隔需为正整数（秒）");
+      return;
+    }
+    schedule = { kind: "interval", every_secs: everySecs };
+  } else if (kind === "daily") {
+    schedule = { kind: "daily", time: value };
+  } else {
+    schedule = { kind: "oneshot", at: value };
+  }
+  try {
+    await api("/automations", {
+      method: "POST",
+      body: JSON.stringify({ name, schedule, reminder }),
+    });
+    $("autoName").value = "";
+    $("autoValue").value = "";
+    $("autoReminder").value = "";
+    await refreshAutomations();
+  } catch (error) {
+    addMessage("error", `创建自动化失败：${error.message}`);
+  }
+}
+
+async function refreshReminders() {
+  try {
+    const reminders = await api("/automations/reminders");
+    const list = $("reminderList");
+    list.innerHTML = "";
+    for (const text of reminders) {
+      const li = document.createElement("li");
+      li.textContent = `⏰ ${text}`;
+      list.appendChild(li);
+    }
+    if (!reminders.length) list.innerHTML = '<li class="sub">暂无提醒</li>';
+  } catch (_) {
+    $("reminderList").innerHTML = '<li class="sub">加载失败</li>';
+  }
+}
+
 async function executePackage(pkg) {
   let variables = {};
   if (pkg.variables && pkg.variables.length) {
@@ -570,6 +652,14 @@ $("skillImportBtn").addEventListener("click", () => {
   importPackage(file);
   $("skillImport").value = "";
 });
+$("automationForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  createAutomation();
+});
+$("clearReminders").addEventListener("click", async () => {
+  await api("/automations/reminders/clear", { method: "POST" });
+  await refreshReminders();
+});
 $("whitelistForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const appId = $("wlAppId").value.trim();
@@ -666,6 +756,8 @@ async function boot() {
     refreshSkills(),
     refreshPackages(),
     refreshSuggestions(),
+    refreshAutomations(),
+    refreshReminders(),
     refreshWhitelist(),
     refreshPerception(),
     refreshLearn(),
@@ -674,6 +766,8 @@ async function boot() {
   setInterval(refreshLearn, 5000);
   setInterval(refreshPackages, 10000);
   setInterval(refreshSuggestions, 10000);
+  setInterval(refreshAutomations, 10000);
+  setInterval(refreshReminders, 5000);
   setInterval(refreshHealth, 15000);
 }
 
