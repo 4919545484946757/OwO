@@ -322,10 +322,63 @@ impl UiActionSource for WindowsUiaSource {
     }
 
     fn verify(&self, predicate: &str) -> Result<bool, String> {
+        if let Some(expected) = predicate.strip_prefix("value:") {
+            let value = self.focused_edit_value()?;
+            return Ok(value.contains(expected));
+        }
         let title = crate::platform::foreground_title();
         Ok(title
             .map(|title| title.contains(predicate))
             .unwrap_or(false))
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsUiaSource {
+    /// 读取前台窗口内第一个可编辑控件的当前值（ValuePattern），用于“输入后回读验证”。
+    fn focused_edit_value(&self) -> Result<String, String> {
+        self.find_value_edit(&self.root, 0)
+            .ok_or_else(|| "未找到可读回的可编辑控件".to_string())
+    }
+
+    /// 递归查找第一个带 ValuePattern 且当前值非空的控件（兼容 Edit/Document 等类型）。
+    fn find_value_edit(
+        &self,
+        element: &windows::Win32::UI::Accessibility::IUIAutomationElement,
+        depth: u32,
+    ) -> Option<String> {
+        use windows::Win32::UI::Accessibility::{
+            IUIAutomationValuePattern, TreeScope_Children, UIA_ValuePatternId,
+        };
+        unsafe {
+            if let Ok(pattern) =
+                element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            {
+                if let Ok(value) = pattern.CurrentValue() {
+                    let text = value.to_string();
+                    if !text.trim().is_empty() {
+                        return Some(text);
+                    }
+                }
+            }
+            if depth >= 8 {
+                return None;
+            }
+            if let Ok(condition) = self.automation.CreateTrueCondition() {
+                if let Ok(children) = element.FindAll(TreeScope_Children, &condition) {
+                    if let Ok(length) = children.Length() {
+                        for index in 0..length {
+                            if let Ok(child) = children.GetElement(index) {
+                                if let Some(value) = self.find_value_edit(&child, depth + 1) {
+                                    return Some(value);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }
 

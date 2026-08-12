@@ -108,6 +108,7 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 | 自动更新（updater） | ✅ 骨架+签名管线 | tauri-plugin-updater 接入：托盘“检查更新”、端点为占位 URL、真实签名公钥（私钥在 .secrets，gitignore）；`generate-update-manifest.ps1` 实测签名安装包并产出 latest.json（signature 416 字符）；编译/clippy 通过 |
 | 录制自动观察实机验证 | ✅ | 修复：observer 原本被错误 spawn 进 run_bench，已移到 run_serve；实测：开始录制后 5s 自动采到 2 条掩码样本（前台去重生效），停止后待沉淀 |
 | 自动化面板（P1） | ✅ | automation.rs：单次/间隔/每天调度 + 提醒动作 + JSON 持久化 + 触发审计；4 个契约测试；冒烟：创建间隔 2s 任务 → 5s 内触发 2 条提醒（last_run 更新）→ 停用 → 删除；Web 工作台面板（创建/启停/删除/提醒列表） |
+| P3 真实桌面端到端（Notepad 示范→复用） | ✅ | 执行器新增 ValuePattern 回读验证（递归找可编辑控件）；实测：Notepad 中输入“你好 OwO”并回读验证 ok → 换参数“第二次复用 456”再次执行 ok（2/2 成功，未越权、敏感面熔断保持） |
 | 便携打包发布 | ✅ | `scripts/package-desktop.ps1`：release 构建 → `dist/OwO-Agent-release.zip`（核心服务 + 桌面壳 + skills + README，6.8MB）；桌面壳 exe 同级定位核心服务与技能包；便携包冒烟：核心服务就绪、4 个内置技能从随包目录加载 |
 | NSIS 安装程序 | ✅ | `scripts/build-installer.ps1`：externalBin 内置核心服务（`owo-agent-x64.exe` 运行时同级定位）→ `OwO Agent_0.1.0_x64-setup.exe`（4.8MB，含核心服务；简体中文/English、当前用户安装）；实际构建通过 |
 
