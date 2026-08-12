@@ -133,11 +133,50 @@ async function refreshPackages() {
       const li = document.createElement("li");
       li.innerHTML = `<strong>${esc(package.name)}</strong><span class="sub">目标：${esc(package.target_apps.join(","))} ｜ 变量：${esc(package.variables.join(",")) || "无"}</span>`;
       li.addEventListener("click", () => executePackage(package));
+      const exportBtn = document.createElement("button");
+      exportBtn.textContent = "导出";
+      exportBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        await exportPackage(package.name);
+      });
+      li.appendChild(exportBtn);
       list.appendChild(li);
     }
     if (!packages.length) list.innerHTML = '<li class="sub">暂无流程技能包（先录制再沉淀）</li>';
   } catch (_) {
     $("packageList").innerHTML = '<li class="sub">加载失败</li>';
+  }
+}
+
+async function exportPackage(name) {
+  try {
+    const response = await fetch(`${API_BASE}/learn/export/${encodeURIComponent(name)}`);
+    if (!response.ok) throw new Error(await response.text());
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${name}.owskill`;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    addMessage("error", `导出失败：${error.message}`);
+  }
+}
+
+async function importPackage(file) {
+  try {
+    const response = await fetch(`${API_BASE}/learn/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/zip" },
+      body: file,
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || response.statusText);
+    addMessage("system", `已导入技能包 ${result.name}`);
+    await refreshPackages();
+  } catch (error) {
+    addMessage("error", `导入失败：${error.message}`);
   }
 }
 
@@ -457,6 +496,15 @@ $("learnClear").addEventListener("click", () => learnControl("clear"));
 $("sinkForm").addEventListener("submit", (event) => {
   event.preventDefault();
   sinkSkill();
+});
+$("skillImportBtn").addEventListener("click", () => {
+  const file = $("skillImport").files[0];
+  if (!file) {
+    addMessage("system", "请先选择 .owskill 文件");
+    return;
+  }
+  importPackage(file);
+  $("skillImport").value = "";
 });
 $("whitelistForm").addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -4,6 +4,7 @@
 //! 以及 v0.4 接口：context.snapshot / perception.subscribe / learn.* / skill.verify /
 //! proactive.suggest / whitelist.manage。
 
+use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
@@ -107,6 +108,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/learn/packages", get(learn_packages))
         .route("/learn/sink", post(learn_sink))
         .route("/learn/execute-package", post(learn_execute_package))
+        .route("/learn/export/{name}", get(learn_export))
+        .route("/learn/import", post(learn_import))
         .route("/skill/verify", post(skill_verify))
         .route("/proactive/observe", post(proactive_observe))
         .route("/proactive/decide", post(proactive_decide))
@@ -171,6 +174,8 @@ async fn openapi_spec() -> Json<Value> {
             "/learn/packages": { "get": { "operationId": "learnPackages", "responses": { "200": { "description": "flow skill packages" } } } },
             "/learn/sink": { "post": { "operationId": "learnSink", "responses": { "200": { "description": "sunk package" } } } },
             "/learn/execute-package": { "post": { "operationId": "learnExecutePackage", "responses": { "200": { "description": "execution report" } } } },
+            "/learn/export/{name}": { "get": { "operationId": "learnExport", "parameters": [path_param("name")], "responses": { "200": { "description": "owskill zip" } } } },
+            "/learn/import": { "post": { "operationId": "learnImport", "responses": { "200": { "description": "imported package" } } } },
             "/skill/verify": { "post": { "operationId": "skillVerify", "responses": { "200": { "description": "validation result" } } } },
             "/proactive/observe": { "post": { "operationId": "proactiveObserve", "responses": { "200": { "description": "optional suggestion" } } } },
             "/proactive/decide": { "post": { "operationId": "proactiveDecide", "responses": { "200": { "description": "ok" } } } },
@@ -906,6 +911,54 @@ async fn learn_execute_package(
         }
     }
     Ok(Json(report))
+}
+
+/// 导出流程技能包为 `.owskill`（ZIP）。
+async fn learn_export(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let package = {
+        let pipeline = state.pipeline.lock().map_err(poison)?;
+        pipeline
+            .store
+            .load(&name)
+            .map_err(|error| (StatusCode::NOT_FOUND, error))?
+    };
+    let bytes = owo_agent_core::export_flow_skill_package(&package)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let disposition = format!("attachment; filename=\"{name}.owskill\"");
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/zip".to_string(),
+            ),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// 导入 `.owskill`（ZIP）并保存到用户技能包目录。
+async fn learn_import(
+    State(state): State<Arc<AppState>>,
+    body: Bytes,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let package = owo_agent_core::import_flow_skill_package(&body)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let pipeline = state.pipeline.lock().map_err(poison)?;
+    pipeline
+        .store
+        .save(&package)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    Ok(Json(json!({
+        "ok": true,
+        "name": package.manifest.name,
+        "variables": package.manifest.variables,
+        "target_apps": package.manifest.target_apps,
+    })))
 }
 
 #[derive(serde::Deserialize)]

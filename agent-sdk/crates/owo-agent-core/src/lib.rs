@@ -19,6 +19,7 @@ pub mod plugin;
 pub mod session;
 pub mod settings;
 pub mod share;
+pub mod share_skill;
 pub mod skill;
 pub mod skill_pack;
 pub mod sqlite_store;
@@ -54,6 +55,7 @@ pub use plugin::{discover_plugins, PluginManifest};
 pub use session::{JsonSessionStore, Session, SessionStore};
 pub use settings::Settings;
 pub use share::{export_html, export_markdown};
+pub use share_skill::{export_flow_skill_package, import_flow_skill_package};
 pub use skill::{Skill, SkillRegistry};
 pub use skill_pack::{
     discover_builtin_packages, install_builtin_packages, validate_skill_package,
