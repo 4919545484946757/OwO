@@ -14,3 +14,4 @@ axum.workspace = true
 tokio-stream.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+tower-http = { version = "0.6", features = ["fs"] }

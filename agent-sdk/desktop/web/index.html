@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OwO Agent 工作台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>OwO Agent 工作台 <span class="tag">v0.4 P1</span></h1>
+    <div class="header-right">
+      <span id="health" class="pill">连接中…</span>
+      <span id="permission" class="pill">感知：—</span>
+      <span id="learnState" class="pill">学习：—</span>
+    </div>
+  </header>
+
+  <aside id="sidebar">
+    <section>
+      <h2>工作区</h2>
+      <input id="workspace" value="D:\大创\智能输入法\OwO-master\agent-sdk" placeholder="工作区绝对路径">
+    </section>
+    <section>
+      <h2>任务</h2>
+      <button id="newSession" class="primary">＋ 新建会话</button>
+      <ul id="sessionList" class="list"></ul>
+    </section>
+    <section>
+      <h2>技能中心</h2>
+      <ul id="skillList" class="list"></ul>
+    </section>
+    <section>
+      <h2>应用白名单</h2>
+      <ul id="whitelistList" class="list"></ul>
+      <form id="whitelistForm" class="inline">
+        <input id="wlAppId" placeholder="app_id" required>
+        <button type="submit">添加 P0</button>
+      </form>
+    </section>
+  </aside>
+
+  <main>
+    <div id="approvalBar" class="hidden">
+      <span id="approvalText"></span>
+      <button id="approveBtn" class="allow">允许</button>
+      <button id="denyBtn" class="deny">拒绝</button>
+    </div>
+    <div id="messages"></div>
+    <form id="chatForm">
+      <textarea id="prompt" rows="3" placeholder="输入任务，Enter 发送（Shift+Enter 换行）；/new 建新会话"></textarea>
+      <button type="submit" class="primary">发送</button>
+    </form>
+  </main>
+
+  <aside id="right">
+    <section>
+      <h2>情景感知</h2>
+      <pre id="snapshot">—</pre>
+    </section>
+    <section>
+      <h2>diff 审阅</h2>
+      <ul id="diffList" class="list"></ul>
+      <button id="revertBtn">回滚全部改动</button>
+    </section>
+  </aside>
+
+  <script src="app.js"></script>
+</body>
+</html>

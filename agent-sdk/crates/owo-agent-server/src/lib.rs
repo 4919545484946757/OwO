@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tower_http::services::ServeDir;
 
 pub struct AppState {
     pub agent: Arc<Agent>,
@@ -79,6 +80,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/redo", post(redo_session))
         .route("/session/{id}/children", get(children))
         .route("/session/{id}/export/{format}", get(export_session))
+        .route("/sessions", get(list_sessions))
+        .route("/skills", get(list_skills))
         .route("/eval/run", post(run_eval))
         .route("/context/snapshot", get(context_snapshot))
         .route("/perception/events", get(perception_events))
@@ -92,7 +95,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/proactive/decide", post(proactive_decide))
         .route("/whitelist", get(whitelist_list))
         .route("/whitelist/manage", post(whitelist_manage))
+        .fallback_service(ServeDir::new(desktop_web_dir()))
         .with_state(state)
+}
+
+/// 开发环境下的桌面工作台静态目录：`<repo>/agent-sdk/desktop/web`。
+fn desktop_web_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|parent| parent.parent())
+        .map(|root| root.join("desktop").join("web"))
+        .unwrap_or_else(|| PathBuf::from("desktop/web"))
 }
 
 async fn openapi_spec() -> Json<Value> {
@@ -122,6 +135,8 @@ async fn openapi_spec() -> Json<Value> {
             "/session/{id}/redo": { "post": { "operationId": "sessionRedo", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
             "/session/{id}/children": { "get": { "operationId": "sessionChildren", "parameters": [path_param("id")], "responses": { "200": { "description": "children" } } } },
             "/session/{id}/export/{format}": { "get": { "operationId": "exportSession", "parameters": [path_param("id"), path_param("format")], "responses": { "200": { "description": "md or html" } } } },
+            "/sessions": { "get": { "operationId": "listSessions", "responses": { "200": { "description": "session list" } } } },
+            "/skills": { "get": { "operationId": "listSkills", "responses": { "200": { "description": "skill list" } } } },
             "/eval/run": { "post": { "operationId": "runEval", "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EvalRunRequest" } } } }, "responses": { "200": { "description": "eval report" } } } },
             "/context/snapshot": { "get": { "operationId": "contextSnapshot", "responses": { "200": { "description": "situation snapshot" } } } },
             "/perception/events": { "get": { "operationId": "perceptionSubscribe", "responses": { "200": { "description": "SSE perception event stream" } } } },
@@ -202,6 +217,37 @@ async fn health() -> Json<HealthResponse> {
         healthy: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<SessionInfo>>, (StatusCode, String)> {
+    let mut sessions = Vec::new();
+    for session_id in state.store.list() {
+        if let Ok(session) = state.store.load(&session_id) {
+            sessions.push(to_session_info(&session));
+        }
+    }
+    sessions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(Json(sessions))
+}
+
+async fn list_skills(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+    let skills = state.agent.skills().list();
+    Ok(Json(
+        skills
+            .iter()
+            .map(|skill| {
+                json!({
+                    "name": skill.name,
+                    "description": skill.description,
+                    "path": skill.path.to_string_lossy(),
+                })
+            })
+            .collect(),
+    ))
 }
 
 async fn create_session(

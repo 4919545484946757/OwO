@@ -21,6 +21,15 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 内置技能包（`skills/`）：documents / spreadsheets / pdf / browser，遵循 SKILL.md + manifest.json + tests/ 契约，启动时自动安装到数据目录。
 - HTTP 新接口：`GET /context/snapshot`、`GET /perception/events`（SSE）、`POST /learn/record|pause|resume|clear`、`GET /learn/status`、`POST /skill/verify`、`POST /proactive/observe|decide`、`GET /whitelist`、`POST /whitelist/manage`。
 - 设置组：`stt` / `explore` / `proactive` / `skills` / `whitelist`（参考 `settings.example.json`）。
+- 桌面工作台 Web 壳（P1 骨架）：`desktop/web/`（任务列表/对话 SSE 流式/审批条/diff 审阅/技能中心/感知状态区/白名单管理），由 HTTP 服务在 `/` 静态托管，后续用 Tauri 2 封装为桌面主客户端。
+
+### 打开桌面工作台
+
+```powershell
+$env:OPENAI_API_KEY = "<你的 API Key>"
+owo-agent serve --port 4096 --workspace .
+# 浏览器打开 http://127.0.0.1:4096/
+```
 
 ## 环境变量
 
