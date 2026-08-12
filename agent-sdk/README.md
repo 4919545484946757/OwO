@@ -60,6 +60,13 @@ python scripts\voice_code_e2e.py                   # 见脚本内环境变量（
 
 完整链路：TTS/真实语音 → `/stt/transcribe`（SenseVoice）→ `/session/{id}/turn`（Agent 读文件→改文件→跑测试）→ 审批自动放行 → 文件验证。
 
+批量跑分（成功率口径）：
+
+```powershell
+$env:E2E_ROUNDS = "20"   # 默认 10
+python scripts\voice_code_batch.py   # 输出 summary: N/N = xx%
+```
+
 ### 便携打包
 
 ```powershell
