@@ -161,7 +161,9 @@ async fn ocr_screen(max_boxes: usize) -> Result<Value, String> {
             "desktop",
         )
     };
-    let summary = crate::ocr::ocr_bmp_detailed(&bmp).map_err(|e| format!("OCR 失败：{e}"))?;
+    let summary = crate::paddle_ocr::ocr_preferred(&bmp)
+        .await
+        .map_err(|e| format!("OCR 失败：{e}"))?;
     let mut result = ocr_summary_json(&summary, max_boxes);
     if let Value::Object(map) = &mut result {
         map.insert("surface".into(), json!(surface));
@@ -215,6 +217,11 @@ pub fn desktop_shortcut(combo: &str) -> Result<(), String> {
 /// 公开同步入口：启动应用/URL。
 pub fn desktop_launch(target: &str) -> Result<(), String> {
     executor::launch_target(target)
+}
+
+/// 公开同步入口：屏幕坐标处滚轮（正上负下）。
+pub fn desktop_scroll(x: i32, y: i32, delta: i32) -> Result<(), String> {
+    executor::scroll_at_screen(x, y, delta)
 }
 
 pub struct ScreenOcrTool;
@@ -320,7 +327,10 @@ impl Tool for OcrRegionTool {
         } else {
             crate::platform::capture_screen().ok_or("屏幕截图失败")?
         };
-        let summary = crate::ocr::ocr_bmp_region(&bmp, x, y, width, height, scale)
+        let cropped = crate::ocr::crop_scale_bmp(&bmp, x, y, width, height, scale)
+            .map_err(|e| format!("区域裁剪失败：{e}"))?;
+        let summary = crate::paddle_ocr::ocr_preferred(&cropped)
+            .await
             .map_err(|e| format!("区域 OCR 失败：{e}"))?;
         let mut result = ocr_summary_json(&summary, 200);
         if let Value::Object(map) = &mut result {
@@ -608,6 +618,42 @@ impl Tool for DesktopWaitTool {
     }
 }
 
+pub struct DesktopScrollTool;
+
+#[async_trait]
+impl Tool for DesktopScrollTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "desktop_scroll".into(),
+            description: "把鼠标移到屏幕坐标 (x,y) 并滚动滚轮（delta 正数向上、负数向下，一格 120），用于滚动聊天/列表".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "x": { "type": "integer" },
+                    "y": { "type": "integer" },
+                    "delta": { "type": "integer" }
+                },
+                "required": ["x", "y", "delta"]
+            }),
+        }
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let x = args.get("x").and_then(Value::as_i64).ok_or("缺少 x")? as i32;
+        let y = args.get("y").and_then(Value::as_i64).ok_or("缺少 y")? as i32;
+        let delta = args
+            .get("delta")
+            .and_then(Value::as_i64)
+            .ok_or("缺少 delta")? as i32;
+        if on_sim_surface() {
+            // 模拟窗口布局固定，无需滚动。
+            return Ok(json!({ "scrolled": [x, y, delta], "surface": "sim" }));
+        }
+        executor::scroll_at_screen(x, y, delta)?;
+        Ok(json!({ "scrolled": [x, y, delta] }))
+    }
+}
+
 pub struct DesktopWaitUntilTool;
 
 #[async_trait]
@@ -769,6 +815,30 @@ impl Tool for VisionVerifyTool {
             "confidence": confidence,
             "raw": raw,
         }))
+    }
+}
+
+pub struct VisionGroundTool;
+
+#[async_trait]
+impl Tool for VisionGroundTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "vision_ground".into(),
+            description: "让视觉模型定位描述的元素（返回坐标框），并与 OCR 文本交叉验证；只有 matched=true 且 cross_validated=true 时才可点击返回的 line 中心；这是兜底定位，优先用 screen_ocr".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "description": { "type": "string", "description": "要定位的元素描述，例如“发送按钮”“输入框”" }
+                },
+                "required": ["description"]
+            }),
+        }
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let description = required_string(&args, "description")?;
+        crate::vision::ground_element(&description).await
     }
 }
 

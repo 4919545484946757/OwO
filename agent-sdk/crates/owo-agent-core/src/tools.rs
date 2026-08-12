@@ -58,10 +58,12 @@ impl ToolRegistry {
         registry.register(crate::computer_use::DesktopKeyTool);
         registry.register(crate::computer_use::DesktopShortcutTool);
         registry.register(crate::computer_use::DesktopLaunchTool);
+        registry.register(crate::computer_use::DesktopScrollTool);
         registry.register(crate::computer_use::DesktopWaitTool);
         registry.register(crate::computer_use::DesktopWaitUntilTool);
         registry.register(crate::computer_use::ScreenVisionTool);
         registry.register(crate::computer_use::VisionVerifyTool);
+        registry.register(crate::computer_use::VisionGroundTool);
         let browser = crate::computer_use::BrowserTools::new();
         registry.register(crate::computer_use::BrowserNavigateTool {
             tools: browser.clone(),

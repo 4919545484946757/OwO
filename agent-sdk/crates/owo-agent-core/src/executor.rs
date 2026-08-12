@@ -634,6 +634,34 @@ pub(crate) fn click_at_screen(x: i32, y: i32) -> Result<(), String> {
     }
 }
 
+/// 在屏幕坐标处滚动鼠标滚轮（delta 为正向上、负向下，一格 120）。
+pub(crate) fn scroll_at_screen(x: i32, y: i32, delta: i32) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+    unsafe { SetCursorPos(x, y) }.map_err(|error| format!("SetCursorPos 失败：{error}"))?;
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: delta as u32,
+                dwFlags: MOUSEEVENTF_WHEEL,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    if sent == 1 {
+        Ok(())
+    } else {
+        Err("SendInput 滚轮注入失败".to_string())
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 fn launch_target(target: &str) -> Result<(), String> {
     if target.trim().is_empty() {

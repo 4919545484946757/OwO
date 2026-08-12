@@ -200,8 +200,8 @@ pub fn activate_window(process: &str, title: &str) -> Result<(), String> {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
-        SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SW_RESTORE,
+        SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_RESTORE,
     };
     let candidates = window_list();
     let target = candidates
@@ -239,6 +239,25 @@ pub fn activate_window(process: &str, title: &str) -> Result<(), String> {
                 0,
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            // 临时置顶再取消：把窗口真正抬到非置顶窗口之上（应对被 Codex/浏览器遮挡）。
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            );
+            SetWindowPos(
+                hwnd,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
             );
         } else {
             SetForegroundWindow(hwnd);

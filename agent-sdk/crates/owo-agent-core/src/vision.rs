@@ -91,6 +91,12 @@ pub fn bmp_to_png(bmp: &[u8]) -> Result<Vec<u8>, String> {
 
 /// 把当前视觉面（模拟帧或真实屏幕）截图转成 PNG。
 pub async fn capture_vision_png() -> Result<(Vec<u8>, String), String> {
+    let (bmp, surface) = capture_vision_bmp().await?;
+    bmp_to_png(&bmp).map(|png| (png, surface))
+}
+
+/// 获取当前视觉面的原始 BMP + 表面名（模拟帧或真实屏幕）。
+pub async fn capture_vision_bmp() -> Result<(Vec<u8>, String), String> {
     if std::env::var("OWO_SIM_QQ_URL")
         .map(|value| !value.is_empty())
         .unwrap_or(false)
@@ -105,10 +111,10 @@ pub async fn capture_vision_png() -> Result<(Vec<u8>, String), String> {
             .await
             .map_err(|e| format!("模拟窗口截图读取失败：{e}"))?
             .to_vec();
-        return bmp_to_png(&bytes).map(|png| (png, "sim".to_string()));
+        return Ok((bytes, "sim".to_string()));
     }
     let bytes = crate::platform::capture_screen().ok_or("屏幕截图失败")?;
-    bmp_to_png(&bytes).map(|png| (png, "desktop".to_string()))
+    Ok((bytes, "desktop".to_string()))
 }
 
 /// 视觉模型场景描述/验证（主入口）。
@@ -275,6 +281,137 @@ pub fn parse_verification(text: &str) -> (String, Option<f64>) {
     (answer.to_string(), confidence)
 }
 
+/// 解析视觉模型返回的边界框：`BOX x,y,w,h`、`x,y,w,h` 或 JSON `{"box":[x,y,w,h]}`。
+pub fn parse_vision_box(text: &str) -> Option<(i32, i32, i32, i32)> {
+    let normalized = text.replace(['(', ')', '[', ']', '“', '”', '"'], " ");
+    if let Some(start) = normalized.find("BOX") {
+        let rest = &normalized[start + 3..];
+        let numbers: Vec<i32> = rest
+            .split(|c: char| !c.is_ascii_digit() && c != '-')
+            .filter_map(|part| part.parse::<i32>().ok())
+            .collect();
+        if numbers.len() >= 4 {
+            return Some((numbers[0], numbers[1], numbers[2], numbers[3]));
+        }
+    }
+    if let Some(start) = normalized.find("box") {
+        let rest = &normalized[start + 3..];
+        let numbers: Vec<i32> = rest
+            .split(|c: char| !c.is_ascii_digit() && c != '-')
+            .filter_map(|part| part.parse::<i32>().ok())
+            .collect();
+        if numbers.len() >= 4 {
+            return Some((numbers[0], numbers[1], numbers[2], numbers[3]));
+        }
+    }
+    // 裸四元组（前面没有 BOX 关键字）
+    let numbers: Vec<i32> = normalized
+        .split(|c: char| !c.is_ascii_digit() && c != '-')
+        .filter_map(|part| part.parse::<i32>().ok())
+        .collect();
+    if numbers.len() == 4 {
+        return Some((numbers[0], numbers[1], numbers[2], numbers[3]));
+    }
+    None
+}
+
+/// 交叉验证：OCR 行中心是否落在视觉框内（grounding 必须与 OCR 文本重合才允许点击）。
+pub fn cross_validate_box(
+    r#box: &(i32, i32, i32, i32),
+    lines: &[crate::ocr::OcrLine],
+) -> Option<serde_json::Value> {
+    let (bx, by, bw, bh) = *r#box;
+    for line in lines {
+        let cx = line.x + line.width / 2;
+        let cy = line.y + line.height / 2;
+        if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
+            return Some(serde_json::json!({
+                "text": line.text,
+                "x": line.x,
+                "y": line.y,
+                "width": line.width,
+                "height": line.height,
+            }));
+        }
+    }
+    None
+}
+
+/// 视觉 grounding（兜底定位）：视觉模型给出元素框 → 与 OCR 文本行交叉验证。
+pub async fn ground_element(description: &str) -> Result<serde_json::Value, String> {
+    let (bmp, surface) = capture_vision_bmp().await?;
+    let png = bmp_to_png(&bmp)?;
+    let prompt = format!(
+        "截图中有没有满足以下描述的元素：{description}。如果有，只输出 BOX x,y,w,h \
+         （四个整数：左上角 x、y，宽度 w、高度 h）；如果没有，只输出 NONE。"
+    );
+    let raw = describe_image(&png, &prompt).await?;
+    let Some(r#box) = parse_vision_box(&raw) else {
+        return Ok(serde_json::json!({
+            "matched": false,
+            "description": description,
+            "reason": "视觉模型未给出坐标框",
+            "raw": raw,
+            "surface": surface,
+        }));
+    };
+    let lines = current_ocr_lines(&bmp).await;
+    if let Some(line) = cross_validate_box(&r#box, &lines) {
+        Ok(serde_json::json!({
+            "matched": true,
+            "description": description,
+            "box": r#box,
+            "line": line,
+            "cross_validated": true,
+            "surface": surface,
+        }))
+    } else {
+        Ok(serde_json::json!({
+            "matched": false,
+            "description": description,
+            "box": r#box,
+            "reason": "视觉框与 OCR 文本未重合，不允许点击",
+            "surface": surface,
+        }))
+    }
+}
+
+/// 当前视觉面的 OCR 行：模拟面用真值版面（/ocr），真实桌面用 Media.Ocr。
+async fn current_ocr_lines(bmp: &[u8]) -> Vec<crate::ocr::OcrLine> {
+    if std::env::var("OWO_SIM_QQ_URL")
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        let base = std::env::var("OWO_SIM_QQ_URL").unwrap_or_default();
+        let url = format!("{}/ocr", base.trim_end_matches('/'));
+        if let Ok(response) = reqwest::get(&url).await {
+            if let Ok(value) = response.json::<serde_json::Value>().await {
+                if let Some(lines) = value.get("lines").and_then(serde_json::Value::as_array) {
+                    let parsed: Vec<crate::ocr::OcrLine> = lines
+                        .iter()
+                        .filter_map(|line| {
+                            Some(crate::ocr::OcrLine {
+                                text: line.get("text")?.as_str()?.to_string(),
+                                x: line.get("x")?.as_i64()? as i32,
+                                y: line.get("y")?.as_i64()? as i32,
+                                width: line.get("width")?.as_i64()? as i32,
+                                height: line.get("height")?.as_i64()? as i32,
+                            })
+                        })
+                        .collect();
+                    if !parsed.is_empty() {
+                        return parsed;
+                    }
+                }
+            }
+        }
+    }
+    crate::paddle_ocr::ocr_preferred(bmp)
+        .await
+        .map(|summary| crate::ocr::group_ocr_lines(&summary.boxes))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +438,45 @@ mod tests {
         assert_eq!(confidence, Some(0.85));
         let (answer, _) = parse_verification("不确定");
         assert_eq!(answer, "unknown");
+    }
+
+    #[test]
+    fn parse_vision_box_accepts_box_keyword_and_json() {
+        assert_eq!(
+            parse_vision_box("BOX 815,624,170,36"),
+            Some((815, 624, 170, 36))
+        );
+        assert_eq!(
+            parse_vision_box("结果是 BOX 100 200 50 30"),
+            Some((100, 200, 50, 30))
+        );
+        assert_eq!(
+            parse_vision_box(r#"{"box":[10,20,30,40]}"#),
+            Some((10, 20, 30, 40))
+        );
+        assert_eq!(parse_vision_box("NONE"), None);
+    }
+
+    #[test]
+    fn cross_validate_box_matches_line_center_inside() {
+        use crate::ocr::OcrLine;
+        let lines = vec![
+            OcrLine {
+                text: "发送".into(),
+                x: 815,
+                y: 624,
+                width: 170,
+                height: 36,
+            },
+            OcrLine {
+                text: "输入消息...".into(),
+                x: 240,
+                y: 620,
+                width: 560,
+                height: 44,
+            },
+        ];
+        assert!(cross_validate_box(&(815, 624, 170, 36), &lines).is_some());
+        assert!(cross_validate_box(&(0, 0, 100, 100), &lines).is_none());
     }
 }

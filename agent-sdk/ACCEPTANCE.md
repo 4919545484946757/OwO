@@ -217,3 +217,17 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 
 视觉通道优先级：本地 Ollama（默认）→ BYOK 云端（`OWO_VISION_PROVIDER=openai`）；
 模型不可用时返回明确错误，主链路（OCR+坐标）不受影响。
+
+## 十三、v0.4.7 PP-OCRv6 接入 + 真实 QQ 受控发送（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| PP-OCRv6 云 API 客户端 | ✅ | paddle_ocr.rs：multipart 提交 → 轮询 job → 下载 JSONL → 解析 `prunedResult.rec_texts/rec_polys`；凭据 `PADDLE_OCR_TOKEN` 环境变量，云 OCR 受数据出境开关约束；代理仅 `PADDLE_OCR_PROXY` 显式启用（实测本地代理访问 API 超时、直连正常） |
+| OCR 引擎路由 | ✅ | `ocr_preferred`：Paddle 启用时优先，失败回退 Media.Ocr 并标记 provider；`OWO_OCR_STRICT=paddle` 可开严格模式看真实报错；screen_ocr/ocr_region//perception/ocr*/vision ground 全部接入 |
+| PP-OCRv6 实测（模拟 QQ 帧） | ✅ | provider=paddle-v6，0.9s，93 字符/12 框，**读出了“输入消息...”和“发送”**（Media.Ocr 长期读不出的离屏小字） |
+| 真实 QQ 受控发送（UIA 锚点） | ✅ | `real-qq-send.py`：聚焦 Rich Text Editor → SendInput 输入 → UIA 点击“发送”→ UIA 树确认消息上屏；受控消息 002/004 实锤，聊天中的 prompt-injection 内容被忽略 |
+| 滚轮支持 | ✅ | `desktop_scroll`（tool + HTTP + executor），权限 Inject；滚动会话/聊天列表 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 99） |
+
+环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
+`PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。

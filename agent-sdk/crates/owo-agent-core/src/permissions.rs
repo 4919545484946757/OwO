@@ -128,9 +128,10 @@ impl Policy {
             | "desktop_wait_until"
             | "browser_snapshot"
             | "screen_vision"
-            | "vision_verify" => Level::Read,
+            | "vision_verify"
+            | "vision_ground" => Level::Read,
             "desktop_click" | "desktop_type" | "desktop_key" | "desktop_shortcut"
-            | "desktop_activate" | "desktop_launch" => Level::Inject,
+            | "desktop_activate" | "desktop_launch" | "desktop_scroll" => Level::Inject,
             "browser_navigate" | "browser_search" | "browser_click" | "browser_type"
             | "browser_press" | "browser_close" => Level::Execute,
             "browser_screenshot" | "browser_download_image" => Level::Write,

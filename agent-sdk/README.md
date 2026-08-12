@@ -68,6 +68,10 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - BYOK 视觉通道已验证（v0.4.6）：`scripts/vision-mock-e2e.py` 用 mock OpenAI-compatible 端点
   验证 `screen_vision`/`vision_verify`/`/vision/describe`/`/vision/verify` 全链路（含图片 payload）；
   本地 VL 模型就绪后 `scripts/sim-qq-vision-e2e.py` 可跑真实视觉描述/验证。
+- PP-OCRv6 OCR（v0.4.7，M-A 主力路径）：`PADDLE_OCR_TOKEN` 启用后，screen_ocr/ocr_region/
+  `/perception/ocr*` 自动走 PP-OCRv6（失败回退 Media.Ocr，provider 字段标注引擎）；实测能读出
+  Media.Ocr 读不出的离屏小字（“发送/输入消息”）。`scripts/real-qq-send.py` 用 UIA 锚点在真实 QQ
+  完成受控发送并验证上屏；`desktop_scroll` 支持滚轮滚动列表。
 
 ### STT WER/CER 评估
 

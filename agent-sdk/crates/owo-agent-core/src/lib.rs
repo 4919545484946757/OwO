@@ -15,6 +15,7 @@ pub mod learn;
 pub mod mcp;
 pub mod observe;
 pub mod ocr;
+pub mod paddle_ocr;
 pub mod perception;
 pub mod permissions;
 pub mod platform;
@@ -57,6 +58,7 @@ pub use ocr::{
     crop_scale_bmp, ocr_bmp, ocr_bmp_detailed, ocr_bmp_region, ocr_engine_status, OcrBox,
     OcrEngineStatus, OcrSummary,
 };
+pub use paddle_ocr::{ocr_paddle, ocr_preferred, paddle_enabled, parse_paddle_jsonl};
 pub use perception::{
     CaptureMeta, ContentRef, ForegroundApp, PerceptionEvent, PerceptionLayer, SituationSnapshot,
     SituationStore, TaskHypothesis, UiContext,
@@ -78,6 +80,7 @@ pub use stt::{LocalStt, SttOutcome};
 pub use tools::{Tool, ToolContext, ToolRegistry, ToolSpec};
 pub use trace::{list_traces, load_trace, save_trace, TraceRecord};
 pub use vision::{
-    bmp_to_png, capture_vision_png, describe_image, ollama_models, parse_verification, VisionConfig,
+    bmp_to_png, capture_vision_bmp, capture_vision_png, cross_validate_box, describe_image,
+    ground_element, ollama_models, parse_verification, parse_vision_box, VisionConfig,
 };
 pub use whitelist::{AppTier, Whitelist, WhitelistEntry};

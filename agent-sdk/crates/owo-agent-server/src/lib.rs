@@ -143,10 +143,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/desktop/key", post(desktop_key))
         .route("/desktop/shortcut", post(desktop_shortcut))
         .route("/desktop/launch", post(desktop_launch))
+        .route("/desktop/scroll", post(desktop_scroll))
         .route("/desktop/wait", post(desktop_wait))
         .route("/vision/status", get(vision_status))
         .route("/vision/describe", post(vision_describe))
         .route("/vision/verify", post(vision_verify))
+        .route("/vision/ground", post(vision_ground))
         .route("/memory/observations", get(memory_observations))
         .route("/memory/clear", post(memory_clear))
         .route("/memory/mine-skill", post(memory_mine_skill))
@@ -1177,7 +1179,8 @@ async fn perception_ocr(
     }
     let bytes = owo_agent_core::capture_screen()
         .ok_or((StatusCode::BAD_REQUEST, "屏幕截图失败".to_string()))?;
-    owo_agent_core::ocr_bmp_detailed(&bytes)
+    owo_agent_core::ocr_preferred(&bytes)
+        .await
         .map(Json)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))
 }
@@ -1199,7 +1202,8 @@ async fn perception_ocr_bytes(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&request.bmp_b64)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("base64 解码失败：{e}")))?;
-    owo_agent_core::ocr_bmp_detailed(&bytes)
+    owo_agent_core::ocr_preferred(&bytes)
+        .await
         .map(Json)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))
 }
@@ -1233,7 +1237,7 @@ async fn perception_ocr_region(
     }
     let bytes = owo_agent_core::capture_screen()
         .ok_or((StatusCode::BAD_REQUEST, "屏幕截图失败".to_string()))?;
-    owo_agent_core::ocr_bmp_region(
+    let cropped = owo_agent_core::crop_scale_bmp(
         &bytes,
         request.x,
         request.y,
@@ -1241,8 +1245,11 @@ async fn perception_ocr_region(
         request.height,
         request.scale,
     )
-    .map(Json)
-    .map_err(|error| (StatusCode::BAD_REQUEST, error))
+    .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    owo_agent_core::ocr_preferred(&cropped)
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))
 }
 
 #[derive(serde::Deserialize)]
@@ -1269,6 +1276,13 @@ struct DesktopComboRequest {
 #[derive(serde::Deserialize)]
 struct DesktopTargetRequest {
     target: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DesktopScrollRequest {
+    x: i32,
+    y: i32,
+    delta: i32,
 }
 
 #[derive(serde::Deserialize)]
@@ -1375,6 +1389,17 @@ async fn desktop_launch(
         .map_err(|error| (StatusCode::BAD_REQUEST, error))
 }
 
+async fn desktop_scroll(
+    Json(request): Json<DesktopScrollRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    ensure_real_desktop("desktop_scroll")?;
+    owo_agent_core::computer_use::desktop_scroll(request.x, request.y, request.delta)
+        .map(|_| {
+            Json(json!({ "ok": true, "x": request.x, "y": request.y, "delta": request.delta }))
+        })
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
 async fn desktop_wait(Json(request): Json<DesktopWaitRequest>) -> Json<Value> {
     let ms = request.ms.min(120_000);
     tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -1455,6 +1480,21 @@ async fn vision_verify(
         "confidence": confidence,
         "raw": raw,
     })))
+}
+
+#[derive(serde::Deserialize)]
+struct VisionGroundRequest {
+    description: String,
+}
+
+/// 视觉 grounding：视觉模型给框 → 与 OCR 文本交叉验证后才允许点击。
+async fn vision_ground(
+    Json(request): Json<VisionGroundRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    owo_agent_core::ground_element(&request.description)
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))
 }
 
 async fn memory_observations(

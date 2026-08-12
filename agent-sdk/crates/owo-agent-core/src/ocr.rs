@@ -18,6 +18,9 @@ pub struct OcrSummary {
     /// 逐词识别框（屏幕坐标，供 OCR+坐标点击使用）。
     #[serde(default)]
     pub boxes: Vec<OcrBox>,
+    /// 识别引擎（media / paddle-v6），便于诊断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +156,7 @@ pub fn ocr_bmp_detailed(bmp: &[u8]) -> Result<OcrSummary, String> {
                 chars: text.trim().chars().count(),
                 text,
                 boxes,
+                provider: Some("media".to_string()),
             })
         }
     })
