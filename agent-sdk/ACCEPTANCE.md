@@ -311,6 +311,16 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 视觉 Agent 闭环阻塞说明 | ⚠️ 网络不稳定 | Agent 多轮调用时 DeepSeek 经本地代理的后续请求偶发流式挂起（首轮正常、单轮冒烟 6.4s 通过）；工具链与本地 VL 均正常，属当前代理/网络问题，重试或换通道后即可跑通 |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 108） |
 
+## 二十二、v0.4.16 模型网关韧性（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 发送失败代理→直连降级 | ✅ | `post_chat`：优先代理客户端，失败自动切无代理直连重试；4xx/5xx 不重试 |
+| 流式空闲看门狗 | ✅ | `complete_stream` 每块 60s 超时，空流不再无限挂起；单次请求超时降到 120s |
+| 直连客户端单测 | ✅ | 配置代理时 `direct_client` 创建、移除后为 None（ENV_LOCK 串行保护） |
+| 实机复测 | ⚠️ 网络仍不稳 | 视觉 Agent 多轮任务在本地代理下仍出现后续调用挂起（4 分钟无数据，超时看门狗应触发但未见退出，指向代理连接级问题）；单轮模型冒烟正常（6.4s） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
 

@@ -134,6 +134,7 @@ impl OpenAiCompatibleConfig {
 /// OpenAI-compatible `/chat/completions` 客户端（覆盖 OpenAI、DeepSeek、Ollama、多数代理）。
 pub struct OpenAiCompatibleProvider {
     client: reqwest::Client,
+    direct_client: Option<reqwest::Client>,
     config: OpenAiCompatibleConfig,
 }
 
@@ -142,6 +143,7 @@ impl OpenAiCompatibleProvider {
         let mut builder = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(180));
+        let mut has_proxy = false;
         for name in [
             "OWO_HTTP_PROXY",
             "HTTPS_PROXY",
@@ -154,6 +156,7 @@ impl OpenAiCompatibleProvider {
                     let proxy = reqwest::Proxy::all(proxy)
                         .map_err(|e| format!("代理配置无效（{name}）：{e}"))?;
                     builder = builder.proxy(proxy);
+                    has_proxy = true;
                     break;
                 }
             }
@@ -161,7 +164,62 @@ impl OpenAiCompatibleProvider {
         let client = builder
             .build()
             .map_err(|e| format!("HTTP 客户端创建失败：{e}"))?;
-        Ok(Self { client, config })
+        let direct_client = if has_proxy {
+            Some(
+                reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .timeout(std::time::Duration::from_secs(120))
+                    .build()
+                    .map_err(|e| format!("直连 HTTP 客户端创建失败：{e}"))?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            client,
+            direct_client,
+            config,
+        })
+    }
+
+    /// 发送请求：优先代理客户端，失败自动切直连重试一次（多轮流式挂起时稳定）。
+    async fn post_chat(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, String> {
+        let mut last_error = String::new();
+        let attempts: Vec<(&str, &reqwest::Client)> = {
+            let mut list = vec![("proxy", &self.client)];
+            if let Some(direct) = &self.direct_client {
+                list.push(("direct", direct));
+            }
+            list
+        };
+        for (label, client) in attempts {
+            match client
+                .post(url)
+                .bearer_auth(&self.config.api_key)
+                .json(body)
+                .timeout(std::time::Duration::from_secs(120))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => return Ok(response),
+                Ok(response) => {
+                    let status = response.status();
+                    let text = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "无响应体".to_string());
+                    return Err(format!("模型返回 {status}：{text}"));
+                }
+                Err(error) => {
+                    last_error = format!("{label}: {error}");
+                }
+            }
+        }
+        Err(format!("模型请求失败：{last_error}"))
     }
 
     /// 数据出境开关：优先读运行时环境变量（支持设置页即时切换），缺省用启动配置。
@@ -345,23 +403,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let response = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.config.api_key)
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(180))
-            .send()
-            .await
-            .map_err(|e| format!("模型请求失败：{e}"))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "无响应体".to_string());
-            return Err(format!("模型返回 {status}：{text}"));
-        }
+        let response = self.post_chat(&url, &body).await?;
 
         let payload: Value = response
             .json()
@@ -421,30 +463,18 @@ impl ModelProvider for OpenAiCompatibleProvider {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        let response = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.config.api_key)
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(180))
-            .send()
-            .await
-            .map_err(|e| format!("模型请求失败：{e}"))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "无响应体".to_string());
-            return Err(format!("模型返回 {status}：{text}"));
-        }
+        let response = self.post_chat(&url, &body).await?;
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut content = String::new();
         let mut accumulators: HashMap<usize, ToolCallAccumulator> = HashMap::new();
 
-        while let Some(chunk) = stream.next().await {
+        while let Some(chunk) =
+            tokio::time::timeout(std::time::Duration::from_secs(60), stream.next())
+                .await
+                .map_err(|_| "模型流式输出空闲超时（60s 无数据）".to_string())?
+        {
             let chunk = chunk.map_err(|e| format!("流式读取失败：{e}"))?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             let mut completed = true;
@@ -590,5 +620,28 @@ mod tests {
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("OPENAI_BASE_URL");
         std::env::remove_var("OPENAI_MODEL");
+    }
+
+    #[test]
+    fn provider_creates_direct_client_when_proxy_configured() {
+        let _guard = ENV_LOCK.blocking_lock();
+        std::env::set_var("OWO_HTTP_PROXY", "http://127.0.0.1:9");
+        let config = OpenAiCompatibleConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: "test".to_string(),
+            model: "test".to_string(),
+            cloud_enabled: true,
+        };
+        let provider = OpenAiCompatibleProvider::new(config).expect("客户端创建成功");
+        assert!(provider.direct_client.is_some());
+        std::env::remove_var("OWO_HTTP_PROXY");
+        let config = OpenAiCompatibleConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: "test".to_string(),
+            model: "test".to_string(),
+            cloud_enabled: true,
+        };
+        let provider = OpenAiCompatibleProvider::new(config).expect("客户端创建成功");
+        assert!(provider.direct_client.is_none());
     }
 }
