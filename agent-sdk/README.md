@@ -38,6 +38,16 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 桌面自启：Tauri 托盘新增“开机自启：开/关”，写入/删除 HKCU Run 注册表项，启动时自动拉起核心服务常驻。
 - 本地 STT（D20）：`stt.rs` 集成 sherpa-onnx + SenseVoice-Small（默认离线，`settings.stt.model` 可换），模型目录 `<data>/models/stt/<model>/`，`scripts/download-stt-model.ps1` 一键下载（约 240MB）；接口 `POST /stt/transcribe`（raw WAV → 文本 + 耗时）；模型未就绪返回明确错误，不静默降级云端。
 
+### STT WER/CER 评估
+
+```powershell
+# 清单：每行 `<wav路径>TAB<标准文本>`（UTF-8），例如 dist\stt-eval.tsv
+powershell -ExecutionPolicy Bypass -File scripts\eval-stt-wer.ps1 `
+  -Manifest dist\stt-eval.tsv -OutJson dist\stt-eval-report.json
+```
+
+评估工具自动启动核心服务、逐条调 `/stt/transcribe`、计算字符级 CER（中文）与词级 WER（英文），输出聚合报告 JSON。
+
 ### 便携打包
 
 ```powershell
