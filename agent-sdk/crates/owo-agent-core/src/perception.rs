@@ -236,14 +236,33 @@ impl SituationStore {
 
     /// L2 按需采集：抓取真实屏幕到内存环形缓冲（不落盘、用后即毁）。
     pub fn begin_capture_from_screen(&mut self) -> Result<CaptureMeta, String> {
+        self.begin_capture_bytes(crate::platform::capture_screen().ok_or("屏幕截图失败")?)
+    }
+
+    /// L2 按需采集：抓取指定区域（测试/预览用）。
+    pub fn begin_capture_region(&mut self, width: i32, height: i32) -> Result<CaptureMeta, String> {
+        self.begin_capture_bytes(
+            crate::platform::capture_screen_region(width, height).ok_or("屏幕截图失败")?,
+        )
+    }
+
+    fn begin_capture_bytes(&mut self, bytes: Vec<u8>) -> Result<CaptureMeta, String> {
         if !self.is_enabled(PerceptionLayer::L2Visual) {
             return Err("L2 视觉层未授权".to_string());
         }
-        let bytes = crate::platform::capture_screen().ok_or("屏幕截图失败")?;
+        let mut summary = format!("内存截图 {} bytes", bytes.len());
+        if let Some(ocr) = crate::ocr::ocr_bmp(&bytes) {
+            let mut text = ocr.text.trim().to_string();
+            if text.chars().count() > 200 {
+                text = text.chars().take(200).collect();
+                text.push('…');
+            }
+            summary.push_str(&format!(" | OCR: {text}"));
+        }
         let frame = CaptureMeta {
             id: uuid::Uuid::new_v4().to_string(),
             captured_at: Some(chrono::Utc::now().to_rfc3339()),
-            summary: Some(format!("内存截图 {} bytes", bytes.len())),
+            summary: Some(summary),
         };
         if self.capture_ring.len() >= self.max_ring {
             self.capture_ring.pop_front();

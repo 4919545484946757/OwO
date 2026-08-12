@@ -10,6 +10,7 @@ pub mod eval;
 pub mod gateway;
 pub mod learn;
 pub mod mcp;
+pub mod ocr;
 pub mod perception;
 pub mod permissions;
 pub mod platform;
@@ -40,6 +41,7 @@ pub use learn::{
     SemanticAnchor, Sensitivity, SuggestionAction,
 };
 pub use mcp::{McpClient, McpServerConfig, McpTool};
+pub use ocr::{ocr_bmp, OcrSummary};
 pub use perception::{
     CaptureMeta, ContentRef, ForegroundApp, PerceptionEvent, PerceptionLayer, SituationSnapshot,
     SituationStore, TaskHypothesis, UiContext,

@@ -86,6 +86,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/eval/run", post(run_eval))
         .route("/context/snapshot", get(context_snapshot))
         .route("/perception/events", get(perception_events))
+        .route("/perception/capture", post(perception_capture))
+        .route("/perception/layers", post(perception_layers))
         .route("/learn/record", post(learn_record))
         .route("/learn/pause", post(learn_pause))
         .route("/learn/resume", post(learn_resume))
@@ -142,6 +144,8 @@ async fn openapi_spec() -> Json<Value> {
             "/eval/run": { "post": { "operationId": "runEval", "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EvalRunRequest" } } } }, "responses": { "200": { "description": "eval report" } } } },
             "/context/snapshot": { "get": { "operationId": "contextSnapshot", "responses": { "200": { "description": "situation snapshot" } } } },
             "/perception/events": { "get": { "operationId": "perceptionSubscribe", "responses": { "200": { "description": "SSE perception event stream" } } } },
+            "/perception/capture": { "post": { "operationId": "perceptionCapture", "responses": { "200": { "description": "capture meta with OCR summary" } } } },
+            "/perception/layers": { "post": { "operationId": "perceptionLayers", "responses": { "200": { "description": "layer authorization updated" } } } },
             "/learn/record": { "post": { "operationId": "learnRecord", "responses": { "200": { "description": "learn state" } } } },
             "/learn/pause": { "post": { "operationId": "learnPause", "responses": { "200": { "description": "learn state" } } } },
             "/learn/resume": { "post": { "operationId": "learnResume", "responses": { "200": { "description": "learn state" } } } },
@@ -566,6 +570,62 @@ async fn perception_events(
         }
     });
     Ok(Sse::new(ReceiverStream::new(rx)))
+}
+
+/// L2 按需采集：截图 + 本地 OCR 摘要进内存环形缓冲（不落盘）。
+async fn perception_capture(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CaptureRequest>,
+) -> Result<Json<owo_agent_core::CaptureMeta>, (StatusCode, String)> {
+    let mut perception = state.perception.lock().map_err(poison)?;
+    let frame = match (request.width, request.height) {
+        (Some(width), Some(height)) => perception
+            .begin_capture_region(width, height)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?,
+        _ => perception
+            .begin_capture_from_screen()
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?,
+    };
+    Ok(Json(frame))
+}
+
+#[derive(serde::Deserialize)]
+struct CaptureRequest {
+    #[serde(default)]
+    width: Option<i32>,
+    #[serde(default)]
+    height: Option<i32>,
+}
+
+#[derive(serde::Deserialize)]
+struct LayersRequest {
+    layer: String,
+    enabled: bool,
+}
+
+/// 感知层级授权开关（L0-L3 逐项授权，可热撤）。
+async fn perception_layers(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<LayersRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    use owo_agent_core::PerceptionLayer;
+    let layer = match request.layer.as_str() {
+        "l0_event" => PerceptionLayer::L0Event,
+        "l1_ui" => PerceptionLayer::L1Ui,
+        "l2_visual" => PerceptionLayer::L2Visual,
+        "l3_semantic" => PerceptionLayer::L3Semantic,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("未知感知层：{other}（l0_event/l1_ui/l2_visual/l3_semantic）"),
+            ))
+        }
+    };
+    let mut perception = state.perception.lock().map_err(poison)?;
+    perception.set_layer_enabled(layer, request.enabled);
+    Ok(Json(
+        json!({ "layer": request.layer, "enabled": request.enabled }),
+    ))
 }
 
 #[derive(serde::Deserialize)]
