@@ -31,6 +31,7 @@ pub trait UiActionSource: Send + Sync {
     fn type_text(&self, handle: u64, text: &str) -> Result<(), String>;
     fn shortcut(&self, combo: &str) -> Result<(), String>;
     fn launch(&self, target: &str) -> Result<(), String>;
+    fn click_at(&self, x: i32, y: i32) -> Result<(), String>;
     fn verify(&self, predicate: &str) -> Result<bool, String>;
 }
 
@@ -111,6 +112,7 @@ pub fn execute_graph(
             ActionType::Shortcut => source.shortcut(&text),
             ActionType::Inject => source.type_text(0, &text),
             ActionType::Launch => source.launch(&text),
+            ActionType::ClickAt => parse_click_at(&text).and_then(|(x, y)| source.click_at(x, y)),
         };
         let mut ok = outcome.is_ok();
         let mut detail = outcome.err().unwrap_or_default();
@@ -340,6 +342,10 @@ impl UiActionSource for WindowsUiaSource {
         launch_target(target)
     }
 
+    fn click_at(&self, x: i32, y: i32) -> Result<(), String> {
+        click_at_screen(x, y)
+    }
+
     fn verify(&self, predicate: &str) -> Result<bool, String> {
         if let Some(expected) = predicate.strip_prefix("value:") {
             let value = self.focused_edit_value()?;
@@ -564,6 +570,53 @@ fn launch_target(target: &str) -> Result<(), String> {
         .map_err(|error| format!("启动失败：{error}"))
 }
 
+fn parse_click_at(text: &str) -> Result<(i32, i32), String> {
+    let mut parts = text.split(',');
+    let x = parts
+        .next()
+        .ok_or_else(|| "点击坐标缺少 x".to_string())?
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| format!("x 坐标非法：{text}"))?;
+    let y = parts
+        .next()
+        .ok_or_else(|| "点击坐标缺少 y".to_string())?
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| format!("y 坐标非法：{text}"))?;
+    Ok((x, y))
+}
+
+#[cfg(target_os = "windows")]
+fn click_at_screen(x: i32, y: i32) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        MOUSEINPUT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+    unsafe { SetCursorPos(x, y) }.map_err(|error| format!("SetCursorPos 失败：{error}"))?;
+    let mouse = |flags| INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let inputs = [mouse(MOUSEEVENTF_LEFTDOWN), mouse(MOUSEEVENTF_LEFTUP)];
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent == inputs.len() as u32 {
+        Ok(())
+    } else {
+        Err("SendInput 鼠标点击失败".to_string())
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 fn launch_target(target: &str) -> Result<(), String> {
     if target.trim().is_empty() {
@@ -706,6 +759,10 @@ mod tests {
                 Ok(())
             }
         }
+        fn click_at(&self, x: i32, y: i32) -> Result<(), String> {
+            self.calls.lock().unwrap().push(format!("click_at:{x},{y}"));
+            Ok(())
+        }
         fn verify(&self, predicate: &str) -> Result<bool, String> {
             self.calls
                 .lock()
@@ -803,6 +860,57 @@ mod tests {
             10,
         );
         assert!(!report.ok);
+    }
+
+    #[test]
+    fn click_at_action_parses_coordinates_and_invokes_source() {
+        let mut graph = ActionGraph::new();
+        graph.add_node(
+            "click",
+            ActionType::ClickAt,
+            SemanticAnchor {
+                app_id: None,
+                role: None,
+                name: "OCR 定位按钮".to_string(),
+                parent: None,
+            },
+            Some("{point}".to_string()),
+            None,
+        );
+        let source = ScriptedSource {
+            find_ok: true,
+            invoke_ok: true,
+            verify_ok: true,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let report = execute_graph(
+            &source,
+            &graph,
+            &HashMap::from([("point".to_string(), "123,456".to_string())]),
+            10,
+        );
+        assert!(report.ok, "{report:?}");
+        assert!(source
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "click_at:123,456"));
+        let report = execute_graph(
+            &source,
+            &graph,
+            &HashMap::from([("point".to_string(), "abc".to_string())]),
+            10,
+        );
+        assert!(!report.ok);
+    }
+
+    #[test]
+    fn parse_click_at_rejects_invalid_input() {
+        assert_eq!(parse_click_at("10,20").unwrap(), (10, 20));
+        assert!(parse_click_at("10").is_err());
+        assert!(parse_click_at("a,b").is_err());
+        assert!(parse_click_at("").is_err());
     }
 
     #[test]

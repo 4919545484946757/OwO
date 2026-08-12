@@ -3,9 +3,21 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrBox {
+    pub text: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrSummary {
     pub text: String,
     pub chars: usize,
+    /// 逐词识别框（屏幕坐标，供 OCR+坐标点击使用）。
+    #[serde(default)]
+    pub boxes: Vec<OcrBox>,
 }
 
 /// 对内存 BMP 做本地 OCR，返回文字摘要（无文字时返回 None）。
@@ -34,12 +46,43 @@ pub fn ocr_bmp(bmp: &[u8]) -> Option<OcrSummary> {
         }
         let result = engine.RecognizeAsync(&software).ok()?.await.ok()?;
         let text = result.Text().ok()?.to_string();
+        let mut boxes = Vec::new();
+        if let Ok(lines) = result.Lines() {
+            if let Ok(line_count) = lines.Size() {
+                for line_index in 0..line_count {
+                    if let Ok(line) = lines.GetAt(line_index) {
+                        if let Ok(words) = line.Words() {
+                            if let Ok(word_count) = words.Size() {
+                                for word_index in 0..word_count {
+                                    if let Ok(word) = words.GetAt(word_index) {
+                                        let word_text = word
+                                            .Text()
+                                            .map(|value| value.to_string())
+                                            .unwrap_or_default();
+                                        if let Ok(rect) = word.BoundingRect() {
+                                            boxes.push(OcrBox {
+                                                text: word_text,
+                                                x: rect.X as i32,
+                                                y: rect.Y as i32,
+                                                width: rect.Width as i32,
+                                                height: rect.Height as i32,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if text.trim().is_empty() {
             None
         } else {
             Some(OcrSummary {
                 chars: text.trim().chars().count(),
                 text,
+                boxes,
             })
         }
     })

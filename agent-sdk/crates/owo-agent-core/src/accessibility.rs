@@ -21,6 +21,15 @@ pub struct UiNode {
     pub control_type: i32,
     pub class: String,
     pub depth: u32,
+    /// 元素在屏幕上的边界框（OCR/坐标点击定位用）。
+    #[serde(default)]
+    pub x: i32,
+    #[serde(default)]
+    pub y: i32,
+    #[serde(default)]
+    pub width: i32,
+    #[serde(default)]
+    pub height: i32,
 }
 
 /// 抓取前台窗口的无障碍 UI 树摘要（Windows UI Automation）。
@@ -71,12 +80,27 @@ fn collect_ui(
             .CurrentControlType()
             .map(|value| value.0)
             .unwrap_or(0);
+        let rect = element
+            .CurrentBoundingRectangle()
+            .map(|rect| {
+                (
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                )
+            })
+            .unwrap_or((0, 0, 0, 0));
         if !name.trim().is_empty() || !class.trim().is_empty() {
             out.push(UiNode {
                 name,
                 control_type,
                 class,
                 depth,
+                x: rect.0,
+                y: rect.1,
+                width: rect.2,
+                height: rect.3,
             });
         }
         if depth >= max_depth {

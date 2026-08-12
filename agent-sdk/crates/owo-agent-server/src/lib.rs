@@ -127,6 +127,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/perception/capture", post(perception_capture))
         .route("/perception/layers", post(perception_layers))
         .route("/perception/tree", post(perception_tree))
+        .route("/perception/ocr", post(perception_ocr))
         .route("/learn/start", post(learn_start))
         .route("/learn/record", post(learn_record))
         .route("/learn/pause", post(learn_pause))
@@ -222,6 +223,7 @@ async fn openapi_spec() -> Json<Value> {
             "/perception/capture": { "post": { "operationId": "perceptionCapture", "responses": { "200": { "description": "capture meta with OCR summary" } } } },
             "/perception/layers": { "post": { "operationId": "perceptionLayers", "responses": { "200": { "description": "layer authorization updated" } } } },
             "/perception/tree": { "post": { "operationId": "perceptionTree", "responses": { "200": { "description": "deep UI tree dump" } } } },
+            "/perception/ocr": { "post": { "operationId": "perceptionOcr", "responses": { "200": { "description": "OCR text with bounding boxes" } } } },
             "/learn/record": { "post": { "operationId": "learnRecord", "responses": { "200": { "description": "learn state" } } } },
             "/learn/start": { "post": { "operationId": "learnStart", "responses": { "200": { "description": "learn state" } } } },
             "/learn/pause": { "post": { "operationId": "learnPause", "responses": { "200": { "description": "learn state" } } } },
@@ -1134,6 +1136,25 @@ async fn perception_tree(
     owo_agent_core::foreground_ui_tree(request.max_depth, request.max_nodes)
         .map(Json)
         .ok_or((StatusCode::BAD_REQUEST, "无法获取前台 UI 树".to_string()))
+}
+
+/// 全屏 OCR（含文本框坐标），供 OCR+坐标点击（自绘面板，如 QQ 红包/表情）。
+async fn perception_ocr(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<owo_agent_core::OcrSummary>, (StatusCode, String)> {
+    if !state
+        .perception
+        .lock()
+        .map_err(poison)?
+        .is_enabled(owo_agent_core::PerceptionLayer::L2Visual)
+    {
+        return Err((StatusCode::BAD_REQUEST, "L2 视觉层未授权".to_string()));
+    }
+    let bytes = owo_agent_core::capture_screen()
+        .ok_or((StatusCode::BAD_REQUEST, "屏幕截图失败".to_string()))?;
+    owo_agent_core::ocr_bmp(&bytes)
+        .ok_or((StatusCode::BAD_REQUEST, "未识别到文字".to_string()))
+        .map(Json)
 }
 
 #[derive(serde::Deserialize)]
