@@ -16,6 +16,8 @@ pub struct SttOutcome {
 pub struct LocalStt {
     model_dir: PathBuf,
     engine: String,
+    language: String,
+    itn: bool,
     /// 缓存识别器，避免每次请求重新加载模型（约 3s → 数百 ms）。
     #[cfg(target_os = "windows")]
     recognizer: Mutex<Option<sherpa_onnx::OfflineRecognizer>>,
@@ -29,9 +31,19 @@ unsafe impl Sync for LocalStt {}
 
 impl LocalStt {
     pub fn new(settings: &SttSettings, data_root: &Path) -> Self {
+        let language = std::env::var("OWO_STT_LANGUAGE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| settings.language.clone());
+        let itn = std::env::var("OWO_STT_ITN")
+            .ok()
+            .and_then(|value| value.parse::<bool>().ok())
+            .unwrap_or(settings.itn);
         Self {
             model_dir: data_root.join("models").join("stt").join(&settings.model),
             engine: settings.model.clone(),
+            language,
+            itn,
             #[cfg(target_os = "windows")]
             recognizer: Mutex::new(None),
         }
@@ -80,8 +92,8 @@ impl LocalStt {
                         .to_string_lossy()
                         .into_owned(),
                 ),
-                language: Some("auto".to_string()),
-                use_itn: true,
+                language: Some(self.language.clone()),
+                use_itn: self.itn,
             };
             config.model_config.tokens = Some(
                 self.model_dir

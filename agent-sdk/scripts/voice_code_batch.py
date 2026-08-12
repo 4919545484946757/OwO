@@ -30,7 +30,7 @@ def post_json(endpoint, path, payload=None):
 STUB = 'def greet():\n    return "hello"\n'
 
 
-def run_one(endpoint, workspace, target, prompt, timeout_s, log_path):
+def run_one(endpoint, workspace, target, prompt, timeout_s, log_path, func_name):
     with open(target, "w", encoding="utf-8") as f:
         f.write(STUB)
     session = post_json(endpoint, "/session", {"workspace": workspace})
@@ -83,7 +83,7 @@ def run_one(endpoint, workspace, target, prompt, timeout_s, log_path):
                 data_lines.append(text[5:].strip())
     with open(target, encoding="utf-8-sig") as f:
         content = f.read()
-    ok = "def add" in content and "return" in content
+    ok = f"def {func_name}" in content and "return" in content
     return ok, final_text
 
 
@@ -93,6 +93,7 @@ def main() -> int:
     target = os.environ["E2E_TARGET"]
     rounds = int(os.environ.get("E2E_ROUNDS", "10"))
     timeout_s = int(os.environ.get("E2E_TIMEOUT", "180"))
+    func_name = os.environ.get("E2E_FUNC", "add")
     log_path = os.environ.get("E2E_LOG")
     out_path = os.environ.get("E2E_OUT", os.path.join(os.path.dirname(target), "..", "voice-code-batch.json"))
     stt_json = os.environ.get("E2E_STT_JSON")
@@ -109,7 +110,9 @@ def main() -> int:
     for i in range(1, rounds + 1):
         started = time.time()
         try:
-            future = executor.submit(run_one, endpoint, workspace, target, prompt, timeout_s, log_path)
+            future = executor.submit(
+                run_one, endpoint, workspace, target, prompt, timeout_s, log_path, func_name
+            )
             try:
                 ok, final_text = future.result(timeout=timeout_s + 15)
             except FutureTimeout:

@@ -12,6 +12,8 @@
   },
   "stt": {
     "model": "SenseVoice-Small",
+    "language": "auto",
+    "itn": true,
     "enable_high_accuracy": false,
     "hotwords": ["VSCode", "提交", "发送"],
     "latency_budget_ms": 2000

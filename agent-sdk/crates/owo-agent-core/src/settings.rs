@@ -11,6 +11,12 @@ use std::path::Path;
 pub struct SttSettings {
     #[serde(default = "default_stt_model")]
     pub model: String,
+    /// SenseVoice 语言（auto / zh / en / ja / ko / yue），可用 OWO_STT_LANGUAGE 覆盖。
+    #[serde(default = "default_stt_language")]
+    pub language: String,
+    /// 是否启用逆文本规范化（ITN），可用 OWO_STT_ITN 覆盖。
+    #[serde(default = "default_true")]
+    pub itn: bool,
     #[serde(default = "default_false")]
     pub enable_high_accuracy: bool,
     #[serde(default)]
@@ -23,6 +29,8 @@ impl Default for SttSettings {
     fn default() -> Self {
         Self {
             model: "SenseVoice-Small".to_string(),
+            language: "auto".to_string(),
+            itn: true,
             enable_high_accuracy: false,
             hotwords: Vec::new(),
             latency_budget_ms: 2000,
@@ -98,6 +106,10 @@ pub struct SkillsSettings {
 
 fn default_stt_model() -> String {
     "SenseVoice-Small".to_string()
+}
+
+fn default_stt_language() -> String {
+    "auto".to_string()
 }
 
 fn default_false() -> bool {
