@@ -560,10 +560,9 @@ impl TuiApp {
                                     .map(|guard| guard.entries.clone())
                                     .unwrap_or_default();
                                 if audit_entries.len() > self.audit_flushed {
-                                    let _ = self.store.append_audit(
-                                        &session.id,
-                                        &audit_entries[self.audit_flushed..],
-                                    );
+                                    let _ = self
+                                        .store
+                                        .append_audit(&audit_entries[self.audit_flushed..]);
                                     self.audit_flushed = audit_entries.len();
                                 }
                             }

@@ -261,6 +261,16 @@ pub trait SessionStore: Send + Sync {
     fn list(&self) -> Vec<String> {
         Vec::new()
     }
+    /// 持久化审计记录（默认 no-op；SQLite 存储落库）。
+    fn append_audit(&self, entries: &[crate::audit::AuditEntry]) -> Result<(), AgentError> {
+        let _ = entries;
+        Ok(())
+    }
+    /// 最近 N 条审计记录（默认空；SQLite 存储返回持久化记录）。
+    fn recent_audit(&self, limit: usize) -> Vec<crate::audit::AuditEntry> {
+        let _ = limit;
+        Vec::new()
+    }
 }
 
 /// M1 会话存储：JSON 文件（后续迁移 SQLite）。

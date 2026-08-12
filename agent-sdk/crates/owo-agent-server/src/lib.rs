@@ -5,7 +5,7 @@
 //! proactive.suggest / whitelist.manage。
 
 use axum::body::Bytes;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
@@ -51,6 +51,7 @@ pub struct AppState {
     pub proactive: Arc<Mutex<ProactiveEngine>>,
     pub stt: Arc<Mutex<owo_agent_core::LocalStt>>,
     pub automations: Arc<Mutex<AutomationStore>>,
+    pub audit_flushed: Arc<Mutex<usize>>,
     pub workspace: PathBuf,
 }
 
@@ -85,6 +86,7 @@ impl AppState {
                 &data_root,
             ))),
             automations: Arc::new(Mutex::new(AutomationStore::new(data_root))),
+            audit_flushed: Arc::new(Mutex::new(0)),
             workspace,
         }
     }
@@ -93,6 +95,7 @@ impl AppState {
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/audit", get(audit_list))
         .route("/openapi.json", get(openapi_spec))
         .route("/session", post(create_session))
         .route("/session/{id}", get(get_session))
@@ -174,6 +177,7 @@ async fn openapi_spec() -> Json<Value> {
         "servers": [{ "url": "http://127.0.0.1:4096" }],
         "paths": {
             "/health": { "get": { "operationId": "health", "responses": { "200": { "description": "ok" } } } },
+            "/audit": { "get": { "operationId": "auditList", "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "recent audit entries" } } } },
             "/session": { "post": {
                 "operationId": "createSession",
                 "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateSessionRequest" } } } },
@@ -313,6 +317,38 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
+/// 把 Agent 内存审计日志中尚未落库的条目追加到存储，返回已 flush 数。
+fn flush_audit(state: &AppState) {
+    let mut flushed = match state.audit_flushed.lock() {
+        Ok(flushed) => flushed,
+        Err(_) => return,
+    };
+    let log = state.agent.audit_log();
+    let audit = match log.lock() {
+        Ok(audit) => audit,
+        Err(_) => return,
+    };
+    if audit.entries.len() > *flushed {
+        let entries = audit.entries[*flushed..].to_vec();
+        *flushed = audit.entries.len();
+        drop(audit);
+        let _ = state.store.append_audit(&entries);
+    }
+}
+
+async fn audit_list(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<owo_agent_core::AuditEntry>>, (StatusCode, String)> {
+    flush_audit(&state);
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100)
+        .min(500);
+    Ok(Json(state.store.recent_audit(limit)))
+}
+
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<SessionInfo>>, (StatusCode, String)> {
@@ -430,6 +466,7 @@ async fn turn(
     let store = Arc::clone(&state.store);
     let sessions = Arc::clone(&state.sessions);
     let traces_dir = state.traces_dir.clone();
+    let state_for_audit = Arc::clone(&state);
     tokio::spawn(async move {
         let mut current = session;
         let mut on_event = |event: &owo_agent_core::TurnEvent| {
@@ -465,6 +502,7 @@ async fn turn(
                 message: format!("session save failed: {error}"),
             }));
         }
+        flush_audit(&state_for_audit);
     });
 
     Ok(Sse::new(ReceiverStream::new(rx)))

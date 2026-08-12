@@ -468,7 +468,7 @@ async fn run_turn(args: TurnArgs) -> Result<(), Box<dyn std::error::Error>> {
         .map(|guard| guard.entries.clone())
         .unwrap_or_default();
     if let Ok(store) = SqliteSessionStore::open(&root.join("index.db")) {
-        let _ = store.append_audit(&session.id, &audit_entries);
+        let _ = store.append_audit(&audit_entries);
     }
     Ok(())
 }
@@ -1622,11 +1622,9 @@ impl Repl {
             .map(|guard| guard.entries.clone())
             .unwrap_or_default();
         if audit_entries.len() > self.audit_flushed {
-            if let Some(session) = &self.session {
-                let _ = self
-                    .store
-                    .append_audit(&session.id, &audit_entries[self.audit_flushed..]);
-            }
+            let _ = self
+                .store
+                .append_audit(&audit_entries[self.audit_flushed..]);
             self.audit_flushed = audit_entries.len();
         }
         println!(

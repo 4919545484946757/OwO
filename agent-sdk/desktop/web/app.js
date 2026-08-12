@@ -422,6 +422,24 @@ async function refreshSuggestions() {
   }
 }
 
+async function refreshAudit() {
+  try {
+    const entries = await api("/audit?limit=50");
+    const list = $("auditList");
+    list.innerHTML = "";
+    for (const entry of entries) {
+      const li = document.createElement("li");
+      const ok = entry.approved === undefined ? "" : entry.approved ? "✅" : "⛔";
+      const tool = entry.tool ? ` [${esc(entry.tool)}]` : "";
+      li.innerHTML = `<span class="sub">${esc((entry.ts || "").slice(0, 19).replace("T", " "))} ${esc(entry.event)} ${ok}${tool}</span><span class="sub">${esc(entry.detail || "")}</span>`;
+      list.appendChild(li);
+    }
+    if (!entries.length) list.innerHTML = '<li class="sub">暂无审计记录</li>';
+  } catch (_) {
+    $("auditList").innerHTML = '<li class="sub">加载失败</li>';
+  }
+}
+
 // ---------- 会话 / 任务 ----------
 
 async function refreshSessions(selectId) {
@@ -905,6 +923,7 @@ async function boot() {
     refreshAutomations(),
     refreshReminders(),
     refreshSettings(),
+    refreshAudit(),
     refreshWhitelist(),
     refreshPerception(),
     refreshLearn(),
@@ -913,6 +932,7 @@ async function boot() {
   setInterval(refreshLearn, 5000);
   setInterval(refreshPackages, 10000);
   setInterval(refreshSuggestions, 10000);
+  setInterval(refreshAudit, 5000);
   setInterval(refreshAutomations, 10000);
   setInterval(refreshReminders, 5000);
   setInterval(refreshSettings, 15000);

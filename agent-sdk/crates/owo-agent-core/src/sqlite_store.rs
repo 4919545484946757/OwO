@@ -33,6 +33,15 @@ impl SqliteSessionStore {
                  title TEXT,
                  archived INTEGER NOT NULL DEFAULT 0,
                  pinned INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS audit (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 ts TEXT NOT NULL,
+                 session_id TEXT NOT NULL,
+                 event TEXT NOT NULL,
+                 tool TEXT,
+                 approved INTEGER,
+                 detail TEXT NOT NULL
              );",
         )
         .map_err(sqlite_error)?;
@@ -211,34 +220,19 @@ impl SessionStore for SqliteSessionStore {
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default()
     }
-}
 
-impl SqliteSessionStore {
-    /// 追加审计记录（回合结束后调用）。
-    pub fn append_audit(&self, session_id: &str, entries: &[AuditEntry]) -> Result<(), AgentError> {
+    fn append_audit(&self, entries: &[AuditEntry]) -> Result<(), AgentError> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| AgentError::Session("SQLite 锁中毒".into()))?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS audit (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 ts TEXT NOT NULL,
-                 session_id TEXT NOT NULL,
-                 event TEXT NOT NULL,
-                 tool TEXT,
-                 approved INTEGER,
-                 detail TEXT NOT NULL
-             );",
-        )
-        .map_err(sqlite_error)?;
         for entry in entries {
             conn.execute(
                 "INSERT INTO audit (ts, session_id, event, tool, approved, detail)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     entry.ts,
-                    session_id,
+                    entry.session_id,
                     entry.event,
                     entry.tool,
                     entry.approved.map(|approved| approved as i64),
@@ -248,6 +242,34 @@ impl SqliteSessionStore {
             .map_err(sqlite_error)?;
         }
         Ok(())
+    }
+
+    fn recent_audit(&self, limit: usize) -> Vec<AuditEntry> {
+        let conn = match self.conn.lock() {
+            Ok(conn) => conn,
+            Err(_) => return Vec::new(),
+        };
+        let mut statement = match conn.prepare(
+            "SELECT ts, session_id, event, tool, approved, detail
+             FROM audit ORDER BY id DESC LIMIT ?1",
+        ) {
+            Ok(statement) => statement,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match statement.query_map([limit as i64], |row| {
+            Ok(AuditEntry {
+                ts: row.get(0)?,
+                session_id: row.get(1)?,
+                event: row.get(2)?,
+                tool: row.get(3)?,
+                approved: row.get::<_, Option<i64>>(4)?.map(|value| value != 0),
+                detail: row.get(5)?,
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(Result::ok).collect()
     }
 }
 
@@ -357,7 +379,12 @@ mod tests {
             approved: None,
             detail: "ok".to_string(),
         };
-        store.append_audit("s1", &[entry]).unwrap();
+        store.append_audit(&[entry]).unwrap();
+        let recent = store.recent_audit(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].event, "tool_call");
+        assert_eq!(recent[0].session_id, "s1");
+        assert_eq!(recent[0].approved, None);
         let conn = Connection::open(&path).unwrap();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM audit", [], |row| row.get(0))
