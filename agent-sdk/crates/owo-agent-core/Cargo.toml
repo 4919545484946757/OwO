@@ -23,6 +23,7 @@ zip = "2"
 
 [target.'cfg(windows)'.dependencies]
 futures = "0.3"
+sherpa-onnx = "1.13"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Graphics_Imaging",

@@ -48,6 +48,7 @@ pub struct AppState {
     pub whitelist: Arc<Mutex<Whitelist>>,
     pub pipeline: Arc<Mutex<LearnPipeline>>,
     pub proactive: Arc<Mutex<ProactiveEngine>>,
+    pub stt: owo_agent_core::LocalStt,
 }
 
 impl AppState {
@@ -68,6 +69,7 @@ impl AppState {
             whitelist: Arc::new(Mutex::new(Whitelist::default())),
             pipeline: Arc::new(Mutex::new(LearnPipeline::new(flow_skills_root))),
             proactive: Arc::new(Mutex::new(ProactiveEngine::new(Default::default()))),
+            stt: owo_agent_core::LocalStt::default_local(),
         }
     }
 }
@@ -114,6 +116,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/proactive/observe", post(proactive_observe))
         .route("/proactive/decide", post(proactive_decide))
         .route("/proactive/suggestions", get(proactive_suggestions))
+        .route("/stt/transcribe", post(stt_transcribe))
         .route("/whitelist", get(whitelist_list))
         .route("/whitelist/manage", post(whitelist_manage))
         .fallback_service(ServeDir::new(desktop_web_dir()))
@@ -180,6 +183,7 @@ async fn openapi_spec() -> Json<Value> {
             "/proactive/observe": { "post": { "operationId": "proactiveObserve", "responses": { "200": { "description": "optional suggestion" } } } },
             "/proactive/decide": { "post": { "operationId": "proactiveDecide", "responses": { "200": { "description": "ok" } } } },
             "/proactive/suggestions": { "get": { "operationId": "proactiveSuggestions", "responses": { "200": { "description": "suggestion list" } } } },
+            "/stt/transcribe": { "post": { "operationId": "sttTranscribe", "responses": { "200": { "description": "transcription text" } } } },
             "/whitelist": { "get": { "operationId": "whitelistList", "responses": { "200": { "description": "whitelist entries" } } } },
             "/whitelist/manage": { "post": { "operationId": "whitelistManage", "responses": { "200": { "description": "whitelist entries" } } } }
         },
@@ -1015,6 +1019,28 @@ async fn proactive_suggestions(
 ) -> Result<Json<Vec<ProactiveSuggestion>>, (StatusCode, String)> {
     let proactive = state.proactive.lock().map_err(poison)?;
     Ok(Json(proactive.suggestions().to_vec()))
+}
+
+/// 本地离线转写：请求体为 WAV 字节（16k PCM），返回文本（SenseVoice-Small）。
+async fn stt_transcribe(
+    State(state): State<Arc<AppState>>,
+    body: Bytes,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let wav_path = std::env::temp_dir().join(format!("owo-stt-{}.wav", uuid::Uuid::new_v4()));
+    std::fs::write(&wav_path, &body)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    let outcome = state
+        .stt
+        .transcribe_wav(&wav_path)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error));
+    let _ = std::fs::remove_file(&wav_path);
+    let outcome = outcome?;
+    Ok(Json(json!({
+        "ok": true,
+        "text": outcome.text,
+        "elapsed_ms": outcome.elapsed_ms,
+        "engine": state.stt.engine(),
+    })))
 }
 
 async fn whitelist_list(

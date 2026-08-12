@@ -99,10 +99,11 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 | P3 高敏感二次确认 | ✅ | `sensitivity=high` 执行需 `high_risk_ack:true`（冒烟：无 ack 400，有 ack 安全失败不注入）；确认写审计；Web 端二次确认对话框 |
 | 流程技能包分享（D26） | ✅ | share_skill.rs：`.owskill` ZIP 导出/导入（4 个契约测试：往返、未知权限拒绝、敏感度必填、zip-slip）；`/learn/export/{name}` + `/learn/import` 冒烟：导出 830B → 导入回写成功；Web 端导出/导入按钮 |
 | 语音输入兜底 + 桌面自启 | ✅ | Web 工作台 🎤（系统语音识别转写进输入框）；Tauri 托盘“开机自启”切换 HKCU Run（winreg），编译通过 |
+| 本地 STT（D20） | ✅ 引擎集成 / 模型待下载 | stt.rs：sherpa-onnx + SenseVoice-Small 离线转写（WAV→文本+耗时），`POST /stt/transcribe`；`download-stt-model.ps1` 下载 240MB 模型；冒烟：模型未就绪返回明确 400；83 测试全绿（链接期 LNK4098 为 sherpa 静态库 /MT 与 Rust /MD 的已知告警，不影响运行） |
 | 便携打包发布 | ✅ | `scripts/package-desktop.ps1`：release 构建 → `dist/OwO-Agent-release.zip`（核心服务 + 桌面壳 + skills + README，6.8MB）；桌面壳 exe 同级定位核心服务与技能包；便携包冒烟：核心服务就绪、4 个内置技能从随包目录加载 |
 
 ### 下一迭代（P1 剩余 / P2）
 
 - 语音 STT 插件（SenseVoice-Small）。
 - Tauri 安装包（NSIS/MSI）/自动更新/常驻自启与核心服务版本管理（便携 zip 已可用）。
-- 录制自动观察的桌面会话实机验证、SenseVoice-Small/sherpa-onnx 本地 STT 集成。
+- SenseVoice-Small 模型下载后的实机转写 WER 验证、录制自动观察桌面会话实机验证。

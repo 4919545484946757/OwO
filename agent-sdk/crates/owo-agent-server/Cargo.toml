@@ -15,4 +15,5 @@ tokio-stream.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+uuid.workspace = true
 tower-http = { version = "0.6", features = ["fs", "cors"] }

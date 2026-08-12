@@ -23,6 +23,7 @@ pub mod share_skill;
 pub mod skill;
 pub mod skill_pack;
 pub mod sqlite_store;
+pub mod stt;
 pub mod subagent;
 pub mod tools;
 pub mod trace;
@@ -62,6 +63,7 @@ pub use skill_pack::{
     BuiltinSkillManifest, SkillPackageInfo,
 };
 pub use sqlite_store::SqliteSessionStore;
+pub use stt::{LocalStt, SttOutcome};
 pub use tools::{Tool, ToolContext, ToolRegistry, ToolSpec};
 pub use trace::{list_traces, load_trace, save_trace, TraceRecord};
 pub use whitelist::{AppTier, Whitelist, WhitelistEntry};
