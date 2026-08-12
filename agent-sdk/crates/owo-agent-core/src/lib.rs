@@ -5,6 +5,7 @@ pub mod accessibility;
 pub mod agent;
 pub mod audit;
 pub mod automation;
+pub mod computer_use;
 pub mod context;
 pub mod error;
 pub mod eval;

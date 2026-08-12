@@ -137,3 +137,25 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 - 语音 STT 插件（SenseVoice-Small）。
 - Tauri 安装包（NSIS/MSI）/自动更新/常驻自启与核心服务版本管理（便携 zip 已可用）。
 - SenseVoice-Small 自然语音 WER 基线（需真实普通话语料；合成语音 CER 0.00% 已记录）。
+
+---
+
+## 七、v0.4.1 计算机使用专项（2026-08-12，后台静默模拟）
+
+目标：默认视觉识别自主迭代操作任意软件；改文件类优先后台 Agent，做不了的再模拟鼠标键盘；
+本轮验收 QQ 回复闭环（OCR 读上下文、等待、按指令回复）与浏览器搜索/浏览/图片下载。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| headless 模拟 QQ（GDI 离屏渲染 + HTTP 虚拟窗口） | ✅ | `owo-sim-qq --headless`：`/frame`（BMP）、`/ocr`（真值版面 lines+role_hint）、`/click`、`/type`、`/key`、`/state`、`/log`、`/reset`；事件日志含 incoming/outgoing/send_clicked/input_clicked |
+| 模拟浏览器站 | ✅ | `owo-sim-browser`：首页/搜索/文章/PNG 图片（3 张生成图 + 下载链接） |
+| 桌面/浏览器双表面工具 | ✅ | `screen_ocr`/`ocr_region`（lines 坐标 + role_hint）、`desktop_click/type/key/shortcut/activate/window_list/foreground/launch/wait`、`browser_navigate/search/snapshot/click/type/press/screenshot/download_image/close`；`OWO_SIM_QQ_URL` 一键切模拟面，服务端直连写接口在模拟面下 400 禁用 |
+| QQ 回复闭环 e2e（DeepSeek 真实模型） | ✅ 3/3 | `scripts/sim-qq-e2e.py`：轮次 3/4/5 全过（24–25s；2 条 outgoing + 2 次 send_clicked + 输入框清空；自动等待对方回复后二次回复并验证上屏） |
+| 浏览器搜索/下载 e2e | ✅ 2/2 | `scripts/sim-browser-e2e.py`：导航本地搜索站→输入关键词→打开文章→下载 40,767B PNG，PNG 头校验通过（含相对 `src` 解析） |
+| 一键验收脚本 | ✅ | `scripts/run-sim-e2e.ps1`：启动 headless 模拟 + 测试服务（4097）→ 两个 e2e → 自动清理进程 |
+| 浏览器驱动（Playwright + 本机 Edge） | ✅ | `scripts/browser-driver.js`：持久化 profile、可 headless、JSONL 常驻协议；图片相对 URL 用 `new URL(src, page.url())` 解析 |
+| 质量门禁 | ✅ | `cargo fmt --check` 干净；`clippy --workspace --all-targets` 0 警告；`cargo test --workspace` 全绿（core 86 + cli/server/协议） |
+
+后续（按设计文档 M-A/M-B/M-C 剩余项）：窗口级截取/窗口模板、PaddleOCR、本地视觉模型
+（场景描述/完成验证/grounding 交叉验证）、静默操作学习（情景/语义记忆）；真实 QQ 复用同一套
+`desktop_*` 工具链路（去掉 `OWO_SIM_QQ_URL` 即恢复真实桌面面）。

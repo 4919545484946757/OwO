@@ -44,6 +44,14 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 桌面操作迭代（P3/computer-use）：动作图新增 `launch`（主动打开应用/URL）与 `click_at`（按屏幕坐标点击，配合 OCR 定位自绘控件）；修复 `inject` handle=0 失效；新增 `POST /perception/tree`（深度树，节点含屏幕边界框）、`POST /perception/ocr`（全屏 OCR + 逐词坐标框）、`POST /perception/ocr/region`（裁剪+放大区域 OCR，小字验证窗口用）、`GET /perception/ocr/status`（引擎诊断）；修复 OCR 根因：WIC 无法解码 GDI BMP，改为直接构造 SoftwareBitmap（实测 1636 字符/647 框）；`SemanticAnchor.parent` 父容器约束；`ui:`/`value:` 验证谓词；`qq-send-file` 技能包按 NTQQ 实测锚点重写。
 - 桌面自启：Tauri 托盘新增“开机自启：开/关”，写入/删除 HKCU Run 注册表项，启动时自动拉起核心服务常驻。
 - 本地 STT（D20）：`stt.rs` 集成 sherpa-onnx + SenseVoice-Small（默认离线，`settings.stt.model` 可换），模型目录 `<data>/models/stt/<model>/`，`scripts/download-stt-model.ps1` 一键下载（约 240MB）；接口 `POST /stt/transcribe`（raw WAV → 文本 + 耗时）；模型未就绪返回明确错误，不静默降级云端。
+- 桌面/浏览器双表面工具（v0.4.1）：`screen_ocr`/`ocr_region` 返回整行文本（`lines` + 坐标 + `role_hint`），
+  `desktop_click/type/key/shortcut/activate/window_list/foreground/launch/wait` 走 SendInput/UIA/窗口枚举，
+  `browser_navigate/search/snapshot/click/type/press/screenshot/download_image/close` 走 Playwright + 本机 Edge
+  （持久化 profile、可 headless）；设置 `OWO_SIM_QQ_URL=http://127.0.0.1:18500` 后，桌面工具自动落到
+  headless 模拟窗口（离屏渲染 + HTTP 虚拟输入），完全不碰真实桌面；服务端直连写接口在模拟面下被禁用。
+- 模拟实验台（`sim/`）：`owo-sim-qq --headless` 提供自绘 QQ 聊天窗口的 `/frame`（BMP）、`/ocr`（真值版面）、
+  `/click`、`/type`、`/key`、`/state`、`/log`、`/reset`；`owo-sim-browser` 提供本地搜索/文章/图片下载站；
+  `scripts/run-sim-e2e.ps1` 一键跑 QQ 回复闭环 + 浏览器搜索/下载两个端到端验收（后台静默，不弹窗）。
 
 ### STT WER/CER 评估
 

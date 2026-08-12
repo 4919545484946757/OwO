@@ -25,7 +25,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_turns: 25,
+            max_turns: 60,
             context_limit: 200,
             subagent_depth: 0,
             token_budget: 60_000,

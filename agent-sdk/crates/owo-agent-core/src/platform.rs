@@ -35,7 +35,7 @@ pub fn poll_foreground_app() -> Option<(String, String)> {
 }
 
 #[cfg(target_os = "windows")]
-fn process_name(pid: u32) -> Option<String> {
+pub(crate) fn process_name(pid: u32) -> Option<String> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -92,6 +92,167 @@ pub fn foreground_title() -> Option<String> {
 #[cfg(not(target_os = "windows"))]
 pub fn foreground_title() -> Option<String> {
     None
+}
+
+/// 当前前台窗口的屏幕矩形 `(left, top, right, bottom)`。
+#[cfg(target_os = "windows")]
+pub fn foreground_window_rect() -> Option<(i32, i32, i32, i32)> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut rect) == 0 {
+            return None;
+        }
+        Some((rect.left, rect.top, rect.right, rect.bottom))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn foreground_window_rect() -> Option<(i32, i32, i32, i32)> {
+    None
+}
+
+/// 窗口摘要（枚举用）。
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WindowInfo {
+    pub hwnd: isize,
+    pub pid: u32,
+    pub process: String,
+    pub title: String,
+    pub rect: (i32, i32, i32, i32),
+    pub visible: bool,
+}
+
+/// 枚举顶层窗口（进程名 + 标题 + 屏幕矩形），供“找到 QQ/浏览器窗口并激活”使用。
+#[cfg(target_os = "windows")]
+pub fn window_list() -> Vec<WindowInfo> {
+    use windows_sys::Win32::Foundation::{BOOL, HWND};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible,
+    };
+    let mut out: Vec<WindowInfo> = Vec::new();
+    unsafe extern "system" fn callback(hwnd: HWND, param: isize) -> BOOL {
+        let list = &mut *(param as *mut Vec<WindowInfo>);
+        let length = unsafe { GetWindowTextLengthW(hwnd) };
+        if length > 0 {
+            let mut buffer = vec![0u16; (length + 1) as usize];
+            let written = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
+            let title = String::from_utf16_lossy(&buffer[..written.max(0) as usize])
+                .trim()
+                .to_string();
+            let mut pid: u32 = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+            let mut rect: windows_sys::Win32::Foundation::RECT = std::mem::zeroed();
+            let rect_ok = unsafe { GetWindowRect(hwnd, &mut rect) } != 0;
+            let visible = unsafe { IsWindowVisible(hwnd) } != 0;
+            let process =
+                crate::platform::process_name(pid).unwrap_or_else(|| format!("pid:{pid}"));
+            list.push(WindowInfo {
+                hwnd: hwnd as isize,
+                pid,
+                process,
+                title,
+                rect: if rect_ok {
+                    (rect.left, rect.top, rect.right, rect.bottom)
+                } else {
+                    (0, 0, 0, 0)
+                },
+                visible,
+            });
+        }
+        1
+    }
+    unsafe {
+        EnumWindows(Some(callback), &mut out as *mut Vec<WindowInfo> as isize);
+    }
+    out
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn window_list() -> Vec<WindowInfo> {
+    Vec::new()
+}
+
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WindowInfo {
+    pub hwnd: isize,
+    pub pid: u32,
+    pub process: String,
+    pub title: String,
+    pub rect: (i32, i32, i32, i32),
+    pub visible: bool,
+}
+
+/// 激活目标窗口（按进程名或标题模糊匹配）：还原最小化 → SetForegroundWindow。
+#[cfg(target_os = "windows")]
+pub fn activate_window(process: &str, title: &str) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::Threading::AttachThreadInput;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        keybd_event, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_MENU,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+        SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SW_RESTORE,
+    };
+    let candidates = window_list();
+    let target = candidates
+        .iter()
+        .find(|window| {
+            window.visible
+                && ((!process.is_empty() && window.process.contains(process))
+                    || (!title.is_empty() && window.title.contains(title)))
+        })
+        .ok_or_else(|| format!("未找到窗口（process={process}, title={title}）"))?;
+    let hwnd: HWND = target.hwnd as HWND;
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        let foreground = GetForegroundWindow();
+        let mut foreground_thread = 0;
+        GetWindowThreadProcessId(foreground, &mut foreground_thread);
+        let mut target_thread = 0;
+        GetWindowThreadProcessId(hwnd, &mut target_thread);
+        if foreground_thread != 0 && target_thread != 0 {
+            AttachThreadInput(foreground_thread, target_thread, 1);
+        }
+        if foreground != hwnd {
+            // 经典解锁：发送一次 Alt 键事件，满足 Windows 前台锁的“最近用户输入”条件。
+            keybd_event(VK_MENU as u8, 0, KEYEVENTF_EXTENDEDKEY, 0);
+            keybd_event(VK_MENU as u8, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
+            SetForegroundWindow(hwnd);
+            BringWindowToTop(hwnd);
+            SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        } else {
+            SetForegroundWindow(hwnd);
+        }
+        if foreground_thread != 0 && target_thread != 0 {
+            AttachThreadInput(foreground_thread, target_thread, 0);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn activate_window(process: &str, title: &str) -> Result<(), String> {
+    Err(format!("平台不支持激活窗口（{process}/{title}）"))
 }
 
 /// 当前剪贴板序列号（L0 事件源，只做“是否变化”检测，不读取内容）。

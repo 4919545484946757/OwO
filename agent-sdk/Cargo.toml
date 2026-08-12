@@ -5,6 +5,7 @@ members = [
     "crates/owo-agent-core",
     "crates/owo-agent-server",
     "crates/owo-agent-cli",
+    "crates/owo-sim",
 ]
 
 [workspace.package]

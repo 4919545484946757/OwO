@@ -489,7 +489,7 @@ unsafe fn click_element(
 }
 
 #[cfg(target_os = "windows")]
-fn send_unicode(text: &str) -> Result<(), String> {
+pub(crate) fn send_unicode(text: &str) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
         VIRTUAL_KEY,
@@ -534,7 +534,7 @@ fn send_unicode(text: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn send_shortcut(combo: &str) -> Result<(), String> {
+pub(crate) fn send_shortcut(combo: &str) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
@@ -558,7 +558,7 @@ fn send_shortcut(combo: &str) -> Result<(), String> {
 
 /// 主动启动应用或打开 URL（不依赖应用已在前台）。
 #[cfg(target_os = "windows")]
-fn launch_target(target: &str) -> Result<(), String> {
+pub(crate) fn launch_target(target: &str) -> Result<(), String> {
     if target.trim().is_empty() {
         return Err("启动目标为空".to_string());
     }
@@ -587,7 +587,7 @@ fn is_direct_launch(target: &str) -> bool {
         || std::path::Path::new(trimmed).is_file()
 }
 
-fn parse_click_at(text: &str) -> Result<(i32, i32), String> {
+pub(crate) fn parse_click_at(text: &str) -> Result<(i32, i32), String> {
     let mut parts = text.split(',');
     let x = parts
         .next()
@@ -605,7 +605,7 @@ fn parse_click_at(text: &str) -> Result<(i32, i32), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn click_at_screen(x: i32, y: i32) -> Result<(), String> {
+pub(crate) fn click_at_screen(x: i32, y: i32) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
         MOUSEINPUT,

@@ -120,6 +120,17 @@ impl Policy {
             "write_file" => Level::Write,
             "run_command" => Level::Execute,
             "text.inject" | "clipboard" => Level::Inject,
+            "screen_ocr"
+            | "ocr_region"
+            | "desktop_foreground"
+            | "desktop_window_list"
+            | "desktop_wait"
+            | "browser_snapshot" => Level::Read,
+            "desktop_click" | "desktop_type" | "desktop_key" | "desktop_shortcut"
+            | "desktop_activate" | "desktop_launch" => Level::Inject,
+            "browser_navigate" | "browser_search" | "browser_click" | "browser_type"
+            | "browser_press" | "browser_close" => Level::Execute,
+            "browser_screenshot" | "browser_download_image" => Level::Write,
             _ => Level::Execute,
         }
     }

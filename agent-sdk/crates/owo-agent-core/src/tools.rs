@@ -48,6 +48,43 @@ impl ToolRegistry {
         registry.register(ExploreTool);
         registry.register(SubagentTool);
         registry.register(UseSkillTool);
+        registry.register(crate::computer_use::ScreenOcrTool);
+        registry.register(crate::computer_use::OcrRegionTool);
+        registry.register(crate::computer_use::DesktopForegroundTool);
+        registry.register(crate::computer_use::DesktopWindowListTool);
+        registry.register(crate::computer_use::DesktopActivateTool);
+        registry.register(crate::computer_use::DesktopClickTool);
+        registry.register(crate::computer_use::DesktopTypeTool);
+        registry.register(crate::computer_use::DesktopKeyTool);
+        registry.register(crate::computer_use::DesktopShortcutTool);
+        registry.register(crate::computer_use::DesktopLaunchTool);
+        registry.register(crate::computer_use::DesktopWaitTool);
+        let browser = crate::computer_use::BrowserTools::new();
+        registry.register(crate::computer_use::BrowserNavigateTool {
+            tools: browser.clone(),
+        });
+        registry.register(crate::computer_use::BrowserSearchTool {
+            tools: browser.clone(),
+        });
+        registry.register(crate::computer_use::BrowserSnapshotTool {
+            tools: browser.clone(),
+        });
+        registry.register(crate::computer_use::BrowserClickTool {
+            tools: browser.clone(),
+        });
+        registry.register(crate::computer_use::BrowserTypeTool {
+            tools: browser.clone(),
+        });
+        registry.register(crate::computer_use::BrowserPressTool {
+            tools: browser.clone(),
+        });
+        registry.register(crate::computer_use::BrowserScreenshotWriteTool {
+            tools: browser.clone(),
+        });
+        registry.register(crate::computer_use::BrowserDownloadImageWriteTool {
+            tools: browser.clone(),
+        });
+        registry.register(crate::computer_use::BrowserCloseTool { tools: browser });
         registry
     }
 
@@ -130,7 +167,7 @@ impl Default for ToolRegistry {
     }
 }
 
-fn required_string(args: &Value, key: &str) -> Result<String, String> {
+pub(crate) fn required_string(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -142,7 +179,7 @@ fn snapshot_key(path: &Path) -> String {
 }
 
 /// 以会话工作区为基座解析相对路径，并做策略工作区越界检查。
-fn resolve_session_path(ctx: &ToolContext, path: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve_session_path(ctx: &ToolContext, path: &str) -> Result<PathBuf, String> {
     let base = ctx
         .workspace
         .canonicalize()

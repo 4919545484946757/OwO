@@ -5,7 +5,7 @@
 //! proactive.suggest / whitelist.manage。
 
 use axum::body::Bytes;
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
@@ -128,8 +128,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/perception/layers", post(perception_layers))
         .route("/perception/tree", post(perception_tree))
         .route("/perception/ocr", post(perception_ocr))
+        .route("/perception/ocr/bytes", post(perception_ocr_bytes))
         .route("/perception/ocr/status", get(ocr_status))
         .route("/perception/ocr/region", post(perception_ocr_region))
+        .route("/desktop/foreground", get(desktop_foreground))
+        .route("/desktop/windows", get(desktop_windows))
+        .route("/desktop/activate", post(desktop_activate))
+        .route("/desktop/click", post(desktop_click))
+        .route("/desktop/type", post(desktop_type))
+        .route("/desktop/key", post(desktop_key))
+        .route("/desktop/shortcut", post(desktop_shortcut))
+        .route("/desktop/launch", post(desktop_launch))
+        .route("/desktop/wait", post(desktop_wait))
         .route("/learn/start", post(learn_start))
         .route("/learn/record", post(learn_record))
         .route("/learn/pause", post(learn_pause))
@@ -170,6 +180,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/whitelist/manage", post(whitelist_manage))
         .fallback_service(ServeDir::new(desktop_web_dir()))
         .layer(CorsLayer::permissive())
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state)
 }
 
@@ -1166,6 +1177,24 @@ async fn ocr_status() -> Json<owo_agent_core::OcrEngineStatus> {
 }
 
 #[derive(serde::Deserialize)]
+struct OcrBytesRequest {
+    bmp_b64: String,
+}
+
+/// 对 base64 编码的 BMP 做 OCR（模拟窗口帧/附件截图调试用，不依赖屏幕）。
+async fn perception_ocr_bytes(
+    Json(request): Json<OcrBytesRequest>,
+) -> Result<Json<owo_agent_core::OcrSummary>, (StatusCode, String)> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&request.bmp_b64)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("base64 解码失败：{e}")))?;
+    owo_agent_core::ocr_bmp_detailed(&bytes)
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
+#[derive(serde::Deserialize)]
 struct OcrRegionRequest {
     x: i32,
     y: i32,
@@ -1204,6 +1233,155 @@ async fn perception_ocr_region(
     )
     .map(Json)
     .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
+#[derive(serde::Deserialize)]
+struct DesktopClickRequest {
+    x: i32,
+    y: i32,
+}
+
+#[derive(serde::Deserialize)]
+struct DesktopTextRequest {
+    text: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DesktopKeyRequest {
+    key: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DesktopComboRequest {
+    combo: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DesktopTargetRequest {
+    target: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DesktopActivateRequest {
+    #[serde(default)]
+    process: String,
+    #[serde(default)]
+    title: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DesktopWaitRequest {
+    ms: u64,
+}
+
+async fn desktop_foreground() -> Json<Value> {
+    if std::env::var("OWO_SIM_QQ_URL")
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        return Json(json!({
+            "process": "owo-sim-qq",
+            "title": "OwO 模拟QQ - 张子豪",
+            "rect": [0, 0, 1020, 700],
+            "surface": "sim",
+        }));
+    }
+    let (process, title) = owo_agent_core::poll_foreground_app().unwrap_or_default();
+    let rect = owo_agent_core::platform::foreground_window_rect();
+    Json(json!({ "process": process, "title": title, "rect": rect }))
+}
+
+async fn desktop_windows() -> Json<Value> {
+    if std::env::var("OWO_SIM_QQ_URL")
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        return Json(json!({
+            "windows": [{
+                "hwnd": 1,
+                "pid": 1,
+                "process": "owo-sim-qq",
+                "title": "OwO 模拟QQ - 张子豪",
+                "rect": [0, 0, 1020, 700],
+                "visible": true,
+            }],
+            "surface": "sim",
+        }));
+    }
+    Json(json!({ "windows": owo_agent_core::platform::window_list() }))
+}
+
+async fn desktop_activate(
+    Json(request): Json<DesktopActivateRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    ensure_real_desktop("desktop_activate")?;
+    owo_agent_core::platform::activate_window(&request.process, &request.title)
+        .map(|_| Json(json!({ "ok": true })))
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
+async fn desktop_click(
+    Json(request): Json<DesktopClickRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    ensure_real_desktop("desktop_click")?;
+    owo_agent_core::computer_use::desktop_click(request.x, request.y)
+        .map(|_| Json(json!({ "ok": true, "x": request.x, "y": request.y })))
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
+async fn desktop_type(
+    Json(request): Json<DesktopTextRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    ensure_real_desktop("desktop_type")?;
+    owo_agent_core::computer_use::desktop_type(&request.text)
+        .map(|_| Json(json!({ "ok": true, "typed_chars": request.text.chars().count() })))
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
+async fn desktop_key(
+    Json(request): Json<DesktopKeyRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    ensure_real_desktop("desktop_key")?;
+    owo_agent_core::computer_use::desktop_key(&request.key)
+        .map(|_| Json(json!({ "ok": true, "key": request.key })))
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
+async fn desktop_shortcut(
+    Json(request): Json<DesktopComboRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    ensure_real_desktop("desktop_shortcut")?;
+    owo_agent_core::computer_use::desktop_shortcut(&request.combo)
+        .map(|_| Json(json!({ "ok": true, "combo": request.combo })))
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
+async fn desktop_launch(
+    Json(request): Json<DesktopTargetRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    ensure_real_desktop("desktop_launch")?;
+    owo_agent_core::computer_use::desktop_launch(&request.target)
+        .map(|_| Json(json!({ "ok": true, "target": request.target })))
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
+async fn desktop_wait(Json(request): Json<DesktopWaitRequest>) -> Json<Value> {
+    let ms = request.ms.min(120_000);
+    tokio::time::sleep(Duration::from_millis(ms)).await;
+    Json(json!({ "waited_ms": ms }))
+}
+
+fn ensure_real_desktop(tool: &str) -> Result<(), (StatusCode, String)> {
+    if std::env::var("OWO_SIM_QQ_URL")
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{tool} 在模拟环境下被禁用：请直连模拟服务或通过 Agent 工具执行",),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -1955,6 +2133,12 @@ impl ChannelApprover {
 #[async_trait::async_trait]
 impl Approver for ChannelApprover {
     async fn decide(&self, request: &PermissionRequest) -> Decision {
+        if std::env::var("OWO_AUTO_APPROVE")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            return Decision::Allow;
+        }
         let rx = self.spawn_request(request);
         match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
             Ok(Ok(decision)) => decision,

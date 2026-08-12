@@ -21,6 +21,15 @@ pub struct OcrSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrLine {
+    pub text: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrEngineStatus {
     pub engine_created: bool,
     pub max_image_dimension: u32,
@@ -200,6 +209,46 @@ pub fn ocr_bmp_region(
     ocr_bmp_detailed(&cropped)
 }
 
+/// 把逐词框按“同行 + 邻近”合并为整行文本与包围盒（OcrLayout 的轻量版）。
+/// Media.Ocr 对中文通常每字一个词框，合并后才能稳定匹配“发送”“输入消息”等按钮/控件。
+pub fn group_ocr_lines(boxes: &[OcrBox]) -> Vec<OcrLine> {
+    if boxes.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted: Vec<&OcrBox> = boxes.iter().collect();
+    sorted.sort_by_key(|b| (b.y, b.x));
+    let mut lines: Vec<OcrLine> = Vec::new();
+    for b in sorted {
+        let y_center = b.y + b.height / 2;
+        let merged = lines.iter_mut().find(|line| {
+            let line_center = line.y + line.height / 2;
+            (line_center - y_center).abs() <= (line.height.max(b.height) / 2 + 6)
+                && b.x >= line.x
+                && b.x - (line.x + line.width) <= 36
+        });
+        match merged {
+            Some(line) => {
+                line.text.push_str(&b.text);
+                line.width = (b.x + b.width) - line.x;
+                line.height = line.height.max(b.height);
+            }
+            None => {
+                lines.push(OcrLine {
+                    text: b.text.clone(),
+                    x: b.x,
+                    y: b.y,
+                    width: b.width,
+                    height: b.height,
+                });
+            }
+        }
+    }
+    // 合并后的行按 y 排序，去掉空文本。
+    lines.retain(|line| !line.text.trim().is_empty());
+    lines.sort_by_key(|line| (line.y, line.x));
+    lines
+}
+
 fn encode_bmp32(width: i32, height: i32, bgra: &[u8]) -> Vec<u8> {
     let file_size = 54 + bgra.len();
     let mut out = Vec::with_capacity(file_size);
@@ -254,5 +303,61 @@ mod tests {
         assert_eq!((width, height.abs()), (6, 6));
         assert!(crop_scale_bmp(&bmp, 0, 0, 10, 10, 1).is_ok());
         assert!(crop_scale_bmp(&[0u8; 10], 0, 0, 1, 1, 1).is_err());
+    }
+
+    #[test]
+    fn group_ocr_lines_merges_adjacent_character_boxes() {
+        let boxes = vec![
+            OcrBox {
+                text: "发".into(),
+                x: 100,
+                y: 50,
+                width: 18,
+                height: 18,
+            },
+            OcrBox {
+                text: "送".into(),
+                x: 118,
+                y: 50,
+                width: 18,
+                height: 18,
+            },
+            OcrBox {
+                text: "在".into(),
+                x: 20,
+                y: 80,
+                width: 18,
+                height: 18,
+            },
+            OcrBox {
+                text: "吗".into(),
+                x: 38,
+                y: 80,
+                width: 18,
+                height: 18,
+            },
+            OcrBox {
+                text: "？".into(),
+                x: 56,
+                y: 80,
+                width: 16,
+                height: 18,
+            },
+            OcrBox {
+                text: "发送".into(),
+                x: 200,
+                y: 120,
+                width: 36,
+                height: 18,
+            },
+        ];
+        let lines = group_ocr_lines(&boxes);
+        assert!(lines.iter().any(|line| line.text == "发送"));
+        let question = lines
+            .iter()
+            .find(|line| line.text == "在吗？")
+            .expect("应合并出整行");
+        assert_eq!(question.x, 20);
+        assert_eq!(lines[0].x, 100); // 按 y 排序：y=50 的“发送”在前
     }
 }
