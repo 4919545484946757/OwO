@@ -240,14 +240,14 @@ impl Tool for ScreenOcrTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "max_boxes": { "type": "integer", "description": "最多返回多少词框（默认 120）" }
+                    "max_boxes": { "type": "integer", "description": "最多返回多少词框（默认 0：不带 boxes，避免超大结果影响多轮工具调用；lines 已含坐标）" }
                 }
             }),
         }
     }
 
     async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
-        let max_boxes = args.get("max_boxes").and_then(Value::as_u64).unwrap_or(120) as usize;
+        let max_boxes = args.get("max_boxes").and_then(Value::as_u64).unwrap_or(0) as usize;
         ocr_screen(max_boxes).await
     }
 }
@@ -781,7 +781,7 @@ impl Tool for DesktopWaitUntilTool {
         let mut last_ocr = Value::Null;
         let mut last_error = String::new();
         while Instant::now() < deadline {
-            match ocr_screen(200).await {
+            match ocr_screen(0).await {
                 Ok(ocr) => {
                     last_ocr = ocr.clone();
                     if let Some(line) = find_ocr_line(&ocr, &needle, &role) {

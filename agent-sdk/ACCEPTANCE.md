@@ -321,6 +321,15 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 实机复测 | ⚠️ 网络仍不稳 | 视觉 Agent 多轮任务在本地代理下仍出现后续调用挂起（4 分钟无数据，超时看门狗应触发但未见退出，指向代理连接级问题）；单轮模型冒烟正常（6.4s） |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
 
+## 二十六、v0.4.20 定位多轮卡死根因：screen_ocr boxes（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 根因定位 | ✅ | 同一会话内：read_file 工具轮 10.1s、ocr_region 工具轮 9.6s、screen_ocr(max_boxes=0) 8.7s 均正常；screen_ocr 默认（含 120 boxes）第二轮必卡——**boxes 数组是 DeepSeek 多轮卡死触发点** |
+| 修复 | ✅ | screen_ocr 默认 `max_boxes=0`（不再带 boxes；lines 已含坐标）；desktop_wait_until 内部同步改为 0 |
+| 完整任务复测 | ⚠️ 外部流式 | 单工具轮通过；含多步提示词的完整视觉任务仍偶发第二轮无响应（无 delta、CPU 空闲），指向 DeepSeek 外部流式不稳定 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
 ## 二十五、v0.4.19 OCR 输出截断与多轮复测（2026-08-13）
 
 | 项 | 状态 | 证据 |
