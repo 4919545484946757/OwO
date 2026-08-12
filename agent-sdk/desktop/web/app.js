@@ -11,6 +11,27 @@ const $ = (id) => document.getElementById(id);
 // 由 Tauri 壳注入核心服务地址；经核心服务同源托管时为空字符串。
 const API_BASE = window.OWO_API_BASE || "";
 
+let recognition = null;
+let listening = false;
+
+function initSpeech() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) return;
+  recognition = new SpeechRecognition();
+  recognition.lang = "zh-CN";
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.onresult = (event) => {
+    const text = event.results[0][0].transcript;
+    const prompt = $("prompt");
+    prompt.value = (prompt.value ? prompt.value + " " : "") + text;
+  };
+  recognition.onend = () => {
+    listening = false;
+    $("micBtn").textContent = "🎤";
+  };
+}
+
 async function api(path, options = {}) {
   const response = await fetch(API_BASE + path, {
     headers: { "Content-Type": "application/json" },
@@ -133,10 +154,15 @@ async function executePackage(package) {
     }
   }
   if (!confirm(`确认执行技能包 ${package.name}？首次执行需要审批。`)) return;
+  let highRiskAck = false;
+  if (package.sensitivity === "high") {
+    if (!confirm(`⚠ ${package.name} 是高敏感技能包（可能操作支付/验证码等场景），再次确认执行？`)) return;
+    highRiskAck = true;
+  }
   try {
     const report = await api("/learn/execute-package", {
       method: "POST",
-      body: JSON.stringify({ name: package.name, variables, confirm: true }),
+      body: JSON.stringify({ name: package.name, variables, confirm: true, high_risk_ack: highRiskAck }),
     });
     if (report.ok) {
       addMessage("system", `技能包 ${package.name} 执行成功（${report.steps.length} 步）`);
@@ -460,10 +486,32 @@ $("prompt").addEventListener("keydown", (event) => {
     sendPrompt();
   }
 });
+$("micBtn").addEventListener("click", () => {
+  if (!recognition) {
+    initSpeech();
+    if (!recognition) {
+      alert("当前 WebView 不支持语音识别（可安装语音语言包）");
+      return;
+    }
+  }
+  if (listening) {
+    recognition.stop();
+  } else {
+    listening = true;
+    $("micBtn").textContent = "🔴";
+    try {
+      recognition.start();
+    } catch (_) {
+      listening = false;
+      $("micBtn").textContent = "🎤";
+    }
+  }
+});
 
 // ---------- 启动 ----------
 
 async function boot() {
+  initSpeech();
   await refreshHealth();
   await Promise.all([
     refreshSessions(),

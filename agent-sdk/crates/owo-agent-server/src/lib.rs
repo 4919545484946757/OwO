@@ -841,6 +841,9 @@ struct ExecutePackageRequest {
     /// 首次执行必须显式确认（服务端强制审批）。
     #[serde(default)]
     confirm: bool,
+    /// 高敏感（High）技能包需二次确认。
+    #[serde(default)]
+    high_risk_ack: bool,
 }
 
 /// 从流程技能包加载动作图并执行（首次执行需在 UI 确认，步审计入库）。
@@ -861,6 +864,12 @@ async fn learn_execute_package(
             .load(&request.name)
             .map_err(|error| (StatusCode::NOT_FOUND, error))?
     };
+    if package.manifest.sensitivity == Sensitivity::High && !request.high_risk_ack {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "高敏感技能包需二次确认（high_risk_ack: true）".to_string(),
+        ));
+    }
     let source = owo_agent_core::WindowsUiaSource::new()
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     let report = owo_agent_core::execute_graph(
@@ -870,6 +879,15 @@ async fn learn_execute_package(
         request.max_steps.unwrap_or(20),
     );
     if let Ok(mut audit) = state.agent.audit_log().lock() {
+        if package.manifest.sensitivity == Sensitivity::High {
+            audit.record(
+                "learn-execute-package",
+                "high_risk_ack",
+                Some(request.name.clone()),
+                Some(true),
+                "高敏感技能包二次确认",
+            );
+        }
         audit.record(
             "learn-execute-package",
             "approval",

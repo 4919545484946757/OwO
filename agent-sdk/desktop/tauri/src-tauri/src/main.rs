@@ -17,6 +17,7 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 const CORE_PORT: u16 = 4096;
 
 struct CoreServer(Mutex<Option<Child>>);
+struct AutostartState(Mutex<bool>);
 
 /// 开发环境定位核心服务：`<repo>/agent-sdk/target/debug/owo-agent.exe`。
 fn core_server_path() -> PathBuf {
@@ -71,12 +72,44 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+fn run_key() -> std::io::Result<winreg::RegKey> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    hkcu.create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .map(|(key, _)| key)
+}
+
+fn autostart_enabled() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    let Ok(key) = winreg::RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+    else {
+        return false;
+    };
+    let Ok(value) = key.get_value::<String, _>("OwOAgentDesktop") else {
+        return false;
+    };
+    value.contains("owo-agent-desktop")
+}
+
+fn set_autostart(enabled: bool) -> std::io::Result<()> {
+    let key = run_key()?;
+    if enabled {
+        let exe = std::env::current_exe()?;
+        key.set_value("OwOAgentDesktop", &format!("\"{}\"", exe.display()))?;
+    } else {
+        key.delete_value("OwOAgentDesktop")?;
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let child = spawn_core_server();
             app.manage(CoreServer(Mutex::new(child)));
+            app.manage(AutostartState(Mutex::new(autostart_enabled())));
 
             // 全局快捷键：Ctrl+Alt+Shift+O 唤起工作台（避免常见冲突）。
             let shortcut = Shortcut::new(
@@ -97,8 +130,14 @@ fn main() {
 
             // 托盘：显示 / 退出。
             let show = MenuItem::with_id(app, "show", "显示工作台", true, None::<&str>)?;
+            let autostart_label = if autostart_enabled() {
+                "开机自启：开"
+            } else {
+                "开机自启：关"
+            };
+            let autostart = MenuItem::with_id(app, "autostart", autostart_label, true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &autostart, &quit])?;
             let icon = app
                 .default_window_icon()
                 .cloned()
@@ -109,6 +148,29 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
+                    "autostart" => {
+                        let enabled = if let Some(state) = app.try_state::<AutostartState>() {
+                            let mut guard = state.0.lock().unwrap();
+                            let next = !*guard;
+                            if set_autostart(next).is_ok() {
+                                *guard = next;
+                            }
+                            *guard
+                        } else {
+                            false
+                        };
+                        if let Some(menu) = app.menu() {
+                            if let Some(item) = menu.get("autostart") {
+                                if let Some(menuitem) = item.as_menuitem() {
+                                    let _ = menuitem.set_text(if enabled {
+                                        "开机自启：开"
+                                    } else {
+                                        "开机自启：关"
+                                    });
+                                }
+                            }
+                        }
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
