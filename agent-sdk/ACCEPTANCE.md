@@ -276,6 +276,18 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 下一步：视觉 grounding 结果并入注册表（source=vision），并用稳定元素 ID 驱动“点击/验证”动作，
 减少对每次 OCR 重新定位的依赖。
 
+## 十九、v0.4.13 执行器 OCR 文本锚点兜底（设计文档 4.1 L2，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| AnchorTarget 双通道 | ✅ | `WindowsUiaSource.keep` 改为 `Element/Point` 两态：UIA 元素或 OCR 坐标 |
+| UIA 失败 → OCR 兜底 | ✅ | `find`：UIA 递归未命中时，屏幕 Media.Ocr → 行分组 → 文本中心坐标；`invoke/type_text` 对 Point 走坐标点击+注入 |
+| 纯函数 | ✅ | `find_ocr_anchor_point`（OCR 行包含锚点名 → 行中心）+ 单测（命中/未命中） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 107） |
+
+说明：OCR 兜底为同步 Media.Ocr 路径（避免 async HTTP 阻塞动作图）；Paddle/PP-OCRv6 的异步
+OCR 锚点定位由 Agent 工具（screen_ocr/desktop_click）承担。
+
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
 

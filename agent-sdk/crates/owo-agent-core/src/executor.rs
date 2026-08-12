@@ -183,7 +183,13 @@ pub fn execute_graph(
 pub struct WindowsUiaSource {
     automation: windows::Win32::UI::Accessibility::IUIAutomation,
     root: windows::Win32::UI::Accessibility::IUIAutomationElement,
-    keep: std::sync::Mutex<Vec<windows::Win32::UI::Accessibility::IUIAutomationElement>>,
+    keep: std::sync::Mutex<Vec<AnchorTarget>>,
+}
+
+#[cfg(target_os = "windows")]
+enum AnchorTarget {
+    Element(windows::Win32::UI::Accessibility::IUIAutomationElement),
+    Point(i32, i32),
 }
 
 // UIA COM 对象在桌面会话中可跨线程使用（由系统线程模型保证）。
@@ -293,45 +299,82 @@ fn parent_matches(anchor: &SemanticAnchor, ancestors: &[String]) -> bool {
     }
 }
 
+/// OCR 文本锚点兜底：UIA 找不到时，用屏幕 OCR（Media.Ocr 同步路径）定位文本中心。
+#[cfg(target_os = "windows")]
+fn ocr_anchor_fallback(anchor: &SemanticAnchor) -> Option<(i32, i32)> {
+    let bmp = crate::platform::capture_screen()?;
+    let summary = crate::ocr::ocr_bmp_detailed(&bmp).ok()?;
+    let lines = crate::ocr::group_ocr_lines(&summary.boxes);
+    find_ocr_anchor_point(&lines, &anchor.name)
+}
+
+/// 在 OCR 行中找包含目标文本的首行中心（纯函数，供 OCR 锚点兜底与单测使用）。
+pub(crate) fn find_ocr_anchor_point(
+    lines: &[crate::ocr::OcrLine],
+    name: &str,
+) -> Option<(i32, i32)> {
+    let line = lines
+        .iter()
+        .find(|line| !line.text.trim().is_empty() && line.text.contains(name))?;
+    Some((line.x + line.width / 2, line.y + line.height / 2))
+}
+
 #[cfg(target_os = "windows")]
 impl UiActionSource for WindowsUiaSource {
     fn find(&self, anchor: &SemanticAnchor) -> Result<u64, String> {
-        let found = self
-            .find_recursive(&self.root, anchor, 0, &[])
-            .ok_or_else(|| format!("未找到语义锚点：{}", anchor.name))?;
         let mut keep = self.keep.lock().map_err(|_| "锚点池锁中毒".to_string())?;
-        keep.push(found);
+        if let Some(element) = self.find_recursive(&self.root, anchor, 0, &[]) {
+            keep.push(AnchorTarget::Element(element));
+        } else {
+            // OCR 文本锚点兜底（设计文档 4.1 L2）：UIA 找不到时用屏幕 OCR 定位文本中心。
+            let point = ocr_anchor_fallback(anchor)
+                .ok_or_else(|| format!("未找到语义锚点（UIA 与 OCR 均未命中）：{}", anchor.name))?;
+            keep.push(AnchorTarget::Point(point.0, point.1));
+        }
         Ok((keep.len() - 1) as u64)
     }
 
     fn invoke(&self, handle: u64) -> Result<(), String> {
-        use windows::Win32::UI::Accessibility::{IUIAutomationInvokePattern, UIA_InvokePatternId};
         let keep = self.keep.lock().map_err(|_| "锚点池锁中毒".to_string())?;
-        let element = keep
+        match keep
             .get(handle as usize)
-            .ok_or_else(|| "锚点句柄失效".to_string())?;
-        unsafe {
-            if let Ok(pattern) =
-                element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-            {
-                pattern.Invoke().map_err(|error| error.to_string())
-            } else {
-                click_element(element)
+            .ok_or_else(|| "锚点句柄失效".to_string())?
+        {
+            AnchorTarget::Element(element) => {
+                use windows::Win32::UI::Accessibility::{
+                    IUIAutomationInvokePattern, UIA_InvokePatternId,
+                };
+                unsafe {
+                    if let Ok(pattern) = element
+                        .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                    {
+                        pattern.Invoke().map_err(|error| error.to_string())
+                    } else {
+                        click_element(element)
+                    }
+                }
             }
+            AnchorTarget::Point(x, y) => click_at_screen(*x, *y),
         }
     }
 
     fn type_text(&self, handle: u64, text: &str) -> Result<(), String> {
-        if handle != 0 {
-            let keep = self.keep.lock().map_err(|_| "锚点池锁中毒".to_string())?;
-            let element = keep
-                .get(handle as usize)
-                .ok_or_else(|| "锚点句柄失效".to_string())?;
-            unsafe {
-                let _ = element.SetFocus();
+        let keep = self.keep.lock().map_err(|_| "锚点池锁中毒".to_string())?;
+        match keep
+            .get(handle as usize)
+            .ok_or_else(|| "锚点句柄失效".to_string())?
+        {
+            AnchorTarget::Element(element) => {
+                unsafe {
+                    let _ = element.SetFocus();
+                }
+                send_unicode(text)
+            }
+            AnchorTarget::Point(x, y) => {
+                click_at_screen(*x, *y)?;
+                send_unicode(text)
             }
         }
-        send_unicode(text)
     }
 
     fn shortcut(&self, combo: &str) -> Result<(), String> {
@@ -1057,5 +1100,29 @@ mod tests {
         };
         assert!(!anchor_matches(&anchor, "", 0));
         assert!(anchor_matches(&anchor, "发送按钮", 0));
+    }
+
+    #[test]
+    fn find_ocr_anchor_point_returns_center_and_none() {
+        use crate::ocr::OcrLine;
+        let lines = vec![
+            OcrLine {
+                text: "发送".into(),
+                x: 815,
+                y: 624,
+                width: 170,
+                height: 36,
+            },
+            OcrLine {
+                text: "输入消息...".into(),
+                x: 240,
+                y: 620,
+                width: 560,
+                height: 44,
+            },
+        ];
+        assert_eq!(find_ocr_anchor_point(&lines, "发送"), Some((900, 642)));
+        assert_eq!(find_ocr_anchor_point(&lines, "输入"), Some((520, 642)));
+        assert_eq!(find_ocr_anchor_point(&lines, "不存在"), None);
     }
 }

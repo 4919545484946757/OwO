@@ -86,6 +86,8 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
   可验证桌面可达性。
 - 窗口元素注册表（v0.4.12，10.1）：`/perception/elements` 融合 UIA+OCR 为稳定元素列表
   （`SceneElement`：稳定 ID/多源/置信度/stale 淘汰）；实测 QQ 窗口连续两帧 34/34 稳定 ID。
+- 执行器 OCR 锚点兜底（v0.4.13，4.1 L2）：动作图执行时 UIA 找不到锚点会自动用屏幕 OCR
+  定位文本中心再点击/输入（`find_ocr_anchor_point` 纯函数 + 单测）。
 
 ### STT WER/CER 评估
 
