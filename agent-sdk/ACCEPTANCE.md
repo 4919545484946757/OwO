@@ -321,6 +321,15 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 实机复测 | ⚠️ 网络仍不稳 | 视觉 Agent 多轮任务在本地代理下仍出现后续调用挂起（4 分钟无数据，超时看门狗应触发但未见退出，指向代理连接级问题）；单轮模型冒烟正常（6.4s） |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
 
+## 二十四、v0.4.18 本地文本模型工具调用评估（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| qwen2.5:3b 本地文本模型 | ✅ | Ollama 拉取完成（与 VL 模型并存）；单轮对话正常（46s，CPU） |
+| 工具调用能力 | ⚠️ 不达标 | 直连 Ollama /v1/chat/completions 带 tools 请求：qwen2.5vl:3b 直接 400“不支持 tools”；qwen2.5:3b 接受 tools 但不触发调用（返回 null tool_calls 并反问），Agent 工具闭环无法全本地化 |
+| 结论 | ⚠️ | 全本地多轮 Agent 需更强工具调用模型（如 llama3.2:3b 或 7B+）或 DeepSeek 网络恢复；当前继续用 DeepSeek（网络恢复后）+ 本地 VL 做视觉验证 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
 ## 二十三、v0.4.17 本地模型通道与回归门禁（2026-08-13）
 
 | 项 | 状态 | 证据 |

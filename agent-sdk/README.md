@@ -97,6 +97,8 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 本地回归门禁（v0.4.17）：`scripts/sim-regression.py` 顺序跑学习/观察等确定性闭环，
   `--with-llm` 追加 LLM 套件；Ollama VL 模型不支持工具调用，文本版 `qwen2.5:3b` 拉取后
   可全本地跑多轮 Agent。
+- 本地模型工具调用评估（v0.4.18）：qwen2.5:3b 单轮可用但工具调用不触发（null tool_calls）；
+  VL 模型明确不支持 tools。全本地 Agent 闭环待更强模型或网络恢复后验证。
 
 ### STT WER/CER 评估
 

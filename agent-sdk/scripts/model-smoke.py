@@ -23,12 +23,13 @@ def post(base, path, body=None, timeout=60):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://127.0.0.1:4097")
+    parser.add_argument("--prompt", default="用中文回复：你好")
     args = parser.parse_args()
     session = post(args.base, "/session", {"workspace": os.getcwd(), "model": None})
     print("session:", session.get("id"), flush=True)
     request = urllib.request.Request(
         args.base + "/session/" + session["id"] + "/turn",
-        data=json.dumps({"prompt": "用中文回复：你好"}).encode("utf-8"),
+        data=json.dumps({"prompt": args.prompt}).encode("utf-8"),
         method="POST",
     )
     request.add_header("Content-Type", "application/json")
