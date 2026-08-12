@@ -72,6 +72,9 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
   `/perception/ocr*` 自动走 PP-OCRv6（失败回退 Media.Ocr，provider 字段标注引擎）；实测能读出
   Media.Ocr 读不出的离屏小字（“发送/输入消息”）。`scripts/real-qq-send.py` 用 UIA 锚点在真实 QQ
   完成受控发送并验证上屏；`desktop_scroll` 支持滚轮滚动列表。
+- 真实环境迭代工具（v0.4.8）：`scripts/browser-driver-direct-test.py` 不经 Agent 直连真实网页
+  验证驱动（360 搜索→文章→下载 141KB JPEG）；`scripts/real-qq-group-send.py` 群聊受控发送
+  （带“校验聊天头防发错”保护）；SendInput 注入失败自动重试。
 
 ### STT WER/CER 评估
 

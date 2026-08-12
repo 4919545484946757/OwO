@@ -377,6 +377,7 @@ agent-sdk/skills/user/<name>/
 | P1 桌面端骨架 | Tauri 壳 + 会话/审批/diff/设置 + 技能中心；内置 documents/spreadsheets/pdf/browser 四技能 | 6–8 周 | 桌面端 M1 验收项全通；四技能契约测试过门禁；唤起 < 150ms |
 | P2 全域感知 v1 | L0/L1 + L2 按需截图 + 语音插件（默认 SenseVoice-Small） + 意图解析；VSCode 场景 + QQ 只读场景 | 6–8 周 | “VSCode 语音改代码”20 次成功率 ≥ 80%；QQ 会话授权与消息掩码通过；截图用后即毁断言通过；50 条中文 + 20 条中英混说命令 WER < 5%、5s 音频 p95 < 2s（按 13.1 默认配置） |
 | P3 操作学习 v1 | 示范学习 + 受限自主探索（默认 S0 层）+ 流程技能包 + 主动建议（默认阈值） | 6–8 周 | 示范一次“QQ 发文件”后换参数复用成功率 ≥ 80%；自主探索全部审批 + 审计且不越界；重复操作按默认阈值正确提示；所有参数可在设置页修改且即时生效 |
+| P3.5 并行编排 | 监督模型 + worker 池 + Plan/Goal 循环 + 多 API 并行（第 15 节） | 6–8 周 | 3 任务并行加速 ≥ 2x；拆解 eval ≥ 80%；同文件写冲突 0；10 步长任务完成率 ≥ 70%；审批/审计无绕过 |
 | P4 输入法融合（待决策） | TSF/IMK 壳 + librime 复用 + 三档交互 | 占位 | 前置条件全满足后再评审；不锁时间 |
 
 ---
@@ -456,3 +457,172 @@ agent-sdk/skills/user/<name>/
 ### 剩余开放问题
 
 1. 聊天类白名单首批具体应用（QQ / 微信 / 飞书？）与消息授权粒度。
+
+---
+
+## 14. 桌面端功能缺口与开发清单（P0/P1/P2）
+
+> 依据 2026-08-12 桌面 UI 盘点：Tauri 2 壳 + Web 工作台已覆盖会话/审批/diff/技能/学习/自动化/白名单/设置/审计/主动建议；以下为缺口项，按“接口是否已存在”与产品价值排序。
+
+### 14.1 P0：接口已存在，只差 UI（性价比最高）
+
+| # | 功能 | 服务端现状 | 说明 |
+|---|---|---|---|
+| 1 | 操作记忆浏览器 | `/memory/observations`、`/memory/clear`、`/memory/mine-skill` 已存在 | UI 加“情景记忆”面板：列表/回放/删除/标注（成功/失败/未知）/一键挖掘技能 |
+| 2 | 感知实验室 | `/perception/ocr`、`/perception/tree`、`/vision/describe\|verify\|ground` 已存在 | 截图 + OCR 坐标框叠加预览、UIA 树查看、视觉描述/验证/grounding 调试 |
+| 3 | 桌面控制台 + 坐标拾取器 | `/desktop/*` 已存在（click/type/key/shortcut/launch/scroll/wait/activate） | 点哪点哪生成 `click_at` 参数，调试 QQ 类坐标点击 |
+| 4 | 主动建议原因标注 | `/proactive/decide` 需扩展 feedback 字段 | 增加“无用/时机不对/已经会/不信任”原因，补误判率/确认率基线数据 |
+| 5 | 设置表单化 | `GET/POST /settings` 已存在 | 从裸 JSON 编辑器改为分组表单（模型/STT/OCR/主动建议/探索沙箱/记忆保留期/白名单），带默认值说明 |
+
+### 14.2 P1：技术路线未完成项
+
+| # | 功能 | 说明 |
+|---|---|---|
+| 6 | PP-OCRv6 接入 | ONNX 下载脚本 + `ort` 推理 + `ocr.model_tier`（small/medium/system）配置 + 系统 OCR 对照基准 |
+| 7 | 窗口级截图 + 窗口模板 + DPI 坐标 | `PrintWindow` 客户区截图、统一坐标模型（client/screen/dpi_scale）、QQ 窗口模板 ROI 建立/失效重建 |
+| 8 | 本地 VL 3B 捆绑与视觉验证闭环 | 默认档 Qwen2.5-VL-3B Q4（纯 CPU）；“发送后视觉确认”接入技能验证链 |
+| 9 | 静默学习真实桌面版 | 自动采样去重、结果判定（成功/失败/未知）、成功率门槛、与主动建议联动 |
+| 10 | 内置终端面板 | v0.4 P1 唯一“可选未做”项 |
+| 11 | 桌面通知 | 审批请求/任务完成/提醒推系统通知 + 托盘红点 |
+| 12 | 快捷键与自启设置 UI | 当前硬编码/托盘菜单，移入设置页 |
+
+### 14.3 P2：产品化大项
+
+| # | 功能 | 说明 |
+|---|---|---|
+| 13 | 操作记忆 RAG | `memory.recall` 工具，按“应用 + 动作意图 + 结果”检索 |
+| 14 | 自动化执行技能 | 定时任务从“提醒”升级为“定时跑流程技能包 + 审批队列 + 结果通知” |
+| 15 | 技能市场/分享站 | .owskill 上传下载、评分、权限校验（v2 市场雏形） |
+| 16 | 模型用量/成本/延迟仪表盘 | 网关已统计用量，缺可视化 |
+| 17 | 悬浮球/候选窗模式 | 输入法融合前过渡入口：全局悬浮球唤起，轻任务候选窗出结果 |
+| 18 | 云执行、公开市场、多格式笔记、完整 computer-use | v0.3 M4 大项，未开工 |
+
+---
+
+## 15. Agent 并行编排与 Plan/Goal 循环（v0.4.2 方向）
+
+### 15.1 现状与问题
+
+- 当前一个任务只在一个会话里串行执行：Agent loop 一轮一轮调用模型与工具，子代理（explorer/worker）由主代理串行派发。
+- 模型网关支持多 Provider（DeepSeek、Anthropic、Ollama 等），但单任务只路由到一个模型。
+- 缺少“目标/计划”一等公民：长任务没有可查看、可修改、可恢复的 goal 与 plan 状态。
+
+### 15.2 目标
+
+1. **监督模型（Supervisor）**：读用户目标 → 自动拆解子任务 → 分配 worker → 编排依赖 → 仲裁与聚合结果。
+2. **并行执行**：多个 worker 子代理并行跑，可各自路由不同模型/API（强模型规划、快速模型干活、专用模型验证）。
+3. **Plan/Goal 循环**（对齐 Codex 桌面端语义）：Goal = 目标对象（objective / 验收 / 预算 / 状态）；Plan = 步骤清单（依赖 / 状态 / 指派 / 验证）；循环 = 执行 → 验证 → 更新计划 → 直到完成或受阻。
+
+### 15.3 总体架构
+
+```mermaid
+flowchart TD
+    U["用户目标 / 语音 / 文本"] --> SUP["监督模型 Supervisor<br/>goal/plan 状态机 + 任务调度 + 结果仲裁"]
+    SUP --> PLAN["Plan 步骤依赖图"]
+    PLAN --> W1["Worker A（子代理会话）"]
+    PLAN --> W2["Worker B（子代理会话）"]
+    PLAN --> W3["Worker C（子代理会话）"]
+    W1 --> GW["模型网关<br/>provider 路由 + 预算"]
+    W2 --> GW
+    W3 --> GW
+    GW --> M1["DeepSeek（快速/主模型）"]
+    GW --> M2["Ollama 本地（隐私/离线）"]
+    GW --> M3["视觉模型（验证）"]
+    W1 --> PERM["权限审批（用户/独立审批模型）"]
+    W2 --> PERM
+    W3 --> PERM
+    SUP --> AGG["结果聚合 / diff 冲突处理"]
+    AGG --> V["验证步骤（测试/断言/用户确认）"]
+    V --> SUP
+    SUP --> SESS["会话 / 审计 / traces（挂 goal 树）"]
+```
+
+### 15.4 Plan/Goal 循环（Codex 式）
+
+**Goal 对象**：
+
+```json
+{
+  "id": "g_01",
+  "objective": "把 parseConfig 补错误处理并加测试",
+  "acceptance": ["错误输入返回 Err", "新增 3 个单元测试全绿"],
+  "budget": { "max_steps": 20, "max_cost_usd": 1.0, "timeout_s": 1800 },
+  "status": "active"
+}
+```
+
+**Plan 对象**：
+
+```json
+{
+  "id": "p_01",
+  "goal_id": "g_01",
+  "steps": [
+    { "id": "s1", "title": "阅读 parseConfig 现状", "status": "done", "depends_on": [] },
+    { "id": "s2", "title": "设计错误处理方案", "status": "in_progress", "depends_on": ["s1"], "assigned_to": "worker:plan" },
+    { "id": "s3", "title": "实现修改", "status": "pending", "depends_on": ["s2"], "verification": "cargo test" },
+    { "id": "s4", "title": "补充单元测试", "status": "pending", "depends_on": ["s2"] }
+  ]
+}
+```
+
+**循环流程**：
+
+1. 解析用户目标 → 创建 Goal；
+2. 监督模型生成 Plan（含依赖图，用户可改）；
+3. 并行执行所有“就绪步骤”（依赖已完成）；
+4. 每步执行后验证（测试 / 断言 / 用户确认）；
+5. 更新步骤状态与计划；失败则重试、换 worker 或重新规划；
+6. 全部完成 → 聚合 diff → 用户审阅 → Goal 完成；受阻（阻塞条件重复）→ Goal 标记 blocked 并汇报。
+
+### 15.5 并行调度模型
+
+| 模式 | 适用 | 说明 |
+|---|---|---|
+| Fan-out | 相互独立的子任务（改多个文件、多语言翻译） | 同时派发 N 个 worker，各自独立上下文 |
+| Pipeline | 有阶段依赖（读取 → 处理 → 写回） | 每阶段可并行处理分片 |
+| Map-reduce | 大文件/批量任务 | 分片处理 + 聚合结果 |
+
+- **上下文隔离**：每个 worker 只带自己需要的上下文（文件/技能/会话摘要），避免上下文爆炸。
+- **写冲突处理**：同一文件并发写 → 检测并串行化（文件锁），或由监督模型合并；diff 冲突进入人工审阅。
+- **预算控制**：并行度上限（默认 3）、每 worker 轮次/成本上限、全局超时。
+
+### 15.6 接口设计（契约草案）
+
+| 方法 | 说明 |
+|---|---|
+| `goal.create` / `goal.get` / `goal.update` | 目标对象生命周期 |
+| `plan.create` / `plan.update` / `plan.step.status` | 计划与步骤状态 |
+| `task.dispatch` / `task.status` / `task.join` / `task.abort` | worker 并行任务控制 |
+| `agent.turn.parallel` | 一次调用派发多个并行子任务 |
+| SSE 事件 | `goal.progress` / `plan.updated` / `task.status` / `approval.request` |
+
+### 15.7 与现有代码衔接
+
+| 现有模块 | 扩展方式 |
+|---|---|
+| `subagent.rs` | 升级为可并行 worker 池（调度、join、abort、超时） |
+| `gateway.rs` | 新增 `task: "supervisor" / "worker" / "verifier"` 路由；同一任务可并行多 provider |
+| `agent.rs` | loop 外挂 goal/plan 状态机（每轮更新步骤状态） |
+| `session.rs` | worker = 独立 fork 会话，结果回传父会话 |
+| Web 工作台 | 新增“目标/计划/任务树”面板：goal 视图、plan 清单、worker 状态、审批队列 |
+
+### 15.8 验收指标
+
+- 3 个独立子任务并行 vs 串行：耗时加速 ≥ 2x；
+- eval 用例：监督模型拆解正确率 ≥ 80%（10 个混合任务）；
+- 同文件并发写冲突：0（串行化/合并机制生效）；
+- ≥ 10 步长任务通过 plan/goal 循环完成率 ≥ 70%（真实模型）；
+- 并行任务每个工具调用仍走审批 + 审计，无绕过；
+- 用户可在 UI 随时查看/暂停/修改 plan，修改后按新计划继续。
+
+### 15.9 风险与缓解
+
+| 风险 | 缓解 |
+|---|---|
+| 上下文爆炸 | worker 上下文隔离 + 压缩 + 只回传摘要/diff |
+| 成本失控 | 每 worker 预算 + 全局预算 + 并行度上限 |
+| 并行写冲突 | 文件锁/串行化 + diff 冲突人工审阅 |
+| 监督模型误拆 | 用户可改 plan；eval 回归拆解正确率 |
+| 聚合幻觉（合并结果不实） | 每步验证 + 聚合后整体验证（测试/断言） |
+| 审批绕过 | worker 工具调用一律走同一权限链与审计 |

@@ -231,3 +231,13 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
+
+## 十四、v0.4.8 真实环境迭代修复（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| SendInput 偶发失败重试 | ✅ | 真实桌面实测 `SendInput 文本注入失败` 瞬态报错 → `send_inputs_retry`（3 次重试+退避），click/type/shortcut/scroll 统一接入 |
+| 浏览器驱动 src 解析增强 | ✅ | 首张图 src 为空时回退 `currentSrc/data-src`，取页面首个非空图片地址；`browser-driver-direct-test.py` 直连真实网页（不经 Agent）通过：360 搜索 → 今日头条文章 → 下载 141,751B JPEG |
+| 真实 QQ 群聊受控发送脚本 | ✅ 就绪（待交互桌面） | `real-qq-group-send.py`：搜索群 → UIA 点击会话行 → 校验聊天头（防发错）→ 输入 → 发送 → UIA 验证；`qq-tree-dump.py` 调试工具；当次运行因桌面会话前台不可用（GetForegroundWindow 为空）中止，未发送任何消息 |
+| 本地 OCR 部署可行性 | ⚠️ 网络受阻 | PyPI TLS 连接被当前网络中断（SSLEOFError），rapidocr/onnxruntime 无法安装；云端 PP-OCRv6 继续作为当前 OCR 通道，本地 ONNX 待网络恢复后落地 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 99） |

@@ -162,10 +162,24 @@ async function handle(command, args, id) {
       case "download_image": {
         let url = String(args.url || "");
         if (args.src) {
-          const attr = await page
-            .getAttribute(String(args.src), "src")
-            .catch(() => "");
-          if (attr) url = String(attr);
+          const selector = String(args.src);
+          const attr = await page.getAttribute(selector, "src").catch(() => "");
+          if (attr) {
+            url = String(attr);
+          } else {
+            const sources = await page.evaluate((selector) => {
+              return Array.from(document.querySelectorAll(selector))
+                .map(
+                  (element) =>
+                    element.getAttribute("src") ||
+                    element.currentSrc ||
+                    element.getAttribute("data-src") ||
+                    ""
+                )
+                .filter(Boolean);
+            }, selector);
+            url = sources[0] || "";
+          }
         }
         if (url && !/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
           url = new URL(url, page.url()).href;

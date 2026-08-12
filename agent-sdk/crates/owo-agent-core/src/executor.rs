@@ -491,8 +491,7 @@ unsafe fn click_element(
 #[cfg(target_os = "windows")]
 pub(crate) fn send_unicode(text: &str) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-        VIRTUAL_KEY,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY,
     };
     let mut inputs = Vec::new();
     for ch in text.chars() {
@@ -525,8 +524,7 @@ pub(crate) fn send_unicode(text: &str) -> Result<(), String> {
     if inputs.is_empty() {
         return Ok(());
     }
-    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-    if sent == inputs.len() as u32 {
+    if send_inputs_retry(&inputs) {
         Ok(())
     } else {
         Err("SendInput 文本注入失败".to_string())
@@ -536,7 +534,7 @@ pub(crate) fn send_unicode(text: &str) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 pub(crate) fn send_shortcut(combo: &str) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     let (modifiers, key) = parse_shortcut(combo)?;
     let mut inputs = Vec::new();
@@ -548,8 +546,7 @@ pub(crate) fn send_shortcut(combo: &str) -> Result<(), String> {
     for vk in modifiers.iter().rev() {
         inputs.push(key_input(VIRTUAL_KEY(*vk), KEYEVENTF_KEYUP));
     }
-    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-    if sent == inputs.len() as u32 {
+    if send_inputs_retry(&inputs) {
         Ok(())
     } else {
         Err("SendInput 快捷键注入失败".to_string())
@@ -607,8 +604,7 @@ pub(crate) fn parse_click_at(text: &str) -> Result<(i32, i32), String> {
 #[cfg(target_os = "windows")]
 pub(crate) fn click_at_screen(x: i32, y: i32) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-        MOUSEINPUT,
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
     };
     use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
     unsafe { SetCursorPos(x, y) }.map_err(|error| format!("SetCursorPos 失败：{error}"))?;
@@ -626,8 +622,7 @@ pub(crate) fn click_at_screen(x: i32, y: i32) -> Result<(), String> {
         },
     };
     let inputs = [mouse(MOUSEEVENTF_LEFTDOWN), mouse(MOUSEEVENTF_LEFTUP)];
-    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-    if sent == inputs.len() as u32 {
+    if send_inputs_retry(&inputs) {
         Ok(())
     } else {
         Err("SendInput 鼠标点击失败".to_string())
@@ -637,7 +632,7 @@ pub(crate) fn click_at_screen(x: i32, y: i32) -> Result<(), String> {
 /// 在屏幕坐标处滚动鼠标滚轮（delta 为正向上、负向下，一格 120）。
 pub(crate) fn scroll_at_screen(x: i32, y: i32, delta: i32) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
     };
     use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
     unsafe { SetCursorPos(x, y) }.map_err(|error| format!("SetCursorPos 失败：{error}"))?;
@@ -654,12 +649,30 @@ pub(crate) fn scroll_at_screen(x: i32, y: i32, delta: i32) -> Result<(), String>
             },
         },
     };
-    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
-    if sent == 1 {
+    if send_inputs_retry(&[input]) {
         Ok(())
     } else {
         Err("SendInput 滚轮注入失败".to_string())
     }
+}
+
+/// SendInput 偶发失败重试（真实桌面实测出现过瞬时报错）。
+fn send_inputs_retry(inputs: &[windows::Win32::UI::Input::KeyboardAndMouse::INPUT]) -> bool {
+    use std::thread;
+    use std::time::Duration;
+    for attempt in 0..3 {
+        let sent = unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::SendInput(
+                inputs,
+                std::mem::size_of::<windows::Win32::UI::Input::KeyboardAndMouse::INPUT>() as i32,
+            )
+        };
+        if sent == inputs.len() as u32 {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(150 * (attempt + 1)));
+    }
+    false
 }
 
 #[cfg(not(target_os = "windows"))]
