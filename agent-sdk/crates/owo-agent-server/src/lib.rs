@@ -541,6 +541,7 @@ async fn context_snapshot(
     let _ = perception.refresh_from_platform();
     let sequence = owo_agent_core::clipboard_sequence();
     perception.refresh_clipboard(sequence);
+    let _ = perception.refresh_from_uia(2, 64);
     Ok(Json(perception.snapshot()))
 }
 

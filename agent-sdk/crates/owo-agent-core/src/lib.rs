@@ -1,6 +1,7 @@
 //! OwO Agent SDK 核心库（M1）：
 //! Agent loop、工具注册表、权限审批、会话、审计、模型网关。
 
+pub mod accessibility;
 pub mod agent;
 pub mod audit;
 pub mod context;
@@ -24,6 +25,7 @@ pub mod tools;
 pub mod trace;
 pub mod whitelist;
 
+pub use accessibility::{foreground_ui_tree, UiNode};
 pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
 pub use audit::{AuditEntry, AuditLog};
 pub use error::AgentError;

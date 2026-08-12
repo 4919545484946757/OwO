@@ -90,8 +90,9 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 | Tauri 2 桌面主客户端（P1） | ✅ 骨架可运行 | `desktop/tauri/src-tauri`：加载 Web 工作台、自动拉起核心服务（4096）、退出回收子进程、托盘（显示/退出）、全局快捷键 Ctrl+Alt+Shift+O（注册失败降级继续）；clippy 干净；冒烟：桌面启动后核心服务就绪、CORS 预检 200 |
 | L0 剪贴板事件源（P2） | ✅ Windows | `GetClipboardSequenceNumber` 轮询 + 掩码事件（不读取内容）；冒烟：剪贴板变化后快照出现 copy_masked 且去重 |
 | L2 按需截图（P2） | ✅ Windows | GDI BitBlt/GetDIBits → 内存 BMP 环形缓冲（5 帧、不落盘）；快照仅暴露元数据；4x4 采样测试 + 环形缓冲/销毁断言 |
+| L1 无障碍 UI 树（P2） | ✅ Windows | accessibility.rs（UI Automation：角色/名称/类名语义锚点，深度/节点截断，变化去重）；快照 `ui_context.ui_tree` 冒烟实测 19 节点（Obsidian 前台窗口） |
 
 ### 下一迭代（P1 剩余 / P2）
 
-- L1 无障碍 UI 树、L2 本地摘要（视觉模型/OCR）、语音 STT 插件（SenseVoice-Small）。
+- L2 本地摘要（视觉模型/OCR）、语音 STT 插件（SenseVoice-Small）。
 - Tauri 打包发布（安装包/自动更新/常驻自启）与核心服务版本管理。

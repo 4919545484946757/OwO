@@ -35,6 +35,9 @@ pub struct UiContext {
     pub window: String,
     pub active_view: String,
     pub accessible: bool,
+    /// L1 无障碍 UI 树摘要（语义锚点，按权限过滤）。
+    #[serde(default)]
+    pub ui_tree: Vec<crate::UiNode>,
 }
 
 /// 内容引用：默认 masked=true 且不带 snippet，只有显式会话授权才附最小片段。
@@ -122,6 +125,7 @@ pub struct SituationStore {
     /// L2 截图环形缓冲：仅内存，不落盘，用后即毁。
     capture_ring: VecDeque<CaptureFrame>,
     last_clipboard_sequence: u32,
+    last_ui_key: String,
     subscribers: Vec<UnboundedSender<PerceptionEvent>>,
     max_ring: usize,
 }
@@ -149,6 +153,7 @@ impl SituationStore {
             recent_actions: VecDeque::new(),
             capture_ring: VecDeque::new(),
             last_clipboard_sequence: 0,
+            last_ui_key: String::new(),
             subscribers: Vec::new(),
             max_ring: 5,
         }
@@ -269,6 +274,40 @@ impl SituationStore {
             .map(|app| app.id.clone())
             .unwrap_or_else(|| "unknown".to_string());
         let _ = self.record_event(PerceptionEvent::ClipboardMasked { app_id });
+    }
+
+    /// L1 界面层：抓取前台窗口无障碍 UI 树摘要；内容未变化时不重复记录事件。
+    pub fn refresh_from_uia(&mut self, max_depth: u32, max_nodes: usize) -> Result<usize, String> {
+        if !self.is_enabled(PerceptionLayer::L1Ui) {
+            return Err("L1 界面层未授权".to_string());
+        }
+        let tree = crate::accessibility::foreground_ui_tree(max_depth, max_nodes)
+            .ok_or("UIA 不可用或无前台窗口")?;
+        let key = tree
+            .iter()
+            .map(|node| format!("{}|{}|{}", node.name, node.control_type, node.class))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let window = self
+            .foreground
+            .as_ref()
+            .map(|app| app.title.clone())
+            .unwrap_or_default();
+        let active_view = tree
+            .first()
+            .map(|node| node.name.clone())
+            .unwrap_or_default();
+        let ui = UiContext {
+            window,
+            active_view,
+            accessible: true,
+            ui_tree: tree,
+        };
+        if self.last_ui_key != key {
+            self.last_ui_key = key;
+            let _ = self.record_event(PerceptionEvent::UiChanged { ui: ui.clone() });
+        }
+        Ok(ui.ui_tree.len())
     }
 
     fn notify(&mut self, event: PerceptionEvent) {
@@ -472,6 +511,20 @@ mod tests {
             }
             Err(_) => {
                 // 无窗口会话允许截图失败（隐私优先：不强制采集）。
+            }
+        }
+    }
+
+    #[test]
+    fn ui_tree_refresh_is_callable() {
+        let mut store = SituationStore::new();
+        match store.refresh_from_uia(2, 32) {
+            Ok(count) => {
+                assert!(count > 0);
+                assert!(!store.snapshot().ui_context.unwrap().ui_tree.is_empty());
+            }
+            Err(_) => {
+                // 无前台窗口/UIA 不可用时允许失败（不强制采集）。
             }
         }
     }
