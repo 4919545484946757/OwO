@@ -64,13 +64,27 @@ def main():
     verify_input = http_json(
         "POST",
         args.base + "/vision/verify",
-        {"question": "输入框是否已清空（没有文字）？"},
+        {
+            "question": "输入框是否已清空（没有文字）？",
+            "x": 240,
+            "y": 620,
+            "width": 560,
+            "height": 44,
+            "scale": 3,
+        },
         timeout=600,
     )
     verify_message = http_json(
         "POST",
         args.base + "/vision/verify",
-        {"question": "聊天记录区域是否出现了一条新消息？"},
+        {
+            "question": "聊天记录区域是否出现了一条新消息？",
+            "x": 240,
+            "y": 56,
+            "width": 760,
+            "height": 400,
+            "scale": 2,
+        },
         timeout=600,
     )
     print("[verify input]", verify_input.get("answer"), verify_input.get("confidence"), flush=True)

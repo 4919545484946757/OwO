@@ -288,6 +288,20 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 说明：OCR 兜底为同步 Media.Ocr 路径（避免 async HTTP 阻塞动作图）；Paddle/PP-OCRv6 的异步
 OCR 锚点定位由 Agent 工具（screen_ocr/desktop_click）承担。
 
+## 二十、v0.4.14 本地 VL 模型就绪 + 真实视觉描述/验证通过（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| qwen2.5vl:3b 本地模型 | ✅ | Ollama 已拉取（2.98GB）；`/vision/status` 返回 provider=ollama、model=qwen2.5vl:3b |
+| 视觉区域支持 | ✅ | `capture_vision_png_region`（裁剪+放大）；screen_vision/vision_verify 与 /vision/describe、/vision/verify 均支持 x/y/width/height/scale |
+| 真实本地 VL 描述 | ✅ | 模拟 QQ 帧：模型正确描述“即时通讯软件，张子豪/李四，右下角蓝色发送按钮，下方输入框”（此前误读为锁屏是因为服务未设 OWO_SIM_QQ_URL、抓了真实 Windows 锁屏——管线本身正常） |
+| 真实本地 VL 验证 | ✅ | 发送后区域验证：输入框已清空 yes/0.8、聊天区出现新消息 yes/0.8；`sim-qq-vision-e2e.py` 通过 |
+| 测试稳定性修复 | ✅ | element_registry 测试改为按名字断言（HashMap 顺序无关），消除偶发失败 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 107） |
+
+本地 VL 现在可用作：场景描述（screen_vision）、完成验证（vision_verify，支持区域）、
+grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
+
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
 

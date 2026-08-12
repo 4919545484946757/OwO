@@ -825,6 +825,27 @@ impl Tool for DesktopWaitUntilTool {
 
 pub struct ScreenVisionTool;
 
+/// 视觉面截图：可选区域裁剪+放大（小字/局部验证用）。
+async fn capture_vision_png_with_region(args: &Value) -> Result<(Vec<u8>, String), String> {
+    if let (Some(x), Some(y), Some(width), Some(height)) = (
+        args.get("x").and_then(Value::as_i64),
+        args.get("y").and_then(Value::as_i64),
+        args.get("width").and_then(Value::as_i64),
+        args.get("height").and_then(Value::as_i64),
+    ) {
+        let scale = args.get("scale").and_then(Value::as_u64).unwrap_or(3) as u32;
+        return crate::vision::capture_vision_png_region(
+            x as i32,
+            y as i32,
+            width as i32,
+            height as i32,
+            scale,
+        )
+        .await;
+    }
+    crate::vision::capture_vision_png().await
+}
+
 #[async_trait]
 impl Tool for ScreenVisionTool {
     fn spec(&self) -> ToolSpec {
@@ -834,14 +855,19 @@ impl Tool for ScreenVisionTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "prompt": { "type": "string", "description": "可选：自定义描述指令" }
+                    "prompt": { "type": "string", "description": "可选：自定义描述指令" },
+                    "x": { "type": "integer", "description": "可选：区域左上角 x（与 width/height 同传时裁剪放大）" },
+                    "y": { "type": "integer" },
+                    "width": { "type": "integer" },
+                    "height": { "type": "integer" },
+                    "scale": { "type": "integer", "description": "区域放大倍数，默认 3" }
                 }
             }),
         }
     }
 
     async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
-        let (png, surface) = crate::vision::capture_vision_png().await?;
+        let (png, surface) = capture_vision_png_with_region(&args).await?;
         let prompt = args
             .get("prompt")
             .and_then(Value::as_str)
@@ -871,7 +897,14 @@ impl Tool for VisionVerifyTool {
             description: "让视觉模型针对当前截图回答 yes/no 问题（如“消息是否已上屏”“输入框是否已清空”），返回 answer/confidence，用于异步完成验证".into(),
             input_schema: json!({
                 "type": "object",
-                "properties": { "question": { "type": "string" } },
+                "properties": {
+                    "question": { "type": "string" },
+                    "x": { "type": "integer", "description": "可选：只验证该区域（裁剪放大）" },
+                    "y": { "type": "integer" },
+                    "width": { "type": "integer" },
+                    "height": { "type": "integer" },
+                    "scale": { "type": "integer" }
+                },
                 "required": ["question"]
             }),
         }
@@ -879,7 +912,7 @@ impl Tool for VisionVerifyTool {
 
     async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
         let question = required_string(&args, "question")?;
-        let (png, surface) = crate::vision::capture_vision_png().await?;
+        let (png, surface) = capture_vision_png_with_region(&args).await?;
         let prompt = format!(
             "请只看这张截图回答问题。先回答 YES 或 NO，再给出 0-1 置信度。问题：{question}"
         );

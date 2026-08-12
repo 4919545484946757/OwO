@@ -1623,14 +1623,35 @@ async fn vision_status() -> Json<Value> {
 struct VisionDescribeRequest {
     #[serde(default)]
     prompt: Option<String>,
+    #[serde(default)]
+    x: Option<i32>,
+    #[serde(default)]
+    y: Option<i32>,
+    #[serde(default)]
+    width: Option<i32>,
+    #[serde(default)]
+    height: Option<i32>,
+    #[serde(default)]
+    scale: Option<u32>,
 }
 
 async fn vision_describe(
     Json(request): Json<VisionDescribeRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (png, surface) = owo_agent_core::capture_vision_png()
+    let (png, surface) = match (request.x, request.y, request.width, request.height) {
+        (Some(x), Some(y), Some(width), Some(height)) => owo_agent_core::capture_vision_png_region(
+            x,
+            y,
+            width,
+            height,
+            request.scale.unwrap_or(3),
+        )
         .await
-        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?,
+        _ => owo_agent_core::capture_vision_png()
+            .await
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?,
+    };
     let prompt = request.prompt.unwrap_or_else(|| {
         "请用中文描述这个界面的当前状态：这是什么应用？有哪些关键控件（按钮/输入框/消息）？\
          它们大致在什么位置？最新消息内容是什么？"
@@ -1651,15 +1672,36 @@ async fn vision_describe(
 #[derive(serde::Deserialize)]
 struct VisionVerifyRequest {
     question: String,
+    #[serde(default)]
+    x: Option<i32>,
+    #[serde(default)]
+    y: Option<i32>,
+    #[serde(default)]
+    width: Option<i32>,
+    #[serde(default)]
+    height: Option<i32>,
+    #[serde(default)]
+    scale: Option<u32>,
 }
 
 /// 视觉完成验证：对当前截图回答 yes/no 问题，返回 answer + confidence。
 async fn vision_verify(
     Json(request): Json<VisionVerifyRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (png, surface) = owo_agent_core::capture_vision_png()
+    let (png, surface) = match (request.x, request.y, request.width, request.height) {
+        (Some(x), Some(y), Some(width), Some(height)) => owo_agent_core::capture_vision_png_region(
+            x,
+            y,
+            width,
+            height,
+            request.scale.unwrap_or(3),
+        )
         .await
-        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?,
+        _ => owo_agent_core::capture_vision_png()
+            .await
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?,
+    };
     let prompt = format!(
         "请只看这张截图回答问题。先回答 YES 或 NO，再给出 0-1 置信度。问题：{}",
         request.question

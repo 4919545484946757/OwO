@@ -246,7 +246,11 @@ mod tests {
         let mut registry = ElementRegistry::new();
         let frame1 = registry.update("qq", vec![element("发送", 815, 624, 170, 36)]);
         let frame2 = registry.update("qq", vec![element("搜索", 100, 100, 50, 20)]);
-        assert_ne!(frame1[0].id, frame2[0].id);
+        let search = frame2
+            .iter()
+            .find(|entry| entry.name == "搜索")
+            .expect("新元素应已注册");
+        assert_ne!(frame1[0].id, search.id);
     }
 
     #[test]

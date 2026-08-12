@@ -117,6 +117,19 @@ pub async fn capture_vision_bmp() -> Result<(Vec<u8>, String), String> {
     Ok((bytes, "desktop".to_string()))
 }
 
+/// 获取视觉面指定区域（裁剪+放大）的 PNG，供小字/局部验证。
+pub async fn capture_vision_png_region(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    scale: u32,
+) -> Result<(Vec<u8>, String), String> {
+    let (bmp, surface) = capture_vision_bmp().await?;
+    let cropped = crate::ocr::crop_scale_bmp(&bmp, x, y, width, height, scale)?;
+    bmp_to_png(&cropped).map(|png| (png, surface))
+}
+
 /// 视觉模型场景描述/验证（主入口）。
 pub async fn describe_image(png: &[u8], prompt: &str) -> Result<String, String> {
     let config = VisionConfig::from_env();
