@@ -55,6 +55,42 @@ pub struct TaskHypothesis {
     pub confidence: f64,
 }
 
+/// L3 语义层 v1：本地启发式任务假设（不调用模型、不上送云端）。
+/// 后续可替换为本地小模型推理，接口不变。
+pub fn infer_task_hypothesis(app_id: &str, title: &str) -> TaskHypothesis {
+    let lower = format!("{app_id} {title}").to_lowercase();
+    let (label, confidence) = if ["code", "cursor", "vscode", "visual studio", "jetbrains"]
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+        || lower.contains(".rs")
+        || lower.contains(".py")
+        || lower.contains(".ts")
+    {
+        ("coding", 0.8)
+    } else if ["qq", "wechat", "weixin", "feishu", "dingtalk"]
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+    {
+        ("chatting", 0.8)
+    } else if ["steam", "epic", "game", "游戏"]
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+    {
+        ("gaming", 0.7)
+    } else if ["chrome", "edge", "firefox", "browser"]
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+    {
+        ("browsing", 0.7)
+    } else {
+        ("reading", 0.5)
+    };
+    TaskHypothesis {
+        label: label.to_string(),
+        confidence,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureMeta {
     pub id: String,
@@ -347,6 +383,25 @@ impl SituationStore {
         let _ = self.record_event(PerceptionEvent::Hypothesis { hypothesis });
     }
 
+    /// L3 语义层：按当前前台应用推断任务假设（仅 L3 授权时生效，变化才记录）。
+    pub fn refresh_task_hypothesis(&mut self) {
+        if !self.is_enabled(PerceptionLayer::L3Semantic) {
+            return;
+        }
+        let Some(app) = &self.foreground else {
+            return;
+        };
+        let hypothesis = infer_task_hypothesis(&app.id, &app.title);
+        let changed = self
+            .hypothesis
+            .as_ref()
+            .map(|current| current.label != hypothesis.label)
+            .unwrap_or(true);
+        if changed {
+            self.set_task_hypothesis(&hypothesis.label, hypothesis.confidence);
+        }
+    }
+
     /// L0 事件源：从平台轮询前台应用并记录（Windows 前台窗口）。
     /// 前台应用无变化时返回当前缓存，不重复记录事件。
     pub fn refresh_from_platform(&mut self) -> Option<ForegroundApp> {
@@ -362,6 +417,7 @@ impl SituationStore {
             if !unchanged {
                 let _ = self.record_event(PerceptionEvent::ForegroundChanged { app: app.clone() });
             }
+            self.refresh_task_hypothesis();
             Some(app)
         }
         #[cfg(not(target_os = "windows"))]
@@ -546,5 +602,38 @@ mod tests {
                 // 无前台窗口/UIA 不可用时允许失败（不强制采集）。
             }
         }
+    }
+
+    #[test]
+    fn infers_task_hypothesis_by_app() {
+        let coding = infer_task_hypothesis("code", "parser.rs - VSCode");
+        assert_eq!(coding.label, "coding");
+        assert!(coding.confidence >= 0.8);
+        let chat = infer_task_hypothesis("qq", "QQ - 项目群");
+        assert_eq!(chat.label, "chatting");
+        let game = infer_task_hypothesis("some-game", "Game Window");
+        assert_eq!(game.label, "gaming");
+        let browse = infer_task_hypothesis("chrome", "知乎 - Google Chrome");
+        assert_eq!(browse.label, "browsing");
+    }
+
+    #[test]
+    fn l3_hypothesis_updates_only_when_changed() {
+        let mut store = SituationStore::new();
+        store.set_layer_enabled(PerceptionLayer::L3Semantic, true);
+        store
+            .record_event(PerceptionEvent::ForegroundChanged {
+                app: ForegroundApp {
+                    id: "code".to_string(),
+                    title: "main.rs - VSCode".to_string(),
+                },
+            })
+            .unwrap();
+        store.refresh_task_hypothesis();
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.task_hypothesis.unwrap().label, "coding");
+        let actions_after_first = store.recent_actions().len();
+        store.refresh_task_hypothesis(); // 未变化不重复记录
+        assert_eq!(store.recent_actions().len(), actions_after_first);
     }
 }
