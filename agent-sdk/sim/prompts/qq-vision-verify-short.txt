@@ -1,0 +1,9 @@
+模拟 QQ 聊天窗口（1020x700）里张子豪发来消息“在吗？帮我看看今晚吃什么好”（想吃清淡的）。
+请完成并报告：
+1. screen_ocr 读取上下文。
+2. 点击输入框（role_hint=input）并输入一句清淡饮食的回复。
+3. 点击 role_hint=button 且文本为“发送”的行中心。
+4. 发送后调用 vision_verify 两次（本地视觉模型）：
+   - “输入框是否已清空（没有文字）？” 区域 x=240 y=620 width=560 height=44 scale=3
+   - “聊天记录区域是否出现了一条新消息？” 区域 x=240 y=56 width=760 height=400 scale=2
+5. 报告两次视觉确认的 answer 与 confidence。

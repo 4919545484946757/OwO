@@ -90,6 +90,8 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
   定位文本中心再点击/输入（`find_ocr_anchor_point` 纯函数 + 单测）。
 - 本地视觉模型已就绪（v0.4.14）：Ollama `qwen2.5vl:3b`（约 3GB），`screen_vision`/`vision_verify`
   支持区域裁剪放大；实测正确描述模拟 QQ 界面并以 yes/0.8 验证“输入框清空/消息上屏”。
+- 情景记忆滚动清理（v0.4.15）：默认 30 天/1 万条（`OWO_MEMORY_RETENTION_DAYS`/`OWO_MEMORY_MAX`），
+  加载与追加时自动清理；`scripts/model-smoke.py` 可快速验证模型通道。
 
 ### STT WER/CER 评估
 

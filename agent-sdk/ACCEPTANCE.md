@@ -302,6 +302,15 @@ OCR 锚点定位由 Agent 工具（screen_ocr/desktop_click）承担。
 本地 VL 现在可用作：场景描述（screen_vision）、完成验证（vision_verify，支持区域）、
 grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 
+## 二十一、v0.4.15 情景记忆滚动清理 + 测试并发修复（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 记忆保留期/容量清理 | ✅ | `MemoryStore::prune`：默认保留 30 天/1 万条（`OWO_MEMORY_RETENTION_DAYS`/`OWO_MEMORY_MAX` 可配），加载与追加时滚动清理；单测覆盖超期淘汰与容量上限 |
+| 测试并发修复 | ✅ | observe 测试临时文件加唯一计数（同 pid 并行测试不再共文件），消除偶发失败 |
+| 视觉 Agent 闭环阻塞说明 | ⚠️ 网络不稳定 | Agent 多轮调用时 DeepSeek 经本地代理的后续请求偶发流式挂起（首轮正常、单轮冒烟 6.4s 通过）；工具链与本地 VL 均正常，属当前代理/网络问题，重试或换通道后即可跑通 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 108） |
+
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
 

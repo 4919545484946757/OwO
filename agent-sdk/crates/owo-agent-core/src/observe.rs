@@ -29,8 +29,13 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     pub fn new(path: PathBuf) -> Self {
-        let entries = Self::load(&path);
-        Self { path, entries }
+        let mut store = Self {
+            path,
+            entries: Vec::new(),
+        };
+        store.entries = Self::load(&store.path);
+        store.prune();
+        store
     }
 
     fn load(path: &std::path::Path) -> Vec<Observation> {
@@ -46,6 +51,7 @@ impl MemoryStore {
     pub fn append(&mut self, observation: Observation) -> Result<(), String> {
         use std::io::Write;
         self.entries.push(observation.clone());
+        self.prune();
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -88,6 +94,37 @@ impl MemoryStore {
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
+
+    /// 滚动清理：超期（默认 30 天）或超量（默认 1 万条）淘汰最旧条目。
+    pub fn prune(&mut self) {
+        let (max_entries, retention) = retention_config();
+        let now = chrono::Utc::now();
+        self.entries
+            .retain(|entry| !is_expired(&entry.ts, &now, retention));
+        if self.entries.len() > max_entries {
+            let overflow = self.entries.len() - max_entries;
+            self.entries.drain(0..overflow);
+        }
+    }
+}
+
+fn retention_config() -> (usize, chrono::Duration) {
+    let max_entries = std::env::var("OWO_MEMORY_MAX")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(10_000);
+    let days = std::env::var("OWO_MEMORY_RETENTION_DAYS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(30);
+    (max_entries, chrono::Duration::days(days))
+}
+
+fn is_expired(ts: &str, now: &chrono::DateTime<chrono::Utc>, retention: chrono::Duration) -> bool {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        return false;
+    };
+    now.signed_duration_since(parsed.with_timezone(&chrono::Utc)) > retention
 }
 
 /// 把模拟窗口日志条目转换为观察记录（只保留动作摘要，不记录消息正文）。
@@ -196,10 +233,16 @@ pub fn map_sim_events_to_actions(observations: &[Observation]) -> Vec<RecordedAc
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn temp_store() -> (MemoryStore, std::path::PathBuf) {
-        let path =
-            std::env::temp_dir().join(format!("owo-memory-test-{}.jsonl", std::process::id()));
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "owo-memory-test-{}-{counter}.jsonl",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         (MemoryStore::new(path.clone()), path)
     }
@@ -251,5 +294,36 @@ mod tests {
         assert_eq!(actions[1].action_type, crate::learn::ActionType::Type);
         assert!(actions[1].value_masked);
         assert_eq!(actions[3].anchor.name, "李四");
+    }
+
+    #[test]
+    fn memory_prune_caps_entries_and_drops_expired() {
+        std::env::set_var("OWO_MEMORY_MAX", "3");
+        let (mut store, path) = temp_store();
+        let old = Observation {
+            ts: "2020-01-01T00:00:00Z".to_string(),
+            app_id: "qq".to_string(),
+            kind: "sim_event".to_string(),
+            summary: "旧事件".to_string(),
+            detail: json!({}),
+            state_hash: 1,
+        };
+        store.append(old.clone()).expect("追加成功");
+        for index in 0..5 {
+            store
+                .append(Observation {
+                    ts: "2026-08-13T00:00:00Z".to_string(),
+                    app_id: "qq".to_string(),
+                    kind: "sim_event".to_string(),
+                    summary: format!("事件 {index}"),
+                    detail: json!({}),
+                    state_hash: index as u64,
+                })
+                .expect("追加成功");
+        }
+        assert!(store.count() <= 3);
+        assert!(!store.entries.iter().any(|entry| entry.state_hash == 1));
+        std::env::remove_var("OWO_MEMORY_MAX");
+        let _ = std::fs::remove_file(&path);
     }
 }
