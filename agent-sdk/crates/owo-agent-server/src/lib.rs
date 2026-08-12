@@ -1204,9 +1204,18 @@ async fn settings_egress(
             "false"
         },
     );
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "settings",
+            "egress",
+            None,
+            Some(request.cloud_enabled),
+            format!("数据出境开关：cloud_enabled={}", request.cloud_enabled),
+        );
+    }
     Ok(Json(json!({
         "cloud_enabled": request.cloud_enabled,
-        "note": "已写入 settings.json；重启核心服务后对模型网关生效",
+        "note": "已写入 settings.json 并即时生效",
     })))
 }
 

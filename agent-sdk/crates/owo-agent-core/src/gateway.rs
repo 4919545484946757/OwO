@@ -164,6 +164,14 @@ impl OpenAiCompatibleProvider {
         Ok(Self { client, config })
     }
 
+    /// 数据出境开关：优先读运行时环境变量（支持设置页即时切换），缺省用启动配置。
+    fn cloud_enabled(&self) -> bool {
+        std::env::var("OWO_CLOUD_ENABLED")
+            .ok()
+            .and_then(|value| value.parse::<bool>().ok())
+            .unwrap_or(self.config.cloud_enabled)
+    }
+
     fn request_body(&self, messages: &[ChatMessage], tools: &[ToolSpec], stream: bool) -> Value {
         let tool_payload: Vec<Value> = tools
             .iter()
@@ -321,7 +329,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> Result<ModelOutput, String> {
-        if !self.config.cloud_enabled {
+        if !self.cloud_enabled() {
             return Err("云端模型已禁用（数据出境开关关闭）".to_string());
         }
         let body = self.request_body(messages, tools, false);
@@ -397,7 +405,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         tools: &[ToolSpec],
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelOutput, String> {
-        if !self.config.cloud_enabled {
+        if !self.cloud_enabled() {
             return Err("云端模型已禁用（数据出境开关关闭）".to_string());
         }
         let body = self.request_body(messages, tools, true);
@@ -470,6 +478,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
 mod tests {
     use super::*;
 
+    /// 环境变量依赖的网关测试串行执行，避免并行设置互相干扰。
+    static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     #[test]
     fn parses_content_delta() {
         let delta = parse_sse_payload(r#"{"choices":[{"delta":{"content":"你好"}}]}"#).unwrap();
@@ -507,8 +519,9 @@ mod tests {
         assert!(parse_sse_payload(": keep-alive").is_none());
     }
 
-    #[test]
-    fn cloud_disabled_rejects_requests_before_network() {
+    #[tokio::test]
+    async fn cloud_disabled_rejects_requests_before_network() {
+        let _guard = ENV_LOCK.lock().await;
         std::env::set_var("OPENAI_API_KEY", "test");
         std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9");
         std::env::set_var("OPENAI_MODEL", "mock");
@@ -516,8 +529,35 @@ mod tests {
         let config = OpenAiCompatibleConfig::from_env().unwrap();
         assert!(!config.cloud_enabled);
         let provider = OpenAiCompatibleProvider::new(config).unwrap();
-        let error = futures::executor::block_on(provider.complete(&[], &[])).unwrap_err();
+        let error = provider.complete(&[], &[]).await.unwrap_err();
         assert!(error.contains("数据出境"));
         std::env::remove_var("OWO_CLOUD_ENABLED");
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OPENAI_BASE_URL");
+        std::env::remove_var("OPENAI_MODEL");
+    }
+
+    #[tokio::test]
+    async fn cloud_switch_applies_without_reconstruction() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("OPENAI_API_KEY", "test");
+        std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9");
+        std::env::set_var("OPENAI_MODEL", "mock");
+        std::env::remove_var("OWO_CLOUD_ENABLED");
+        let config = OpenAiCompatibleConfig::from_env().unwrap();
+        assert!(config.cloud_enabled);
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+        let error = provider.complete(&[], &[]).await.unwrap_err();
+        assert!(
+            !error.contains("数据出境"),
+            "开关开启时应尝试联网，而不是被拒：{error}"
+        );
+        std::env::set_var("OWO_CLOUD_ENABLED", "false");
+        let error = provider.complete(&[], &[]).await.unwrap_err();
+        assert!(error.contains("数据出境"));
+        std::env::remove_var("OWO_CLOUD_ENABLED");
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OPENAI_BASE_URL");
+        std::env::remove_var("OPENAI_MODEL");
     }
 }

@@ -35,7 +35,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 自动化面板（P1）：`automation.rs` 定时任务（单次/间隔/每天）+ 提醒动作，持久化 `<data>/automations.json`，常驻循环每秒检查、触发写审计；接口 `GET/POST /automations`、`POST /automations/{id}/toggle`、`DELETE /automations/{id}`、`GET /automations/reminders`、`POST /automations/reminders/clear`；Web 工作台自动化面板（创建/启停/删除/提醒列表）。
 - 流程技能包分享（D26）：`share_skill.rs` 导出/导入 `.owskill`（ZIP，含 SKILL.md/graph.json/manifest.json/versions.json）；导入校验顺序为 schema → 权限白名单（默认 deny）→ 敏感度必填 → 变量/动作图合法，zip-slip 拒绝；接口 `GET /learn/export/{name}`、`POST /learn/import`（raw ZIP），Web 工作台支持导出/导入。
 - 语音输入（本地优先）：Web 工作台 🎤 按钮用 WebAudio 采集麦克风 → 16k WAV → `POST /stt/transcribe`（SenseVoice-Small 本地推理）→ 转写进输入框；本地 STT 不可用（模型缺失/权限拒绝）时自动回退系统 Web Speech；最长录 10 秒自动停止。
-- 数据出境开关（7.5）：`settings.egress.cloud_enabled`（默认开，可用 `OWO_CLOUD_ENABLED=false` 覆盖）；关闭后模型网关在发起任何网络请求前直接拒绝（完整/流式两条路径），HTTP `GET /settings` / `POST /settings/egress` 读写，Web 工作台“设置与诊断”区一键切换；写回 `settings.json`，重启核心服务后对网关生效。
+- 数据出境开关（7.5）：`settings.egress.cloud_enabled`（默认开，可用 `OWO_CLOUD_ENABLED=false` 覆盖）；关闭后模型网关在发起任何网络请求前直接拒绝（完整/流式两条路径），HTTP `GET /settings` / `POST /settings/egress` 读写，Web 工作台“设置与诊断”区一键切换；写回 `settings.json` 并即时生效（网关每次调用前检查运行时开关），切换记入审计，无需重启。
 - 桌面自启：Tauri 托盘新增“开机自启：开/关”，写入/删除 HKCU Run 注册表项，启动时自动拉起核心服务常驻。
 - 本地 STT（D20）：`stt.rs` 集成 sherpa-onnx + SenseVoice-Small（默认离线，`settings.stt.model` 可换），模型目录 `<data>/models/stt/<model>/`，`scripts/download-stt-model.ps1` 一键下载（约 240MB）；接口 `POST /stt/transcribe`（raw WAV → 文本 + 耗时）；模型未就绪返回明确错误，不静默降级云端。
 

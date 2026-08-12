@@ -689,7 +689,7 @@ $("egressToggle").addEventListener("click", async () => {
     body: JSON.stringify({ cloud_enabled: enabled }),
   });
   await refreshSettings();
-  addMessage("system", `云端模型已${enabled ? "开启" : "关闭"}（重启核心服务后对模型网关生效）`);
+  addMessage("system", `云端模型已${enabled ? "开启" : "关闭"}（已即时生效）`);
 });
 $("whitelistForm").addEventListener("submit", async (event) => {
   event.preventDefault();
