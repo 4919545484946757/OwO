@@ -524,6 +524,10 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         owo_agent_server::start_automation_loop(automation_state).await;
     });
+    let memory_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        owo_agent_server::start_memory_observer(memory_state).await;
+    });
     let app = owo_agent_server::build_router(state);
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;

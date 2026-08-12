@@ -193,3 +193,15 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 
 环境变量：`OWO_VISION_PROVIDER`（ollama/openai）、`OWO_VISION_MODEL`、`OWO_VISION_BASE_URL`、
 `OWO_VISION_API_KEY`、`OWO_OLLAMA_HOST`。视觉只做理解与验证，主控制仍走 OCR+坐标。
+
+## 十一、v0.4.5 静默观察与情景记忆（2026-08-12 续，M-D 起步）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| observe.rs（情景记忆 JSONL + 事件摘要） | ✅ | `MemoryStore`（追加/列表/清空，往返单测）、`observation_from_sim_event`（内容掩码单测）、`map_sim_events_to_actions`（动作序列单测）、`value_hash` |
+| 静默观察器 | ✅ | `start_memory_observer`：模拟面每 2s 拉取模拟日志，自动写入情景记忆（不经过 /learn/record）；服务启动即挂载 |
+| 挖掘接口 | ✅ | `GET /memory/observations`、`POST /memory/clear`、`POST /memory/mine-skill`（观察序列→泛化→沉淀技能包，审计入库） |
+| 静默观察→挖掘→复用 e2e | ✅ 1/1 | `sim-qq-observe-e2e.py`：观察器自动入库 9 条摘要（incoming/input_clicked/typed/outgoing/send_clicked）→ 挖掘 `qq_reply_observed`（{value}）→ 重置后换参数执行，两条新消息发出、输入框清空 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 94） |
+
+下一步：真实面观察源（UIA 事件/窗口状态采样）、候选技能“用户确认转 active”、情景记忆保留期滚动清理。

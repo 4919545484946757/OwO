@@ -1561,6 +1561,7 @@ dependencies = [
  "chrono",
  "owo-agent-core",
  "owo-agent-protocol",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

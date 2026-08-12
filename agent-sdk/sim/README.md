@@ -35,3 +35,9 @@ powershell -ExecutionPolicy Bypass -File scripts\run-sim-e2e.ps1
 
 脚本化示范一次 QQ 回复 → 自动录制动作（内容掩码）→ 泛化出 `{value}` 变量 → 沉淀 `qq_reply` 技能包 →
 重置场景后换参数复用执行并断言发送成功。
+
+静默观察版（不经过 /learn/record，观察器自动入库）：
+
+```powershell
+& python scripts\sim-qq-observe-e2e.py --base http://127.0.0.1:4096 --sim http://127.0.0.1:18500 --value "观察复用验证-001"
+```

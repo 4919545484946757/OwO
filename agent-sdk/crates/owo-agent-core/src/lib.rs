@@ -13,6 +13,7 @@ pub mod executor;
 pub mod gateway;
 pub mod learn;
 pub mod mcp;
+pub mod observe;
 pub mod ocr;
 pub mod perception;
 pub mod permissions;
@@ -49,6 +50,9 @@ pub use learn::{
     RecordedAction, SemanticAnchor, Sensitivity, SuggestionAction,
 };
 pub use mcp::{McpClient, McpServerConfig, McpTool};
+pub use observe::{
+    map_sim_events_to_actions, observation_from_sim_event, value_hash, MemoryStore, Observation,
+};
 pub use ocr::{
     crop_scale_bmp, ocr_bmp, ocr_bmp_detailed, ocr_bmp_region, ocr_engine_status, OcrBox,
     OcrEngineStatus, OcrSummary,

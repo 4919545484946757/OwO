@@ -51,6 +51,7 @@ pub struct AppState {
     pub proactive: Arc<Mutex<ProactiveEngine>>,
     pub stt: Arc<Mutex<owo_agent_core::LocalStt>>,
     pub automations: Arc<Mutex<AutomationStore>>,
+    pub memory: Arc<Mutex<owo_agent_core::MemoryStore>>,
     pub audit_flushed: Arc<Mutex<usize>>,
     pub workspace: PathBuf,
 }
@@ -85,7 +86,10 @@ impl AppState {
                 &settings.stt,
                 &data_root,
             ))),
-            automations: Arc::new(Mutex::new(AutomationStore::new(data_root))),
+            automations: Arc::new(Mutex::new(AutomationStore::new(data_root.clone()))),
+            memory: Arc::new(Mutex::new(owo_agent_core::MemoryStore::new(
+                data_root.join("memory.jsonl"),
+            ))),
             audit_flushed: Arc::new(Mutex::new(0)),
             workspace,
         }
@@ -142,6 +146,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/desktop/wait", post(desktop_wait))
         .route("/vision/status", get(vision_status))
         .route("/vision/describe", post(vision_describe))
+        .route("/memory/observations", get(memory_observations))
+        .route("/memory/clear", post(memory_clear))
+        .route("/memory/mine-skill", post(memory_mine_skill))
         .route("/learn/start", post(learn_start))
         .route("/learn/record", post(learn_record))
         .route("/learn/pause", post(learn_pause))
@@ -1417,6 +1424,91 @@ async fn vision_describe(
     })))
 }
 
+async fn memory_observations(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100);
+    let memory = state.memory.lock().map_err(poison)?;
+    let observations = memory.list(limit);
+    Ok(Json(json!({
+        "count": observations.len(),
+        "total": memory.count(),
+        "observations": observations,
+    })))
+}
+
+async fn memory_clear(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut memory = state.memory.lock().map_err(poison)?;
+    memory
+        .clear()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize)]
+struct MineSkillRequest {
+    name: String,
+    target_apps: Vec<String>,
+    sensitivity: String,
+    description: String,
+}
+
+/// 从情景记忆自动挖掘流程技能：观察到的动作序列 → 泛化 → 沉淀技能包。
+async fn memory_mine_skill(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<MineSkillRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let sensitivity = parse_sensitivity(&request.sensitivity)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let actions = {
+        let memory = state.memory.lock().map_err(poison)?;
+        let observations = memory.list(0);
+        owo_agent_core::map_sim_events_to_actions(&observations)
+    };
+    if actions.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "情景记忆中没有可挖掘的动作（请先运行模拟/真实操作并等待观察器入库）".to_string(),
+        ));
+    }
+    let mut pipeline = state.pipeline.lock().map_err(poison)?;
+    pipeline.recorder.start();
+    for action in actions {
+        pipeline
+            .recorder
+            .record(action)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    }
+    let package = pipeline
+        .sink_skill(
+            &request.name,
+            request.target_apps,
+            sensitivity,
+            &request.description,
+        )
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "memory",
+            "mine-skill",
+            Some(package.manifest.name.clone()),
+            Some(true),
+            format!("从情景记忆挖掘技能包：{}", package.manifest.name),
+        );
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "name": package.manifest.name,
+        "variables": package.manifest.variables,
+    })))
+}
+
 fn ensure_real_desktop(tool: &str) -> Result<(), (StatusCode, String)> {
     if std::env::var("OWO_SIM_QQ_URL")
         .map(|value| !value.is_empty())
@@ -1997,6 +2089,48 @@ pub async fn start_automation_loop(state: Arc<AppState>) {
                 audit.record("automation", "fire", None, Some(true), fired.join(" | "));
             }
         }
+    }
+}
+
+/// 静默观察器：模拟面下每 2s 拉取模拟窗口日志，把动作摘要（内容掩码）写入情景记忆。
+pub async fn start_memory_observer(state: Arc<AppState>) {
+    let mut seen = 0usize;
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let Some(base) = std::env::var("OWO_SIM_QQ_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let url = format!("{}/log", base.trim_end_matches('/'));
+        let Ok(response) = reqwest::get(&url).await else {
+            continue;
+        };
+        let Ok(value) = response.json::<Value>().await else {
+            continue;
+        };
+        let Some(entries) = value.get("entries").and_then(Value::as_array) else {
+            continue;
+        };
+        if entries.len() < seen {
+            // 模拟场景被 /reset 清空：从头重新计数。
+            seen = 0;
+        }
+        if entries.len() <= seen {
+            continue;
+        }
+        let mut memory = state
+            .memory
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for entry in &entries[seen..] {
+            if let Some(observation) = owo_agent_core::observation_from_sim_event(entry) {
+                let _ = memory.append(observation);
+            }
+        }
+        seen = entries.len();
     }
 }
 

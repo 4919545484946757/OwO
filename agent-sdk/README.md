@@ -61,6 +61,10 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
   通道为本地 Ollama（默认 `qwen2.5vl:3b`，`scripts/download-vision-model.ps1` 一键拉取）或任意
   OpenAI-compatible 视觉端点（`OWO_VISION_PROVIDER=openai` + `OWO_VISION_BASE_URL/API_KEY/MODEL`）；
   `GET /vision/status` 诊断、`POST /vision/describe` 直连测试；模型未就绪时返回明确错误不挂起。
+- 静默观察与情景记忆（v0.4.5，M-D 起步）：服务启动即挂载观察器（模拟面每 2s 拉取应用事件流），
+  动作摘要（内容掩码）写入本地情景记忆 `memory.jsonl`；`GET /memory/observations` 查看、
+  `POST /memory/mine-skill` 一键把观察序列挖掘为流程技能包（复用 LearnPipeline 泛化）；
+  `scripts/sim-qq-observe-e2e.py` 演示“静默观察→挖掘→换参数复用执行”闭环。
 
 ### STT WER/CER 评估
 
