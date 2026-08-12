@@ -5,6 +5,7 @@
 
 use crate::settings::SttSettings;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct SttOutcome {
@@ -15,13 +16,24 @@ pub struct SttOutcome {
 pub struct LocalStt {
     model_dir: PathBuf,
     engine: String,
+    /// 缓存识别器，避免每次请求重新加载模型（约 3s → 数百 ms）。
+    #[cfg(target_os = "windows")]
+    recognizer: Mutex<Option<sherpa_onnx::OfflineRecognizer>>,
 }
+
+// sherpa-onnx 内部是 C 指针；由 Mutex 串行化访问，跨线程移动是安全的。
+#[cfg(target_os = "windows")]
+unsafe impl Send for LocalStt {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for LocalStt {}
 
 impl LocalStt {
     pub fn new(settings: &SttSettings, data_root: &Path) -> Self {
         Self {
             model_dir: data_root.join("models").join("stt").join(&settings.model),
             engine: settings.model.clone(),
+            #[cfg(target_os = "windows")]
+            recognizer: Mutex::new(None),
         }
     }
 
@@ -51,21 +63,15 @@ impl LocalStt {
             && self.model_dir.join("tokens.txt").exists()
     }
 
-    /// 离线转写 WAV（16k PCM 单声道；SenseVoice-Small via sherpa-onnx）。
-    pub fn transcribe_wav(&self, wav_path: &Path) -> Result<SttOutcome, String> {
-        #[cfg(target_os = "windows")]
-        {
-            if !self.is_ready() {
-                return Err(format!(
-                    "本地 STT 模型未就绪：{}（运行 scripts/download-stt-model.ps1）",
-                    self.model_dir.display()
-                ));
-            }
-            let started = std::time::Instant::now();
-            let path = wav_path
-                .to_str()
-                .ok_or_else(|| format!("WAV 路径非法：{}", wav_path.display()))?;
-            let wave = sherpa_onnx::Wave::read(path).ok_or("读取 WAV 失败")?;
+    #[cfg(target_os = "windows")]
+    fn recognizer(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<sherpa_onnx::OfflineRecognizer>>, String> {
+        let mut guard = self
+            .recognizer
+            .lock()
+            .map_err(|_| "STT 识别器锁中毒".to_string())?;
+        if guard.is_none() {
             let mut config = sherpa_onnx::OfflineRecognizerConfig::default();
             config.model_config.sense_voice = sherpa_onnx::OfflineSenseVoiceModelConfig {
                 model: Some(
@@ -83,8 +89,28 @@ impl LocalStt {
                     .to_string_lossy()
                     .into_owned(),
             );
-            let recognizer =
-                sherpa_onnx::OfflineRecognizer::create(&config).ok_or("创建识别器失败")?;
+            *guard = Some(sherpa_onnx::OfflineRecognizer::create(&config).ok_or("创建识别器失败")?);
+        }
+        Ok(guard)
+    }
+
+    /// 离线转写 WAV（16k PCM 单声道；SenseVoice-Small via sherpa-onnx）。
+    pub fn transcribe_wav(&self, wav_path: &Path) -> Result<SttOutcome, String> {
+        #[cfg(target_os = "windows")]
+        {
+            if !self.is_ready() {
+                return Err(format!(
+                    "本地 STT 模型未就绪：{}（运行 scripts/download-stt-model.ps1）",
+                    self.model_dir.display()
+                ));
+            }
+            let started = std::time::Instant::now();
+            let path = wav_path
+                .to_str()
+                .ok_or_else(|| format!("WAV 路径非法：{}", wav_path.display()))?;
+            let wave = sherpa_onnx::Wave::read(path).ok_or("读取 WAV 失败")?;
+            let recognizer = self.recognizer()?;
+            let recognizer = recognizer.as_ref().ok_or("识别器未初始化")?;
             let stream = recognizer.create_stream();
             stream.accept_waveform(wave.sample_rate(), wave.samples());
             recognizer.decode(&stream);
