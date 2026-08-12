@@ -54,7 +54,9 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
   `/click`、`/type`、`/key`、`/state`、`/log`、`/reset`；`owo-sim-browser` 提供本地搜索/文章/图片下载站；
   附带多联系人场景（`sim/scenarios/qq-multi-contact.json` + 对应提示词）；
   `scripts/run-sim-e2e.ps1` 一键跑 QQ 回复闭环 + 浏览器搜索/下载两个端到端验收（后台静默，不弹窗）；
-  `scripts/web-browser-e2e.py` 可对真实网页（headless Edge）跑搜索→打开结果→下载图片验收。
+  `scripts/web-browser-e2e.py` 可对真实网页（headless Edge）跑搜索→打开结果→下载图片验收；
+  `scripts/sim-qq-learn-e2e.py` 演示“示范→录制（内容掩码）→泛化→沉淀技能包→换参数复用执行”闭环
+  （`/learn/execute*` 在模拟面自动走 SimUiActionSource，不碰真实桌面）。
 
 ### STT WER/CER 评估
 

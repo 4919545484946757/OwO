@@ -697,6 +697,205 @@ impl Tool for DesktopWaitUntilTool {
     }
 }
 
+/// 模拟面执行器源：把动作图执行（/learn/execute-package）落到 headless 虚拟窗口，
+/// 使“学习沉淀的技能包”可以在模拟环境里复用验证，不触碰真实桌面。
+pub struct SimUiActionSource {
+    base: String,
+    keep: std::sync::Mutex<Vec<serde_json::Value>>,
+}
+
+impl SimUiActionSource {
+    pub fn new() -> Result<Self, String> {
+        let base = sim_base_url().ok_or("模拟环境未配置 OWO_SIM_QQ_URL")?;
+        Ok(Self {
+            base,
+            keep: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn get(&self, path: &str) -> Result<serde_json::Value, String> {
+        sim_http_sync(&self.base, "GET", path, None)
+    }
+
+    fn post(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+        sim_http_sync(&self.base, "POST", path, Some(&body))
+    }
+
+    fn lines(&self) -> Result<Vec<serde_json::Value>, String> {
+        let ocr = self.get("ocr")?;
+        Ok(ocr
+            .get("lines")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn line(&self, handle: u64) -> Result<serde_json::Value, String> {
+        let keep = self.keep.lock().map_err(|_| "锚点池锁中毒".to_string())?;
+        keep.get(handle as usize)
+            .cloned()
+            .ok_or_else(|| "模拟锚点句柄失效".to_string())
+    }
+
+    fn click_line_center(&self, line: &serde_json::Value) -> Result<(), String> {
+        let x = line
+            .get("x")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0) as i32
+            + line
+                .get("width")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0) as i32
+                / 2;
+        let y = line
+            .get("y")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0) as i32
+            + line
+                .get("height")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0) as i32
+                / 2;
+        self.post("click", json!({ "x": x, "y": y }))?;
+        Ok(())
+    }
+}
+
+impl crate::executor::UiActionSource for SimUiActionSource {
+    fn find(&self, anchor: &crate::learn::SemanticAnchor) -> Result<u64, String> {
+        let lines = self.lines()?;
+        let found = lines
+            .iter()
+            .find(|line| sim_anchor_matches(line, anchor))
+            .cloned()
+            .ok_or_else(|| format!("模拟窗口未找到锚点：{}", anchor.name))?;
+        let mut keep = self.keep.lock().map_err(|_| "锚点池锁中毒".to_string())?;
+        keep.push(found);
+        Ok((keep.len() - 1) as u64)
+    }
+
+    fn invoke(&self, handle: u64) -> Result<(), String> {
+        let line = self.line(handle)?;
+        self.click_line_center(&line)
+    }
+
+    fn type_text(&self, handle: u64, text: &str) -> Result<(), String> {
+        let line = self.line(handle)?;
+        if line.get("role_hint").and_then(serde_json::Value::as_str) == Some("input") {
+            self.click_line_center(&line)?;
+        }
+        self.post("type", json!({ "text": text }))?;
+        Ok(())
+    }
+
+    fn shortcut(&self, combo: &str) -> Result<(), String> {
+        self.post("key", json!({ "key": combo }))?;
+        Ok(())
+    }
+
+    fn launch(&self, _target: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn click_at(&self, x: i32, y: i32) -> Result<(), String> {
+        self.post("click", json!({ "x": x, "y": y }))?;
+        Ok(())
+    }
+
+    fn verify(&self, predicate: &str) -> Result<bool, String> {
+        if let Some(expected) = predicate.strip_prefix("value:") {
+            let state = self.get("state")?;
+            return Ok(state
+                .get("input")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .contains(expected));
+        }
+        let ocr = self.get("ocr")?;
+        let haystack = serde_json::to_string(&ocr).unwrap_or_default();
+        if let Some(expected) = predicate.strip_prefix("ui:") {
+            return Ok(haystack.contains(expected));
+        }
+        Ok(haystack.contains(predicate))
+    }
+}
+
+/// 模拟版面行与语义锚点的匹配规则（供 SimUiActionSource 与单测复用）。
+fn sim_anchor_matches(line: &serde_json::Value, anchor: &crate::learn::SemanticAnchor) -> bool {
+    let text = line
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let role_hint = line.get("role_hint").and_then(serde_json::Value::as_str);
+    let role_ok = match anchor.role.as_deref() {
+        Some("button") => role_hint == Some("button"),
+        Some("edit") | Some("input") => role_hint == Some("input"),
+        Some("text") => matches!(
+            role_hint,
+            Some("message" | "header" | "contact" | "status" | "preview")
+        ),
+        Some(_) => true,
+        None => true,
+    };
+    role_ok && !anchor.name.is_empty() && text.contains(&anchor.name)
+}
+
+/// 纯 TcpStream 的同步 HTTP 客户端（仅本机模拟服务）：
+/// 避免 reqwest::blocking 在 async 处理器中析构内部 runtime 导致 panic。
+fn sim_http_sync(
+    base: &str,
+    method: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let url = format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    );
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| "模拟服务地址仅支持 http://".to_string())?;
+    let (host_port, path_and_query) = match rest.split_once('/') {
+        Some((host_port, path)) => (host_port, format!("/{path}")),
+        None => (rest, "/".to_string()),
+    };
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse::<u16>().unwrap_or(80)),
+        None => (host_port, 80),
+    };
+    let payload = body
+        .map(|value| serde_json::to_string(value).unwrap_or_default())
+        .unwrap_or_default();
+    let request = format!(
+        "{method} {path_and_query} HTTP/1.1\r\nHost: {host_port}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    );
+    let mut stream = TcpStream::connect((host, port))
+        .map_err(|e| format!("连接模拟服务失败（{host}:{port}）：{e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .map_err(|e| format!("设置读超时失败：{e}"))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("发送模拟请求失败：{e}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|e| format!("读取模拟响应失败：{e}"))?;
+    let text = String::from_utf8_lossy(&response).to_string();
+    let body_start = text
+        .find("\r\n\r\n")
+        .map(|index| index + 4)
+        .ok_or_else(|| format!("模拟服务响应无正文：{text}"))?;
+    let json_body = &text[body_start.min(text.len())..];
+    serde_json::from_str(json_body).map_err(|e| format!("模拟服务响应解析失败：{e}：{json_body}"))
+}
+
 // ---------- 浏览器工具（Playwright + 本机 Edge） ----------
 
 struct BrowserDriver {
@@ -1064,5 +1263,58 @@ mod tests {
             "lines": [{ "text": "Hello World", "x": 0, "y": 0, "width": 10, "height": 10, "role_hint": "text" }]
         });
         assert!(find_ocr_line(&ocr, "hello", "").is_some());
+    }
+
+    #[test]
+    fn sim_anchor_matches_line_text_and_role() {
+        use crate::learn::SemanticAnchor;
+        let input = json!({ "text": "输入消息...", "role_hint": "input" });
+        let send = json!({ "text": "发送", "role_hint": "button" });
+        let message = json!({ "text": "今晚吃什么", "role_hint": "message" });
+        assert!(sim_anchor_matches(
+            &input,
+            &SemanticAnchor {
+                app_id: None,
+                role: Some("edit".into()),
+                name: "输入消息".into(),
+                parent: None,
+            }
+        ));
+        assert!(sim_anchor_matches(
+            &send,
+            &SemanticAnchor {
+                app_id: None,
+                role: Some("button".into()),
+                name: "发送".into(),
+                parent: None,
+            }
+        ));
+        assert!(!sim_anchor_matches(
+            &send,
+            &SemanticAnchor {
+                app_id: None,
+                role: Some("input".into()),
+                name: "发送".into(),
+                parent: None,
+            }
+        ));
+        assert!(sim_anchor_matches(
+            &message,
+            &SemanticAnchor {
+                app_id: None,
+                role: Some("text".into()),
+                name: "吃什么".into(),
+                parent: None,
+            }
+        ));
+        assert!(!sim_anchor_matches(
+            &message,
+            &SemanticAnchor {
+                app_id: None,
+                role: None,
+                name: String::new(),
+                parent: None,
+            }
+        ));
     }
 }

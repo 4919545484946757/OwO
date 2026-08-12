@@ -168,3 +168,15 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 | QQ 多联系人切换 e2e（真实模型） | ✅ 1/1 | `sim-qq-e2e.py --prompt-file qq-multi-contact.txt --require-contacts-file qq-multi-contacts.txt`：55.4s，3 条消息覆盖张子豪+李四，含切会话、`desktop_wait_until` 等回复、每次发送后 OCR 验证 |
 | 真实网页 headless 浏览器 e2e | ✅ 1/1 | `web-browser-e2e.py`：Bing 被网络阻断时 Agent 自动换 360 搜索并选择可达的权威站点，下载 3,587B SVG 图片；含代理支持 `OWO_BROWSER_PROXY` |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 88 等） |
+
+## 九、v0.4.3 操作记忆闭环（2026-08-12 续）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 模拟面执行器源（SimUiActionSource） | ✅ | computer_use.rs：纯 TcpStream 同步 HTTP（避免 blocking reqwest 在 async 处理器析构 panic）；锚点匹配抽为 `sim_anchor_matches` 纯函数 + 单测；`/learn/execute*` 按 `OWO_SIM_QQ_URL` 自动选源 |
+| 示范→录制→泛化→沉淀→复用闭环 | ✅ 2/2 | `sim-qq-learn-e2e.py`：脚本化示范两次回复 → 6 个 RecordedAction（内容掩码）→ `qq_reply` 技能包泛化出 `{value}` → 重置场景 → 换参数复用执行 6/6 步 ok，两条新消息发出；`-001`/`-002` 两轮均通过 |
+| 回车发送也记录 send_clicked | ✅ | sim_qq.rs：`/key enter` 与点击发送等价记录发送事件 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿 |
+
+说明：学习样本只记录动作摘要（类型/锚点/次数），不记录消息正文（`value_masked=true`）；
+技能执行走模拟面虚拟窗口，真实桌面技能执行仍走 WindowsUiaSource。

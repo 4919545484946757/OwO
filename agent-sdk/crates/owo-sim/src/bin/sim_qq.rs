@@ -667,10 +667,11 @@ fn handle_sim_connection(mut stream: TcpStream) -> Result<(), String> {
                 .get("text")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            handle_type(text);
+            let typed = handle_type(text);
+            log_event("typed", serde_json::json!({ "chars": typed }));
             json_response(
                 200,
-                &serde_json::json!({ "ok": true, "typed_chars": text.chars().count() }).to_string(),
+                &serde_json::json!({ "ok": true, "typed_chars": typed }).to_string(),
             )
         }
         ("POST", "/key") => {
@@ -711,16 +712,19 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn handle_type(text: &str) {
+fn handle_type(text: &str) -> usize {
+    let mut typed = 0;
     if let Some(state) = STATE.get() {
         if let Ok(mut guard) = state.lock() {
             for character in text.chars() {
                 if !character.is_control() {
                     guard.input.push(character);
+                    typed += 1;
                 }
             }
         }
     }
+    typed
 }
 
 fn reset_sim() {
@@ -762,7 +766,17 @@ fn handle_key(key: &str) -> Vec<(String, serde_json::Value)> {
     if let Some(state) = STATE.get() {
         if let Ok(mut guard) = state.lock() {
             match key.to_lowercase().as_str() {
-                "enter" | "return" => events = submit(&mut guard),
+                "enter" | "return" => {
+                    events = submit(&mut guard);
+                    events.push((
+                        "send_clicked".to_string(),
+                        serde_json::json!({
+                            "via": "key_enter",
+                            "x": (SEND_RECT.0 + SEND_RECT.2) / 2,
+                            "y": (SEND_RECT.1 + SEND_RECT.3) / 2,
+                        }),
+                    ));
+                }
                 "backspace" => {
                     guard.input.pop();
                 }

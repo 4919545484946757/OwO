@@ -26,3 +26,12 @@ powershell -ExecutionPolicy Bypass -File scripts\run-sim-e2e.ps1
   断言两条会话都发出过消息。
 - 真实网页（headless）：`scripts/web-browser-e2e.py`（Bing/360 搜索 → 打开结果 → 下载页面图片；
   网络受限时 Agent 会自动换可用站点）。
+
+操作记忆闭环（M-D 起步）：
+
+```powershell
+& python scripts\sim-qq-learn-e2e.py --base http://127.0.0.1:4096 --sim http://127.0.0.1:18500 --value "技能复用验证-001"
+```
+
+脚本化示范一次 QQ 回复 → 自动录制动作（内容掩码）→ 泛化出 `{value}` 变量 → 沉淀 `qq_reply` 技能包 →
+重置场景后换参数复用执行并断言发送成功。

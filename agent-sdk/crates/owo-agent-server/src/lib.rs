@@ -1478,10 +1478,9 @@ async fn learn_execute(
             "首次执行必须确认（confirm: true）".to_string(),
         ));
     }
-    let source = owo_agent_core::WindowsUiaSource::new()
-        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let source = ui_action_source()?;
     let report = owo_agent_core::execute_graph(
-        &source,
+        source.as_ref(),
         &request.graph,
         &request.variables,
         request.max_steps.unwrap_or(20),
@@ -1645,10 +1644,9 @@ async fn learn_execute_package(
             "高敏感技能包需二次确认（high_risk_ack: true）".to_string(),
         ));
     }
-    let source = owo_agent_core::WindowsUiaSource::new()
-        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let source = ui_action_source()?;
     let report = owo_agent_core::execute_graph(
-        &source,
+        source.as_ref(),
         &package.graph,
         &request.variables,
         request.max_steps.unwrap_or(20),
@@ -1681,6 +1679,23 @@ async fn learn_execute_package(
         }
     }
     Ok(Json(report))
+}
+
+/// 根据运行环境选择执行器源：模拟面用 SimUiActionSource（虚拟窗口），
+/// 真实桌面用 WindowsUiaSource。
+fn ui_action_source() -> Result<Box<dyn owo_agent_core::UiActionSource>, (StatusCode, String)> {
+    if std::env::var("OWO_SIM_QQ_URL")
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        owo_agent_core::computer_use::SimUiActionSource::new()
+            .map(|source| Box::new(source) as Box<dyn owo_agent_core::UiActionSource>)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))
+    } else {
+        owo_agent_core::WindowsUiaSource::new()
+            .map(|source| Box::new(source) as Box<dyn owo_agent_core::UiActionSource>)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))
+    }
 }
 
 /// 导出流程技能包为 `.owskill`（ZIP）。
