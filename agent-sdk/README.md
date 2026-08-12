@@ -102,6 +102,8 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - OCR 输出截断（v0.4.19）：screen_ocr 对 text/lines/boxes 做上限，避免超大结果影响多轮工具调用。
 - 多轮卡死根因修复（v0.4.20）：screen_ocr 默认不再返回 boxes（lines 自带坐标），实测单工具轮
   8.7s 通过；此前含 120 boxes 的结果会让 DeepSeek 第二轮流式无响应。
+- 全本地工具调用（v0.4.21）：llama3.2:3b 触发工具调用正常（Agent 内 read_file 轮 64.8s）；
+  复杂多步任务在 CPU 上超时，本地链路可用但适合简单工具轮。
 
 ### STT WER/CER 评估
 
