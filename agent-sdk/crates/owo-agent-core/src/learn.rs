@@ -21,6 +21,8 @@ pub enum ActionType {
     Type,
     Shortcut,
     Inject,
+    /// 启动应用或打开 URL（主动打开，不依赖应用已在前台）。
+    Launch,
 }
 
 /// 语义锚点：以无障碍角色 + 名称定位，坐标只作辅助，不作为主定位依据。
@@ -31,6 +33,9 @@ pub struct SemanticAnchor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     pub name: String,
+    /// 父容器名称（如“会话列表”），用于消除同名节点歧义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -739,6 +744,7 @@ mod tests {
                 app_id: Some("qq".to_string()),
                 role: Some("search_box".to_string()),
                 name: "联系人搜索框".to_string(),
+                parent: None,
             },
             None,
             Some("窗口标题变化".to_string()),
@@ -750,6 +756,7 @@ mod tests {
                 app_id: Some("qq".to_string()),
                 role: Some("input".to_string()),
                 name: "搜索输入".to_string(),
+                parent: None,
             },
             Some("{contact}".to_string()),
             None,
@@ -842,6 +849,7 @@ mod tests {
                     app_id: Some("qq".to_string()),
                     role: None,
                     name: "发送按钮".to_string(),
+                    parent: None,
                 },
                 action_type: ActionType::Click,
                 value_masked: true,
@@ -857,6 +865,7 @@ mod tests {
                     app_id: Some("qq".to_string()),
                     role: None,
                     name: "发送按钮".to_string(),
+                    parent: None,
                 },
                 action_type: ActionType::Click,
                 value_masked: true,
@@ -872,6 +881,7 @@ mod tests {
                     app_id: Some("qq".to_string()),
                     role: None,
                     name: "密码输入框".to_string(),
+                    parent: None,
                 },
                 action_type: ActionType::Type,
                 value_masked: true,
@@ -983,6 +993,7 @@ mod tests {
                 app_id: Some("qq".to_string()),
                 role: Some("edit".to_string()),
                 name: anchor_name.to_string(),
+                parent: None,
             },
             action_type: ActionType::Type,
             value_masked: true,
@@ -1002,6 +1013,7 @@ mod tests {
                     app_id: Some("qq".to_string()),
                     role: Some("button".to_string()),
                     name: "发送按钮".to_string(),
+                    parent: None,
                 },
                 action_type: ActionType::Click,
                 value_masked: true,
@@ -1030,6 +1042,7 @@ mod tests {
                     app_id: Some("qq".to_string()),
                     role: Some("button".to_string()),
                     name: "发送按钮".to_string(),
+                    parent: None,
                 },
                 action_type: ActionType::Click,
                 value_masked: true,

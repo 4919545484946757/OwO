@@ -126,6 +126,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/perception/events", get(perception_events))
         .route("/perception/capture", post(perception_capture))
         .route("/perception/layers", post(perception_layers))
+        .route("/perception/tree", post(perception_tree))
         .route("/learn/start", post(learn_start))
         .route("/learn/record", post(learn_record))
         .route("/learn/pause", post(learn_pause))
@@ -220,6 +221,7 @@ async fn openapi_spec() -> Json<Value> {
             "/perception/events": { "get": { "operationId": "perceptionSubscribe", "responses": { "200": { "description": "SSE perception event stream" } } } },
             "/perception/capture": { "post": { "operationId": "perceptionCapture", "responses": { "200": { "description": "capture meta with OCR summary" } } } },
             "/perception/layers": { "post": { "operationId": "perceptionLayers", "responses": { "200": { "description": "layer authorization updated" } } } },
+            "/perception/tree": { "post": { "operationId": "perceptionTree", "responses": { "200": { "description": "deep UI tree dump" } } } },
             "/learn/record": { "post": { "operationId": "learnRecord", "responses": { "200": { "description": "learn state" } } } },
             "/learn/start": { "post": { "operationId": "learnStart", "responses": { "200": { "description": "learn state" } } } },
             "/learn/pause": { "post": { "operationId": "learnPause", "responses": { "200": { "description": "learn state" } } } },
@@ -1110,6 +1112,31 @@ async fn perception_layers(
 }
 
 #[derive(serde::Deserialize)]
+struct TreeDumpRequest {
+    #[serde(default = "default_tree_depth")]
+    max_depth: u32,
+    #[serde(default = "default_tree_nodes")]
+    max_nodes: usize,
+}
+
+fn default_tree_depth() -> u32 {
+    12
+}
+
+fn default_tree_nodes() -> usize {
+    1000
+}
+
+/// 深度 UI 树转储（computer-use 调试：找深层语义锚点，如 QQ 工具栏按钮）。
+async fn perception_tree(
+    Json(request): Json<TreeDumpRequest>,
+) -> Result<Json<Vec<owo_agent_core::UiNode>>, (StatusCode, String)> {
+    owo_agent_core::foreground_ui_tree(request.max_depth, request.max_nodes)
+        .map(Json)
+        .ok_or((StatusCode::BAD_REQUEST, "无法获取前台 UI 树".to_string()))
+}
+
+#[derive(serde::Deserialize)]
 struct LearnRecordRequest {
     action: RecordedAction,
 }
@@ -1947,6 +1974,7 @@ pub async fn start_observer(state: Arc<AppState>) {
                         app_id: Some(app.id.clone()),
                         role: None,
                         name: app.title.clone(),
+                        parent: None,
                     },
                     action_type: ActionType::Shortcut,
                     value_masked: true,
@@ -1964,6 +1992,7 @@ pub async fn start_observer(state: Arc<AppState>) {
                         app_id: Some(app.id.clone()),
                         role: None,
                         name: "剪贴板".to_string(),
+                        parent: None,
                     },
                     action_type: ActionType::Inject,
                     value_masked: true,

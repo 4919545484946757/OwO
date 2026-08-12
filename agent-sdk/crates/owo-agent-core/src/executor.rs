@@ -30,6 +30,7 @@ pub trait UiActionSource: Send + Sync {
     fn invoke(&self, handle: u64) -> Result<(), String>;
     fn type_text(&self, handle: u64, text: &str) -> Result<(), String>;
     fn shortcut(&self, combo: &str) -> Result<(), String>;
+    fn launch(&self, target: &str) -> Result<(), String>;
     fn verify(&self, predicate: &str) -> Result<bool, String>;
 }
 
@@ -109,6 +110,7 @@ pub fn execute_graph(
                 .and_then(|handle| source.type_text(handle, &text)),
             ActionType::Shortcut => source.shortcut(&text),
             ActionType::Inject => source.type_text(0, &text),
+            ActionType::Launch => source.launch(&text),
         };
         let mut ok = outcome.is_ok();
         let mut detail = outcome.err().unwrap_or_default();
@@ -223,6 +225,7 @@ impl WindowsUiaSource {
         element: &windows::Win32::UI::Accessibility::IUIAutomationElement,
         anchor: &SemanticAnchor,
         depth: u32,
+        ancestors: &[String],
     ) -> Option<windows::Win32::UI::Accessibility::IUIAutomationElement> {
         use windows::Win32::UI::Accessibility::TreeScope_Children;
 
@@ -235,7 +238,7 @@ impl WindowsUiaSource {
                 .CurrentControlType()
                 .map(|value| value.0)
                 .unwrap_or(0);
-            if anchor_matches(anchor, &name, role) {
+            if anchor_matches(anchor, &name, role) && parent_matches(anchor, ancestors) {
                 return Some(element.clone());
             }
             if depth >= 8 {
@@ -244,9 +247,12 @@ impl WindowsUiaSource {
             if let Ok(condition) = self.automation.CreateTrueCondition() {
                 if let Ok(children) = element.FindAll(TreeScope_Children, &condition) {
                     if let Ok(length) = children.Length() {
+                        let mut child_ancestors = ancestors.to_vec();
+                        child_ancestors.push(name.clone());
                         for index in 0..length {
                             if let Ok(child) = children.GetElement(index) {
-                                if let Some(found) = self.find_recursive(&child, anchor, depth + 1)
+                                if let Some(found) =
+                                    self.find_recursive(&child, anchor, depth + 1, &child_ancestors)
                                 {
                                     return Some(found);
                                 }
@@ -278,11 +284,18 @@ fn anchor_matches(anchor: &SemanticAnchor, name: &str, role: i32) -> bool {
     name_ok && role_ok
 }
 
+fn parent_matches(anchor: &SemanticAnchor, ancestors: &[String]) -> bool {
+    match anchor.parent.as_deref() {
+        None => true,
+        Some(parent) => ancestors.iter().any(|ancestor| ancestor.contains(parent)),
+    }
+}
+
 #[cfg(target_os = "windows")]
 impl UiActionSource for WindowsUiaSource {
     fn find(&self, anchor: &SemanticAnchor) -> Result<u64, String> {
         let found = self
-            .find_recursive(&self.root, anchor, 0)
+            .find_recursive(&self.root, anchor, 0, &[])
             .ok_or_else(|| format!("未找到语义锚点：{}", anchor.name))?;
         let mut keep = self.keep.lock().map_err(|_| "锚点池锁中毒".to_string())?;
         keep.push(found);
@@ -307,12 +320,14 @@ impl UiActionSource for WindowsUiaSource {
     }
 
     fn type_text(&self, handle: u64, text: &str) -> Result<(), String> {
-        let keep = self.keep.lock().map_err(|_| "锚点池锁中毒".to_string())?;
-        let element = keep
-            .get(handle as usize)
-            .ok_or_else(|| "锚点句柄失效".to_string())?;
-        unsafe {
-            let _ = element.SetFocus();
+        if handle != 0 {
+            let keep = self.keep.lock().map_err(|_| "锚点池锁中毒".to_string())?;
+            let element = keep
+                .get(handle as usize)
+                .ok_or_else(|| "锚点句柄失效".to_string())?;
+            unsafe {
+                let _ = element.SetFocus();
+            }
         }
         send_unicode(text)
     }
@@ -321,10 +336,18 @@ impl UiActionSource for WindowsUiaSource {
         send_shortcut(combo)
     }
 
+    fn launch(&self, target: &str) -> Result<(), String> {
+        launch_target(target)
+    }
+
     fn verify(&self, predicate: &str) -> Result<bool, String> {
         if let Some(expected) = predicate.strip_prefix("value:") {
             let value = self.focused_edit_value()?;
             return Ok(value.contains(expected));
+        }
+        if let Some(expected) = predicate.strip_prefix("ui:") {
+            let nodes = crate::accessibility::foreground_ui_tree(8, 500).unwrap_or_default();
+            return Ok(nodes.iter().any(|node| node.name.contains(expected)));
         }
         let title = crate::platform::foreground_title();
         Ok(title
@@ -527,6 +550,37 @@ fn send_shortcut(combo: &str) -> Result<(), String> {
     }
 }
 
+/// 主动启动应用或打开 URL（不依赖应用已在前台）。
+#[cfg(target_os = "windows")]
+fn launch_target(target: &str) -> Result<(), String> {
+    if target.trim().is_empty() {
+        return Err("启动目标为空".to_string());
+    }
+    let quoted = format!("\"{}\"", target.replace('"', ""));
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", &quoted])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("启动失败：{error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn launch_target(target: &str) -> Result<(), String> {
+    if target.trim().is_empty() {
+        return Err("启动目标为空".to_string());
+    }
+    let command = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(command)
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("启动失败：{error}"))
+}
+
 #[cfg(target_os = "windows")]
 fn key_input(
     vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
@@ -644,6 +698,14 @@ mod tests {
             self.calls.lock().unwrap().push(format!("shortcut:{combo}"));
             Ok(())
         }
+        fn launch(&self, target: &str) -> Result<(), String> {
+            self.calls.lock().unwrap().push(format!("launch:{target}"));
+            if target.trim().is_empty() {
+                Err("启动目标为空".to_string())
+            } else {
+                Ok(())
+            }
+        }
         fn verify(&self, predicate: &str) -> Result<bool, String> {
             self.calls
                 .lock()
@@ -662,6 +724,7 @@ mod tests {
                 app_id: Some("qq".to_string()),
                 role: Some("button".to_string()),
                 name: "发送按钮".to_string(),
+                parent: None,
             },
             None,
             Some("发送成功".to_string()),
@@ -673,6 +736,7 @@ mod tests {
                 app_id: Some("qq".to_string()),
                 role: Some("edit".to_string()),
                 name: "输入框".to_string(),
+                parent: None,
             },
             Some("你好 {contact}".to_string()),
             None,
@@ -699,6 +763,49 @@ mod tests {
     }
 
     #[test]
+    fn launch_action_invokes_source_and_validates_target() {
+        let mut graph = ActionGraph::new();
+        graph.add_node(
+            "open",
+            ActionType::Launch,
+            SemanticAnchor {
+                app_id: None,
+                role: None,
+                name: "打开浏览器".to_string(),
+                parent: None,
+            },
+            Some("{url}".to_string()),
+            None,
+        );
+        let source = ScriptedSource {
+            find_ok: true,
+            invoke_ok: true,
+            verify_ok: true,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let report = execute_graph(
+            &source,
+            &graph,
+            &HashMap::from([("url".to_string(), "https://example.com".to_string())]),
+            10,
+        );
+        assert!(report.ok, "{report:?}");
+        assert!(source
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "launch:https://example.com"));
+        let report = execute_graph(
+            &source,
+            &graph,
+            &HashMap::from([("url".to_string(), String::new())]),
+            10,
+        );
+        assert!(!report.ok);
+    }
+
+    #[test]
     fn reports_failure_when_invoke_fails() {
         let source = ScriptedSource {
             find_ok: true,
@@ -721,6 +828,7 @@ mod tests {
                 app_id: None,
                 role: None,
                 name: "密码输入框".to_string(),
+                parent: None,
             },
             None,
             None,
@@ -747,6 +855,7 @@ mod tests {
                 app_id: None,
                 role: None,
                 name: "A".to_string(),
+                parent: None,
             },
             None,
             None,
@@ -770,6 +879,7 @@ mod tests {
             app_id: None,
             role: None,
             name: "发送".to_string(),
+            parent: None,
         };
         assert!(!anchor_matches(&anchor, "", 0));
         assert!(anchor_matches(&anchor, "发送按钮", 0));

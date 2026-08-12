@@ -1,33 +1,54 @@
 {
   "version": 1,
-  "start": "search",
+  "start": "click_search",
   "nodes": [
     {
-      "id": "search",
-      "action_type": "type",
-      "anchor": { "app_id": "qq", "role": "edit", "name": "联系人搜索框" },
+      "id": "click_search",
+      "action_type": "click",
+      "anchor": { "app_id": "qq", "role": "edit", "name": "搜索" },
+      "value_template": null,
+      "verify": null
+    },
+    {
+      "id": "inject_contact",
+      "action_type": "inject",
+      "anchor": { "app_id": "qq", "name": "联系人输入" },
       "value_template": "{contact}",
       "verify": null
     },
     {
-      "id": "enter",
+      "id": "click_result",
       "action_type": "click",
-      "anchor": { "app_id": "qq", "role": "listitem", "name": "会话项" },
+      "anchor": { "app_id": "qq", "role": "button", "name": "{contact}", "parent": "联系人" },
       "value_template": null,
       "verify": null
     },
     {
       "id": "attach",
       "action_type": "click",
-      "anchor": { "app_id": "qq", "role": "button", "name": "发送文件" },
+      "anchor": { "app_id": "qq", "role": "button", "name": "文件" },
       "value_template": null,
       "verify": null
     },
     {
-      "id": "file",
+      "id": "file_focus",
+      "action_type": "click",
+      "anchor": { "role": "edit", "name": "文件名" },
+      "value_template": null,
+      "verify": null
+    },
+    {
+      "id": "file_type",
       "action_type": "type",
-      "anchor": { "app_id": "qq", "role": "edit", "name": "文件名" },
+      "anchor": { "role": "edit", "name": "文件名" },
       "value_template": "{file}",
+      "verify": null
+    },
+    {
+      "id": "file_ok",
+      "action_type": "shortcut",
+      "anchor": { "name": "确认" },
+      "value_template": "enter",
       "verify": null
     },
     {
@@ -39,9 +60,12 @@
     }
   ],
   "edges": [
-    { "from": "search", "to": "enter", "precondition": null, "verify": "窗口/标题变化" },
-    { "from": "enter", "to": "attach", "precondition": null, "verify": null },
-    { "from": "attach", "to": "file", "precondition": null, "verify": null },
-    { "from": "file", "to": "send", "precondition": null, "verify": null }
+    { "from": "click_search", "to": "inject_contact", "precondition": null, "verify": null },
+    { "from": "inject_contact", "to": "click_result", "precondition": null, "verify": null },
+    { "from": "click_result", "to": "attach", "precondition": null, "verify": null },
+    { "from": "attach", "to": "file_focus", "precondition": null, "verify": null },
+    { "from": "file_focus", "to": "file_type", "precondition": null, "verify": null },
+    { "from": "file_type", "to": "file_ok", "precondition": null, "verify": null },
+    { "from": "file_ok", "to": "send", "precondition": null, "verify": null }
   ]
 }

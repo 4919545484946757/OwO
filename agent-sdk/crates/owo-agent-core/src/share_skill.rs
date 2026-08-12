@@ -149,6 +149,7 @@ mod tests {
                 app_id: Some("qq".to_string()),
                 role: Some("button".to_string()),
                 name: "发送".to_string(),
+                parent: None,
             },
             None,
             Some("发送成功".to_string()),
@@ -238,6 +239,7 @@ mod tests {
         let bytes = export_flow_skill_package(&package).unwrap();
         let imported = import_flow_skill_package(&bytes).unwrap();
         assert_eq!(imported.manifest.name, "qq-send-file");
-        assert_eq!(imported.graph.nodes.len(), 5);
+        assert_eq!(imported.graph.nodes.len(), 8);
+        assert_eq!(imported.graph.edges.len(), 7);
     }
 }
