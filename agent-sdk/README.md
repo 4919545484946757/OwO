@@ -99,6 +99,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
   可全本地跑多轮 Agent。
 - 本地模型工具调用评估（v0.4.18）：qwen2.5:3b 单轮可用但工具调用不触发（null tool_calls）；
   VL 模型明确不支持 tools。全本地 Agent 闭环待更强模型或网络恢复后验证。
+- OCR 输出截断（v0.4.19）：screen_ocr 对 text/lines/boxes 做上限，避免超大结果影响多轮工具调用。
 
 ### STT WER/CER 评估
 

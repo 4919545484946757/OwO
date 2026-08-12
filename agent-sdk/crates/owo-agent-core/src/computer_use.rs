@@ -92,8 +92,13 @@ async fn sim_post(path: &str, body: Value) -> Result<Value, String> {
 }
 
 fn ocr_summary_json(summary: &crate::ocr::OcrSummary, max_boxes: usize) -> Value {
+    // 控制传给模型的上下文体积：超大 OCR 结果会让多轮工具调用不稳定。
+    let max_lines = 60usize;
+    let max_boxes = max_boxes.min(80);
+    let text: String = summary.text.chars().take(2000).collect();
     let lines: Vec<Value> = crate::ocr::group_ocr_lines(&summary.boxes)
         .into_iter()
+        .take(max_lines)
         .map(|line| {
             let role_hint = if line.text.contains("发送")
                 || line.text.contains("搜索")
@@ -135,7 +140,7 @@ fn ocr_summary_json(summary: &crate::ocr::OcrSummary, max_boxes: usize) -> Value
         })
         .collect();
     json!({
-        "text": summary.text,
+        "text": text,
         "chars": summary.chars,
         "lines": lines,
         "boxes": boxes,
