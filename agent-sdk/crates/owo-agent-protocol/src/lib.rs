@@ -18,6 +18,18 @@ pub struct SessionInfo {
     pub workspace: String,
     pub model: String,
     pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub fork_point: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

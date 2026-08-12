@@ -95,6 +95,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/openapi.json", get(openapi_spec))
         .route("/session", post(create_session))
+        .route("/session/{id}", get(get_session))
         .route("/session/{id}/turn", post(turn))
         .route(
             "/session/{id}/permission/{request_id}",
@@ -106,6 +107,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/fork", post(fork_session))
         .route("/session/{id}/rewind", post(rewind_session))
         .route("/session/{id}/redo", post(redo_session))
+        .route("/session/{id}/rename", post(session_rename))
+        .route("/session/{id}/archive", post(session_archive))
+        .route("/session/{id}/pin", post(session_pin))
         .route("/session/{id}/children", get(children))
         .route("/session/{id}/export/{format}", get(export_session))
         .route("/sessions", get(list_sessions))
@@ -175,6 +179,7 @@ async fn openapi_spec() -> Json<Value> {
                 "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateSessionRequest" } } } },
                 "responses": { "200": { "description": "session created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionInfo" } } } } }
             } },
+            "/session/{id}": { "get": { "operationId": "getSession", "parameters": [path_param("id")], "responses": { "200": { "description": "session detail with messages" } } } },
             "/session/{id}/turn": { "post": {
                 "operationId": "agentTurn",
                 "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
@@ -188,6 +193,9 @@ async fn openapi_spec() -> Json<Value> {
             "/session/{id}/fork": { "post": { "operationId": "sessionFork", "parameters": [path_param("id")], "responses": { "200": { "description": "forked session" } } } },
             "/session/{id}/rewind": { "post": { "operationId": "sessionRewind", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
             "/session/{id}/redo": { "post": { "operationId": "sessionRedo", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
+            "/session/{id}/rename": { "post": { "operationId": "sessionRename", "parameters": [path_param("id")], "responses": { "200": { "description": "renamed session" } } } },
+            "/session/{id}/archive": { "post": { "operationId": "sessionArchive", "parameters": [path_param("id")], "responses": { "200": { "description": "archive state" } } } },
+            "/session/{id}/pin": { "post": { "operationId": "sessionPin", "parameters": [path_param("id")], "responses": { "200": { "description": "pin state" } } } },
             "/session/{id}/children": { "get": { "operationId": "sessionChildren", "parameters": [path_param("id")], "responses": { "200": { "description": "children" } } } },
             "/session/{id}/export/{format}": { "get": { "operationId": "exportSession", "parameters": [path_param("id"), path_param("format")], "responses": { "200": { "description": "md or html" } } } },
             "/sessions": { "get": { "operationId": "listSessions", "responses": { "200": { "description": "session list" } } } },
@@ -240,6 +248,12 @@ async fn openapi_spec() -> Json<Value> {
                     "properties": {
                         "id": { "type": "string" },
                         "workspace": { "type": "string" },
+                        "updated_at": { "type": "string" },
+                        "title": { "type": "string" },
+                        "archived": { "type": "boolean" },
+                        "pinned": { "type": "boolean" },
+                        "parent_id": { "type": "string" },
+                        "fork_point": { "type": "integer" },
                         "model": { "type": "string" },
                         "created_at": { "type": "string" }
                     }
@@ -269,6 +283,12 @@ fn to_session_info(session: &Session) -> SessionInfo {
         workspace: session.workspace.to_string_lossy().into_owned(),
         model: session.model.clone(),
         created_at: session.created_at.clone(),
+        updated_at: session.updated_at.clone(),
+        title: Some(session.display_title()),
+        archived: session.archived,
+        pinned: session.pinned,
+        parent_id: session.parent_id.clone(),
+        fork_point: session.fork_point,
     }
 }
 
@@ -302,7 +322,12 @@ async fn list_sessions(
             sessions.push(to_session_info(&session));
         }
     }
-    sessions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    sessions.sort_by(|left, right| {
+        right
+            .pinned
+            .cmp(&left.pinned)
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+    });
     Ok(Json(sessions))
 }
 
@@ -347,12 +372,39 @@ async fn create_session(
         .lock()
         .map_err(poison)?
         .insert(session.id.clone(), session.clone());
+    let title = session.display_title();
     Ok(Json(SessionInfo {
         id: session.id,
         workspace: request.workspace,
         model: session.model,
         created_at: session.created_at,
+        updated_at: session.updated_at,
+        title: Some(title),
+        archived: session.archived,
+        pinned: session.pinned,
+        parent_id: session.parent_id,
+        fork_point: session.fork_point,
     }))
+}
+
+async fn get_session(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = load_session(&state, &id)?;
+    Ok(Json(json!({
+        "id": session.id,
+        "title": session.display_title(),
+        "model": session.model,
+        "workspace": session.workspace.to_string_lossy(),
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "archived": session.archived,
+        "pinned": session.pinned,
+        "parent_id": session.parent_id,
+        "fork_point": session.fork_point,
+        "messages": session.messages,
+    })))
 }
 
 async fn turn(
@@ -543,6 +595,78 @@ async fn redo_session(
         .map_err(poison)?
         .insert(session.id.clone(), session);
     Ok(Json(json!({ "ok": true, "restored": restored })))
+}
+
+#[derive(serde::Deserialize)]
+struct RenameRequest {
+    title: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ArchiveRequest {
+    archived: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct PinRequest {
+    pinned: bool,
+}
+
+async fn session_rename(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<RenameRequest>,
+) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let mut session = load_session(&state, &id)?;
+    session.rename(request.title);
+    state
+        .store
+        .save(&session)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    state
+        .sessions
+        .lock()
+        .map_err(poison)?
+        .insert(session.id.clone(), session.clone());
+    Ok(Json(to_session_info(&session)))
+}
+
+async fn session_archive(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<ArchiveRequest>,
+) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let mut session = load_session(&state, &id)?;
+    session.set_archived(request.archived);
+    state
+        .store
+        .save(&session)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    state
+        .sessions
+        .lock()
+        .map_err(poison)?
+        .insert(session.id.clone(), session.clone());
+    Ok(Json(to_session_info(&session)))
+}
+
+async fn session_pin(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<PinRequest>,
+) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let mut session = load_session(&state, &id)?;
+    session.set_pinned(request.pinned);
+    state
+        .store
+        .save(&session)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    state
+        .sessions
+        .lock()
+        .map_err(poison)?
+        .insert(session.id.clone(), session.clone());
+    Ok(Json(to_session_info(&session)))
 }
 
 async fn children(

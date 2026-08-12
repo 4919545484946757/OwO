@@ -37,6 +37,15 @@ pub struct Session {
     /// 被 /undo-msg 移除的消息，可 /redo-msg 恢复。
     #[serde(default)]
     pub message_redo_stack: Vec<Vec<ChatMessage>>,
+    /// 用户可编辑的会话标题（None 时按首条用户消息自动显示）。
+    #[serde(default)]
+    pub title: Option<String>,
+    /// 归档标记（默认列表可隐藏）。
+    #[serde(default)]
+    pub archived: bool,
+    /// 置顶标记（列表优先）。
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl Session {
@@ -59,7 +68,47 @@ impl Session {
             fork_point: None,
             redo_stack: Vec::new(),
             message_redo_stack: Vec::new(),
+            title: None,
+            archived: false,
+            pinned: false,
         }
+    }
+
+    /// 展示标题：优先自定义标题，否则取首条用户消息，最后回退为会话短 ID。
+    pub fn display_title(&self) -> String {
+        if let Some(title) = &self.title {
+            let trimmed = title.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        if let Some(first) = self
+            .messages
+            .iter()
+            .find(|message| message.role == "user")
+            .and_then(|message| message.content.as_deref())
+        {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return trimmed.chars().take(40).collect();
+            }
+        }
+        format!("会话 {}", &self.id[..8])
+    }
+
+    pub fn rename(&mut self, title: String) {
+        self.title = Some(title);
+        self.updated_at = Utc::now().to_rfc3339();
+    }
+
+    pub fn set_archived(&mut self, archived: bool) {
+        self.archived = archived;
+        self.updated_at = Utc::now().to_rfc3339();
+    }
+
+    pub fn set_pinned(&mut self, pinned: bool) {
+        self.pinned = pinned;
+        self.updated_at = Utc::now().to_rfc3339();
     }
 
     pub fn push(&mut self, message: ChatMessage) {
@@ -119,21 +168,29 @@ impl Session {
 
     /// 在指定消息处派生一个子会话（继承历史，快照与 redo 栈清空）。
     pub fn fork(&self, message_index: usize) -> Session {
-        let end = message_index.min(self.messages.len().saturating_sub(1));
+        let messages = if self.messages.is_empty() {
+            Vec::new()
+        } else {
+            let end = message_index.min(self.messages.len() - 1);
+            self.messages[..=end].to_vec()
+        };
         let now = Utc::now().to_rfc3339();
         Session {
             id: uuid::Uuid::new_v4().to_string(),
             workspace: self.workspace.clone(),
             model: self.model.clone(),
             system_prompt: self.system_prompt.clone(),
-            messages: self.messages[..=end].to_vec(),
+            messages,
             snapshots: HashMap::new(),
             created_at: now.clone(),
             updated_at: now,
             parent_id: Some(self.id.clone()),
-            fork_point: Some(end),
+            fork_point: Some(message_index),
             redo_stack: Vec::new(),
             message_redo_stack: Vec::new(),
+            title: None,
+            archived: false,
+            pinned: false,
         }
     }
 
@@ -308,6 +365,14 @@ mod tests {
     }
 
     #[test]
+    fn fork_on_empty_session_does_not_panic() {
+        let session = Session::new(".", "mock", None);
+        let child = session.fork(999999);
+        assert!(child.messages.is_empty());
+        assert_eq!(child.parent_id.as_deref(), Some(session.id.as_str()));
+    }
+
+    #[test]
     fn rewind_and_redo_round_trip() {
         let mut session = Session::new(".", "mock", None);
         for index in 0..5 {
@@ -338,5 +403,23 @@ mod tests {
         assert_eq!(restored.len(), 2);
         assert_eq!(session.messages.len(), 4);
         assert!(session.redo_message().is_none());
+    }
+
+    #[test]
+    fn title_archive_pin_round_trip() {
+        let mut session = Session::new(".", "mock", None);
+        session.push(ChatMessage::user("给 parseConfig 补测试".to_string()));
+        assert_eq!(session.display_title(), "给 parseConfig 补测试");
+        session.rename("我的任务".to_string());
+        assert_eq!(session.display_title(), "我的任务");
+        session.set_pinned(true);
+        session.set_archived(true);
+        assert!(session.pinned);
+        assert!(session.archived);
+        let child = session.fork(0);
+        assert!(child.title.is_none());
+        assert!(!child.pinned);
+        assert!(!child.archived);
+        assert_eq!(child.display_title(), "给 parseConfig 补测试");
     }
 }

@@ -29,11 +29,14 @@ impl SqliteSessionStore {
                  parent_id TEXT,
                  fork_point INTEGER,
                  redo_json TEXT NOT NULL,
-                 message_redo_json TEXT NOT NULL DEFAULT '[]'
+                 message_redo_json TEXT NOT NULL DEFAULT '[]',
+                 title TEXT,
+                 archived INTEGER NOT NULL DEFAULT 0,
+                 pinned INTEGER NOT NULL DEFAULT 0
              );",
         )
         .map_err(sqlite_error)?;
-        ensure_message_redo_column(&conn)?;
+        ensure_session_columns(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -43,8 +46,9 @@ impl SqliteSessionStore {
         conn.execute(
             "INSERT INTO sessions (
                  id, workspace, model, system_prompt, messages_json, snapshots_json,
-                 created_at, updated_at, parent_id, fork_point, redo_json, message_redo_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 created_at, updated_at, parent_id, fork_point, redo_json, message_redo_json,
+                 title, archived, pinned
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                  workspace=excluded.workspace,
                  model=excluded.model,
@@ -55,7 +59,10 @@ impl SqliteSessionStore {
                  parent_id=excluded.parent_id,
                  fork_point=excluded.fork_point,
                  redo_json=excluded.redo_json,
-                 message_redo_json=excluded.message_redo_json",
+                 message_redo_json=excluded.message_redo_json,
+                 title=excluded.title,
+                 archived=excluded.archived,
+                 pinned=excluded.pinned",
             params![
                 session.id,
                 session.workspace.to_string_lossy(),
@@ -69,6 +76,9 @@ impl SqliteSessionStore {
                 session.fork_point.map(|point| point as i64),
                 serde_json::to_string(&session.redo_stack).map_err(json_error)?,
                 serde_json::to_string(&session.message_redo_stack).map_err(json_error)?,
+                session.title,
+                i64::from(session.archived),
+                i64::from(session.pinned),
             ],
         )
         .map_err(sqlite_error)?;
@@ -79,7 +89,8 @@ impl SqliteSessionStore {
         let row = conn
             .query_row(
                 "SELECT id, workspace, model, system_prompt, messages_json, snapshots_json,
-                        created_at, updated_at, parent_id, fork_point, redo_json, message_redo_json
+                        created_at, updated_at, parent_id, fork_point, redo_json, message_redo_json,
+                        title, archived, pinned
                  FROM sessions WHERE id = ?1",
                 [id],
                 |row| {
@@ -96,6 +107,9 @@ impl SqliteSessionStore {
                         row.get::<_, Option<i64>>(9)?,
                         row.get::<_, String>(10)?,
                         row.get::<_, String>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                        row.get::<_, bool>(13)?,
+                        row.get::<_, bool>(14)?,
                     ))
                 },
             )
@@ -119,11 +133,14 @@ impl SqliteSessionStore {
             fork_point: row.9.map(|point| point as usize),
             redo_stack: serde_json::from_str(&row.10).map_err(json_error)?,
             message_redo_stack: serde_json::from_str(&row.11).map_err(json_error)?,
+            title: row.12,
+            archived: row.13,
+            pinned: row.14,
         })
     }
 }
 
-fn ensure_message_redo_column(conn: &Connection) -> Result<(), AgentError> {
+fn ensure_session_columns(conn: &Connection) -> Result<(), AgentError> {
     let mut statement = conn
         .prepare("PRAGMA table_info(sessions)")
         .map_err(sqlite_error)?;
@@ -132,11 +149,18 @@ fn ensure_message_redo_column(conn: &Connection) -> Result<(), AgentError> {
         .map_err(sqlite_error)?
         .filter_map(Result::ok)
         .collect();
-    if !columns.iter().any(|column| column == "message_redo_json") {
-        conn.execute_batch(
-            "ALTER TABLE sessions ADD COLUMN message_redo_json TEXT NOT NULL DEFAULT '[]'",
-        )
-        .map_err(sqlite_error)?;
+    for (column, definition) in [
+        ("message_redo_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("title", "TEXT"),
+        ("archived", "INTEGER NOT NULL DEFAULT 0"),
+        ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !columns.iter().any(|existing| existing == column) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE sessions ADD COLUMN {column} {definition}"
+            ))
+            .map_err(sqlite_error)?;
+        }
     }
     Ok(())
 }
@@ -249,6 +273,9 @@ mod tests {
         let mut session = store.create(Path::new("."), "mock", None).unwrap();
         session.push(ChatMessage::user("你好".to_string()));
         session.push(ChatMessage::assistant_text("收到".to_string()));
+        session.rename("SQLite 会话".to_string());
+        session.set_pinned(true);
+        session.set_archived(true);
         store.save(&session).unwrap();
         let child = session.fork(1);
         store.save(&child).unwrap();
@@ -256,9 +283,15 @@ mod tests {
         let loaded = store.load(&session.id).unwrap();
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0].content.as_deref(), Some("你好"));
+        assert_eq!(loaded.title.as_deref(), Some("SQLite 会话"));
+        assert!(loaded.pinned);
+        assert!(loaded.archived);
         let loaded_child = store.load(&child.id).unwrap();
         assert_eq!(loaded_child.parent_id.as_deref(), Some(session.id.as_str()));
         assert_eq!(loaded_child.fork_point, Some(1));
+        assert!(loaded_child.title.is_none());
+        assert!(!loaded_child.pinned);
+        assert!(!loaded_child.archived);
         assert_eq!(store.list().len(), 2);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
@@ -296,6 +329,16 @@ mod tests {
         let loaded = store.load("legacy").unwrap();
         assert!(loaded.message_redo_stack.is_empty());
         assert_eq!(loaded.model, "mock");
+        assert!(loaded.title.is_none());
+        assert!(!loaded.pinned);
+        assert!(!loaded.archived);
+        let mut session = store.create(Path::new("."), "mock", None).unwrap();
+        session.rename("迁移后新会话".to_string());
+        store.save(&session).unwrap();
+        assert_eq!(
+            store.load(&session.id).unwrap().title.as_deref(),
+            Some("迁移后新会话")
+        );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));

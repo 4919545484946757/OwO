@@ -426,23 +426,120 @@ async function refreshSuggestions() {
 
 async function refreshSessions(selectId) {
   const sessions = await api("/sessions");
+  const showArchived = $("showArchived").checked;
+  const visible = sessions.filter((session) => showArchived || !session.archived);
+  const visibleIds = new Set(visible.map((session) => session.id));
+  const byParent = new Map();
+  for (const session of visible) {
+    const key = session.parent_id || "";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(session);
+  }
+  const roots = visible.filter(
+    (session) => !session.parent_id || !visibleIds.has(session.parent_id)
+  );
   const list = $("sessionList");
   list.innerHTML = "";
-  for (const session of sessions) {
+  const renderSession = (session, depth) => {
     const li = document.createElement("li");
     if (session.id === selectId) {
       li.className = "active";
       state.sessionId = session.id;
     }
-    li.innerHTML = `<strong>${esc(session.id.slice(0, 12))}</strong><span class="sub">${esc(session.workspace)} ｜ ${esc(session.model)} ｜ ${esc(session.created_at)}</span>`;
+    const badges = [];
+    if (session.pinned) badges.push("📌");
+    if (session.archived) badges.push("🗄");
+    const updated = (session.updated_at || session.created_at || "").slice(0, 19).replace("T", " ");
+    li.innerHTML = `
+      <div style="margin-left:${depth * 14}px">
+        <strong>${esc(session.title || session.id.slice(0, 12))} ${badges.join(" ")}</strong>
+        <span class="sub">${esc(session.model)} ｜ ${esc(updated)}</span>
+        <div class="inline">
+          <button data-act="open">继续</button>
+          <button data-act="rename">重命名</button>
+          <button data-act="pin">${session.pinned ? "取消置顶" : "置顶"}</button>
+          <button data-act="archive">${session.archived ? "取消归档" : "归档"}</button>
+          <button data-act="fork">fork</button>
+          <button data-act="rewind">回退</button>
+          <button data-act="redo">重做</button>
+        </div>
+      </div>`;
+    for (const button of li.querySelectorAll("button")) {
+      button.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const act = button.dataset.act;
+        try {
+          if (act === "open") {
+            await selectSession(session.id);
+            return;
+          }
+          if (act === "rename") {
+            const title = window.prompt("新标题：", session.title || "");
+            if (title === null) return;
+            await api(`/session/${session.id}/rename`, {
+              method: "POST",
+              body: JSON.stringify({ title }),
+            });
+          } else if (act === "pin") {
+            await api(`/session/${session.id}/pin`, {
+              method: "POST",
+              body: JSON.stringify({ pinned: !session.pinned }),
+            });
+          } else if (act === "archive") {
+            await api(`/session/${session.id}/archive`, {
+              method: "POST",
+              body: JSON.stringify({ archived: !session.archived }),
+            });
+          } else if (act === "fork") {
+            const raw = window.prompt("在第几条消息处分叉（0 起，留空=最后一条）", "");
+            if (raw === null) return;
+            const parsed = parseInt(raw, 10);
+            const message_index = Number.isFinite(parsed) ? parsed : 999999;
+            const child = await api(`/session/${session.id}/fork`, {
+              method: "POST",
+              body: JSON.stringify({ message_index }),
+            });
+            addMessage("system", `已 fork 子会话 ${child.id}（可在列表中选择）`);
+          } else if (act === "rewind") {
+            const raw = window.prompt("保留前几条消息？", "");
+            if (raw === null) return;
+            await api(`/session/${session.id}/rewind`, {
+              method: "POST",
+              body: JSON.stringify({ keep: parseInt(raw, 10) || 0 }),
+            });
+          } else if (act === "redo") {
+            await api(`/session/${session.id}/redo`, { method: "POST" });
+          }
+          await refreshSessions(selectId || state.sessionId);
+        } catch (error) {
+          addMessage("system", `操作失败：${error.message || error}`);
+        }
+      });
+    }
     li.addEventListener("click", () => selectSession(session.id));
     list.appendChild(li);
-  }
+    for (const child of byParent.get(session.id) || []) {
+      renderSession(child, depth + 1);
+    }
+  };
+  for (const session of roots) renderSession(session, 0);
+  if (!list.children.length) list.innerHTML = '<li class="sub">暂无会话</li>';
 }
 
 async function selectSession(id) {
   state.sessionId = id;
-  $("messages").innerHTML = "";
+  try {
+    const detail = await api(`/session/${id}`);
+    $("messages").innerHTML = "";
+    for (const message of detail.messages || []) {
+      if (!message.content) continue;
+      addMessage(message.role === "user" ? "user" : "assistant", message.content);
+    }
+    addMessage("system", `已恢复会话：${detail.title || id.slice(0, 12)}`);
+  } catch (error) {
+    $("messages").innerHTML = "";
+    addMessage("system", `会话加载失败：${error.message || error}`);
+  }
   await refreshSessions(id);
   await refreshDiff(id);
 }
@@ -653,6 +750,7 @@ async function refreshWhitelist() {
 // ---------- 事件绑定 ----------
 
 $("newSession").addEventListener("click", newSession);
+$("showArchived").addEventListener("change", () => refreshSessions(state.sessionId));
 $("chatForm").addEventListener("submit", (event) => {
   event.preventDefault();
   sendPrompt();
