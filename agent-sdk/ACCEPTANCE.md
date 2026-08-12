@@ -180,3 +180,16 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 
 说明：学习样本只记录动作摘要（类型/锚点/次数），不记录消息正文（`value_masked=true`）；
 技能执行走模拟面虚拟窗口，真实桌面技能执行仍走 WindowsUiaSource。
+
+## 十、v0.4.4 视觉模型网关（2026-08-12 续，M-B 起步）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| vision.rs（BMP→PNG + Ollama/OpenAI 双通道） | ✅ | `bmp_to_png`（PNG 头单测）、`describe_image`、`parse_verification`（YES/NO+置信度单测）、`ollama_models` |
+| Agent 工具 | ✅ | `screen_vision`（场景描述）、`vision_verify`（yes/no+confidence）；权限 Read |
+| 服务端接口 | ✅ | `GET /vision/status`（provider/model/已拉模型）、`POST /vision/describe`；未就绪时 502 + “请先运行 ollama pull qwen2.5vl:3b” |
+| 本地模型拉取 | ⏳ 后台进行中 | `ollama pull qwen2.5vl:3b`（约 3.2GB，1.5-2MB/s，ETA ~30min）；`scripts/download-vision-model.ps1` 可重跑 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 91） |
+
+环境变量：`OWO_VISION_PROVIDER`（ollama/openai）、`OWO_VISION_MODEL`、`OWO_VISION_BASE_URL`、
+`OWO_VISION_API_KEY`、`OWO_OLLAMA_HOST`。视觉只做理解与验证，主控制仍走 OCR+坐标。

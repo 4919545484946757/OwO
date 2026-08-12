@@ -57,6 +57,10 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
   `scripts/web-browser-e2e.py` 可对真实网页（headless Edge）跑搜索→打开结果→下载图片验收；
   `scripts/sim-qq-learn-e2e.py` 演示“示范→录制（内容掩码）→泛化→沉淀技能包→换参数复用执行”闭环
   （`/learn/execute*` 在模拟面自动走 SimUiActionSource，不碰真实桌面）。
+- 视觉模型网关（v0.4.4，M-B 起步）：`screen_vision`（场景描述）与 `vision_verify`（yes/no 完成验证）工具，
+  通道为本地 Ollama（默认 `qwen2.5vl:3b`，`scripts/download-vision-model.ps1` 一键拉取）或任意
+  OpenAI-compatible 视觉端点（`OWO_VISION_PROVIDER=openai` + `OWO_VISION_BASE_URL/API_KEY/MODEL`）；
+  `GET /vision/status` 诊断、`POST /vision/describe` 直连测试；模型未就绪时返回明确错误不挂起。
 
 ### STT WER/CER 评估
 

@@ -126,7 +126,9 @@ impl Policy {
             | "desktop_window_list"
             | "desktop_wait"
             | "desktop_wait_until"
-            | "browser_snapshot" => Level::Read,
+            | "browser_snapshot"
+            | "screen_vision"
+            | "vision_verify" => Level::Read,
             "desktop_click" | "desktop_type" | "desktop_key" | "desktop_shortcut"
             | "desktop_activate" | "desktop_launch" => Level::Inject,
             "browser_navigate" | "browser_search" | "browser_click" | "browser_type"

@@ -697,6 +697,81 @@ impl Tool for DesktopWaitUntilTool {
     }
 }
 
+pub struct ScreenVisionTool;
+
+#[async_trait]
+impl Tool for ScreenVisionTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "screen_vision".into(),
+            description: "把当前屏幕（或模拟窗口）截图交给视觉模型做场景描述（本地 Ollama 或 BYOK 云端）；视觉只用于理解与验证，不直接控制，主控制仍用 screen_ocr".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "可选：自定义描述指令" }
+                }
+            }),
+        }
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let (png, surface) = crate::vision::capture_vision_png().await?;
+        let prompt = args
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or(
+                "请用中文描述这个界面的当前状态：这是什么应用？有哪些关键控件（按钮/输入框/消息）？\
+                 它们大致在什么位置（给出屏幕坐标范围）？最新消息内容是什么？",
+            )
+            .to_string();
+        let description = crate::vision::describe_image(&png, &prompt).await?;
+        let config = crate::vision::VisionConfig::from_env();
+        Ok(json!({
+            "surface": surface,
+            "provider": config.provider,
+            "model": config.model,
+            "description": description,
+        }))
+    }
+}
+
+pub struct VisionVerifyTool;
+
+#[async_trait]
+impl Tool for VisionVerifyTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "vision_verify".into(),
+            description: "让视觉模型针对当前截图回答 yes/no 问题（如“消息是否已上屏”“输入框是否已清空”），返回 answer/confidence，用于异步完成验证".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "question": { "type": "string" } },
+                "required": ["question"]
+            }),
+        }
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let question = required_string(&args, "question")?;
+        let (png, surface) = crate::vision::capture_vision_png().await?;
+        let prompt = format!(
+            "请只看这张截图回答问题。先回答 YES 或 NO，再给出 0-1 置信度。问题：{question}"
+        );
+        let raw = crate::vision::describe_image(&png, &prompt).await?;
+        let (answer, confidence) = crate::vision::parse_verification(&raw);
+        let config = crate::vision::VisionConfig::from_env();
+        Ok(json!({
+            "surface": surface,
+            "provider": config.provider,
+            "model": config.model,
+            "question": question,
+            "answer": answer,
+            "confidence": confidence,
+            "raw": raw,
+        }))
+    }
+}
+
 /// 模拟面执行器源：把动作图执行（/learn/execute-package）落到 headless 虚拟窗口，
 /// 使“学习沉淀的技能包”可以在模拟环境里复用验证，不触碰真实桌面。
 pub struct SimUiActionSource {

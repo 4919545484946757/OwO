@@ -29,6 +29,7 @@ pub mod stt;
 pub mod subagent;
 pub mod tools;
 pub mod trace;
+pub mod vision;
 pub mod whitelist;
 
 pub use accessibility::{foreground_ui_tree, UiNode};
@@ -72,4 +73,7 @@ pub use sqlite_store::SqliteSessionStore;
 pub use stt::{LocalStt, SttOutcome};
 pub use tools::{Tool, ToolContext, ToolRegistry, ToolSpec};
 pub use trace::{list_traces, load_trace, save_trace, TraceRecord};
+pub use vision::{
+    bmp_to_png, capture_vision_png, describe_image, ollama_models, parse_verification, VisionConfig,
+};
 pub use whitelist::{AppTier, Whitelist, WhitelistEntry};

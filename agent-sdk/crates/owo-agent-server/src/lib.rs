@@ -140,6 +140,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/desktop/shortcut", post(desktop_shortcut))
         .route("/desktop/launch", post(desktop_launch))
         .route("/desktop/wait", post(desktop_wait))
+        .route("/vision/status", get(vision_status))
+        .route("/vision/describe", post(vision_describe))
         .route("/learn/start", post(learn_start))
         .route("/learn/record", post(learn_record))
         .route("/learn/pause", post(learn_pause))
@@ -1369,6 +1371,50 @@ async fn desktop_wait(Json(request): Json<DesktopWaitRequest>) -> Json<Value> {
     let ms = request.ms.min(120_000);
     tokio::time::sleep(Duration::from_millis(ms)).await;
     Json(json!({ "waited_ms": ms }))
+}
+
+async fn vision_status() -> Json<Value> {
+    let config = owo_agent_core::VisionConfig::from_env();
+    let models = if config.provider == "ollama" {
+        owo_agent_core::ollama_models(&config).await
+    } else {
+        Vec::new()
+    };
+    Json(json!({
+        "provider": config.provider,
+        "model": config.model,
+        "ollama_host": config.ollama_host,
+        "ollama_models": models,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct VisionDescribeRequest {
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+async fn vision_describe(
+    Json(request): Json<VisionDescribeRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let (png, surface) = owo_agent_core::capture_vision_png()
+        .await
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let prompt = request.prompt.unwrap_or_else(|| {
+        "请用中文描述这个界面的当前状态：这是什么应用？有哪些关键控件（按钮/输入框/消息）？\
+         它们大致在什么位置？最新消息内容是什么？"
+            .to_string()
+    });
+    let description = owo_agent_core::describe_image(&png, &prompt)
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    let config = owo_agent_core::VisionConfig::from_env();
+    Ok(Json(json!({
+        "surface": surface,
+        "provider": config.provider,
+        "model": config.model,
+        "description": description,
+    })))
 }
 
 fn ensure_real_desktop(tool: &str) -> Result<(), (StatusCode, String)> {

@@ -1527,6 +1527,7 @@ dependencies = [
  "futures",
  "futures-util",
  "owo-agent-protocol",
+ "png",
  "reqwest",
  "rusqlite",
  "serde",

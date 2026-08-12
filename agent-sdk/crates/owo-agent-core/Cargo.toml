@@ -20,6 +20,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 futures = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 zip = "2"
+png = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 futures = "0.3"
