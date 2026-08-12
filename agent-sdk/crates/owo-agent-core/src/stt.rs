@@ -14,6 +14,7 @@ pub struct SttOutcome {
 }
 
 pub struct LocalStt {
+    data_root: PathBuf,
     model_dir: PathBuf,
     engine: String,
     language: String,
@@ -40,6 +41,7 @@ impl LocalStt {
             .and_then(|value| value.parse::<bool>().ok())
             .unwrap_or(settings.itn);
         Self {
+            data_root: data_root.to_path_buf(),
             model_dir: data_root.join("models").join("stt").join(&settings.model),
             engine: settings.model.clone(),
             language,
@@ -68,6 +70,29 @@ impl LocalStt {
 
     pub fn engine(&self) -> &str {
         &self.engine
+    }
+
+    /// 运行时应用新的 STT 设置（设置页即时生效）：更新模型/语言/ITN，并丢弃识别器缓存，
+    /// 下次转写按新配置重建。
+    pub fn apply_settings(&mut self, settings: &SttSettings) {
+        self.language = std::env::var("OWO_STT_LANGUAGE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| settings.language.clone());
+        self.itn = std::env::var("OWO_STT_ITN")
+            .ok()
+            .and_then(|value| value.parse::<bool>().ok())
+            .unwrap_or(settings.itn);
+        self.model_dir = self
+            .data_root
+            .join("models")
+            .join("stt")
+            .join(&settings.model);
+        self.engine = settings.model.clone();
+        #[cfg(target_os = "windows")]
+        if let Ok(mut guard) = self.recognizer.lock() {
+            *guard = None;
+        }
     }
 
     pub fn is_ready(&self) -> bool {
@@ -160,5 +185,30 @@ mod tests {
         assert_eq!(stt.engine(), "SenseVoice-Small");
         let error = stt.transcribe_wav(Path::new("missing.wav")).unwrap_err();
         assert!(error.contains("模型未就绪"));
+    }
+
+    #[test]
+    fn apply_settings_switches_model_and_resets_recognizer() {
+        let mut stt = LocalStt::new(
+            &SttSettings::default(),
+            Path::new("C:\\owo-nonexistent-data-root"),
+        );
+        assert_eq!(stt.engine(), "SenseVoice-Small");
+        let settings = SttSettings {
+            model: "Other-ASR".to_string(),
+            language: "zh".to_string(),
+            itn: false,
+            ..SttSettings::default()
+        };
+        stt.apply_settings(&settings);
+        assert_eq!(stt.engine(), "Other-ASR");
+        assert_eq!(stt.language, "zh");
+        assert!(!stt.itn);
+        assert_eq!(
+            stt.model_dir(),
+            Path::new("C:\\owo-nonexistent-data-root\\models\\stt\\Other-ASR")
+        );
+        #[cfg(target_os = "windows")]
+        assert!(stt.recognizer.lock().unwrap().is_none());
     }
 }

@@ -49,7 +49,7 @@ pub struct AppState {
     pub whitelist: Arc<Mutex<Whitelist>>,
     pub pipeline: Arc<Mutex<LearnPipeline>>,
     pub proactive: Arc<Mutex<ProactiveEngine>>,
-    pub stt: owo_agent_core::LocalStt,
+    pub stt: Arc<Mutex<owo_agent_core::LocalStt>>,
     pub automations: Arc<Mutex<AutomationStore>>,
     pub workspace: PathBuf,
 }
@@ -62,6 +62,11 @@ impl AppState {
         data_root: PathBuf,
         workspace: PathBuf,
     ) -> Self {
+        let settings = owo_agent_core::Settings::load(&workspace);
+        let mut whitelist = Whitelist::default();
+        for entry in settings.whitelist.clone() {
+            whitelist.upsert(entry);
+        }
         Self {
             agent: Arc::new(agent),
             store: Arc::new(store),
@@ -70,12 +75,15 @@ impl AppState {
             aborts: Arc::new(Mutex::new(HashMap::new())),
             traces_dir,
             perception: Arc::new(Mutex::new(SituationStore::new())),
-            whitelist: Arc::new(Mutex::new(Whitelist::default())),
+            whitelist: Arc::new(Mutex::new(whitelist)),
             pipeline: Arc::new(Mutex::new(LearnPipeline::new(
                 data_root.join("skills").join("user"),
             ))),
-            proactive: Arc::new(Mutex::new(ProactiveEngine::new(Default::default()))),
-            stt: owo_agent_core::LocalStt::default_local(),
+            proactive: Arc::new(Mutex::new(ProactiveEngine::new(settings.proactive.clone()))),
+            stt: Arc::new(Mutex::new(owo_agent_core::LocalStt::new(
+                &settings.stt,
+                &data_root,
+            ))),
             automations: Arc::new(Mutex::new(AutomationStore::new(data_root))),
             workspace,
         }
@@ -137,7 +145,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/automations/reminders/clear",
             post(automations_clear_reminders),
         )
-        .route("/settings", get(settings_get))
+        .route("/settings", get(settings_get).post(settings_update))
         .route("/settings/egress", post(settings_egress))
         .route("/whitelist", get(whitelist_list))
         .route("/whitelist/manage", post(whitelist_manage))
@@ -211,7 +219,7 @@ async fn openapi_spec() -> Json<Value> {
             "/automations/{id}": { "delete": { "operationId": "automationsDelete", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
             "/automations/reminders": { "get": { "operationId": "automationsReminders", "responses": { "200": { "description": "pending reminders" } } } },
             "/automations/reminders/clear": { "post": { "operationId": "automationsClearReminders", "responses": { "200": { "description": "ok" } } } },
-            "/settings": { "get": { "operationId": "settingsGet", "responses": { "200": { "description": "workspace settings" } } } },
+            "/settings": { "get": { "operationId": "settingsGet", "responses": { "200": { "description": "workspace settings" } } }, "post": { "operationId": "settingsUpdate", "responses": { "200": { "description": "workspace settings" } } } },
             "/settings/egress": { "post": { "operationId": "settingsEgress", "responses": { "200": { "description": "cloud enabled state" } } } },
             "/whitelist": { "get": { "operationId": "whitelistList", "responses": { "200": { "description": "whitelist entries" } } } },
             "/whitelist/manage": { "post": { "operationId": "whitelistManage", "responses": { "200": { "description": "whitelist entries" } } } }
@@ -1057,17 +1065,19 @@ async fn stt_transcribe(
     let wav_path = std::env::temp_dir().join(format!("owo-stt-{}.wav", uuid::Uuid::new_v4()));
     std::fs::write(&wav_path, &body)
         .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
-    let outcome = state
-        .stt
-        .transcribe_wav(&wav_path)
-        .map_err(|error| (StatusCode::BAD_REQUEST, error));
+    let (outcome, engine) = {
+        let stt = state.stt.lock().map_err(poison)?;
+        let outcome = stt
+            .transcribe_wav(&wav_path)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        (outcome, stt.engine().to_string())
+    };
     let _ = std::fs::remove_file(&wav_path);
-    let outcome = outcome?;
     Ok(Json(json!({
         "ok": true,
         "text": outcome.text,
         "elapsed_ms": outcome.elapsed_ms,
-        "engine": state.stt.engine(),
+        "engine": engine,
     })))
 }
 
@@ -1219,6 +1229,46 @@ async fn settings_egress(
     })))
 }
 
+/// 通用设置保存：写入 settings.json 并应用运行时设置（数据出境、STT、主动建议、白名单）。
+async fn settings_update(
+    State(state): State<Arc<AppState>>,
+    Json(settings): Json<owo_agent_core::Settings>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    settings
+        .save(&state.workspace)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    std::env::set_var(
+        "OWO_CLOUD_ENABLED",
+        settings.egress.cloud_enabled.to_string(),
+    );
+    if let Ok(mut stt) = state.stt.lock() {
+        stt.apply_settings(&settings.stt);
+    }
+    if let Ok(mut proactive) = state.proactive.lock() {
+        proactive.apply_settings(settings.proactive.clone());
+    }
+    if let Ok(mut whitelist) = state.whitelist.lock() {
+        let mut merged = Whitelist::default();
+        for entry in settings.whitelist.clone() {
+            merged.upsert(entry);
+        }
+        *whitelist = merged;
+    }
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "settings",
+            "update",
+            None,
+            Some(true),
+            "设置页保存（settings.json）",
+        );
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "note": "已写入 settings.json 并应用运行时设置",
+    })))
+}
+
 async fn whitelist_list(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<WhitelistEntry>>, (StatusCode, String)> {
@@ -1239,19 +1289,53 @@ async fn whitelist_manage(
     State(state): State<Arc<AppState>>,
     Json(request): Json<WhitelistManageRequest>,
 ) -> Result<Json<Vec<WhitelistEntry>>, (StatusCode, String)> {
-    let mut whitelist = state.whitelist.lock().map_err(poison)?;
-    match request.action.as_str() {
+    let action = request.action.clone();
+    let entry = request.entry.clone();
+    let app_id = request.app_id.clone();
+    let entries = {
+        let mut whitelist = state.whitelist.lock().map_err(poison)?;
+        match action.as_str() {
+            "upsert" => {
+                let entry = entry
+                    .clone()
+                    .ok_or((StatusCode::BAD_REQUEST, "upsert 需要 entry".to_string()))?;
+                whitelist.upsert(entry);
+            }
+            "remove" => {
+                let app_id = app_id
+                    .clone()
+                    .ok_or((StatusCode::BAD_REQUEST, "remove 需要 app_id".to_string()))?;
+                whitelist.remove(&app_id);
+            }
+            other => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("未知操作：{other}（upsert / remove）"),
+                ))
+            }
+        }
+        whitelist.entries().to_vec()
+    };
+    let mut settings = owo_agent_core::Settings::load(&state.workspace);
+    match action.as_str() {
         "upsert" => {
-            let entry = request
-                .entry
-                .ok_or((StatusCode::BAD_REQUEST, "upsert 需要 entry".to_string()))?;
-            whitelist.upsert(entry);
+            let entry = entry.ok_or((StatusCode::BAD_REQUEST, "upsert 需要 entry".to_string()))?;
+            if let Some(existing) = settings
+                .whitelist
+                .iter_mut()
+                .find(|existing| existing.app_id == entry.app_id)
+            {
+                *existing = entry.clone();
+            } else {
+                settings.whitelist.push(entry);
+            }
         }
         "remove" => {
-            let app_id = request
-                .app_id
-                .ok_or((StatusCode::BAD_REQUEST, "remove 需要 app_id".to_string()))?;
-            whitelist.remove(&app_id);
+            let app_id =
+                app_id.ok_or((StatusCode::BAD_REQUEST, "remove 需要 app_id".to_string()))?;
+            settings
+                .whitelist
+                .retain(|existing| existing.app_id != app_id);
         }
         other => {
             return Err((
@@ -1260,7 +1344,10 @@ async fn whitelist_manage(
             ))
         }
     }
-    Ok(Json(whitelist.entries().to_vec()))
+    settings
+        .save(&state.workspace)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(entries))
 }
 
 struct ChannelApprover {

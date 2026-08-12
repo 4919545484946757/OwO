@@ -343,6 +343,10 @@ async function refreshSettings() {
       null,
       2
     );
+    if (!$("settingsEditor").dataset.seeded) {
+      $("settingsEditor").value = JSON.stringify(settings, null, 2);
+      $("settingsEditor").dataset.seeded = "1";
+    }
   } catch (_) {
     $("settingsPreview").textContent = "读取失败";
   }
@@ -690,6 +694,19 @@ $("egressToggle").addEventListener("click", async () => {
   });
   await refreshSettings();
   addMessage("system", `云端模型已${enabled ? "开启" : "关闭"}（已即时生效）`);
+});
+$("settingsSave").addEventListener("click", async () => {
+  try {
+    const settings = JSON.parse($("settingsEditor").value);
+    const resp = await api("/settings", {
+      method: "POST",
+      body: JSON.stringify(settings),
+    });
+    addMessage("system", `设置已保存：${(resp && resp.note) || "ok"}`);
+    await refreshSettings();
+  } catch (error) {
+    addMessage("system", `设置保存失败：${error.message || error}`);
+  }
 });
 $("whitelistForm").addEventListener("submit", async (event) => {
   event.preventDefault();

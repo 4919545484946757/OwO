@@ -585,6 +585,11 @@ impl ProactiveEngine {
         self.suppressed = suppressed;
     }
 
+    /// 运行时应用主动建议设置（设置页即时生效）。
+    pub fn apply_settings(&mut self, settings: ProactiveSettings) {
+        self.settings = settings;
+    }
+
     fn sequence_key(app_id: &str, actions: &[String]) -> String {
         format!("{app_id}:{}", actions.join("|"))
     }
@@ -916,6 +921,32 @@ mod tests {
         assert!(!engine.muted_until.is_empty()); // 忽略 2 次后进入静默
         let key = "qq:focus|select_conversation|click_send";
         assert!(engine.muted_until.contains_key(key));
+    }
+
+    #[test]
+    fn apply_settings_updates_runtime_thresholds() {
+        let mut engine = ProactiveEngine::new(ProactiveSettings {
+            enabled: false,
+            weekly_threshold: 5,
+            daily_threshold: 5,
+            similarity: 1.0,
+            cooldown_hours: 0,
+            daily_cap: 10,
+            auto_silence_days: 30,
+        });
+        let actions = vec!["a".to_string(), "b".to_string()];
+        assert!(engine.observe("app", actions.clone()).is_none());
+        engine.apply_settings(ProactiveSettings {
+            enabled: true,
+            weekly_threshold: 3,
+            daily_threshold: 1,
+            similarity: 1.0,
+            cooldown_hours: 0,
+            daily_cap: 10,
+            auto_silence_days: 30,
+        });
+        let suggestion = engine.observe("app", actions.clone()).unwrap();
+        assert!(!suggestion.auto_exec);
     }
 
     #[test]

@@ -189,6 +189,7 @@ impl Default for EgressSettings {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// 默认模型（低于环境变量与命令行参数）。
     #[serde(default)]
@@ -323,6 +324,41 @@ mod tests {
         assert!(!settings.skills.require_signature);
         assert!(settings.whitelist.is_empty());
         assert!(settings.egress.cloud_enabled);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn save_and_load_round_trip_preserves_all_groups() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-settings-save-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let settings = Settings {
+            model: Some("deepseek-v4-flash".to_string()),
+            read_only: true,
+            stt: SttSettings {
+                model: "Other-Model".to_string(),
+                language: "zh".to_string(),
+                itn: false,
+                ..SttSettings::default()
+            },
+            proactive: ProactiveSettings {
+                enabled: false,
+                ..ProactiveSettings::default()
+            },
+            egress: EgressSettings {
+                cloud_enabled: false,
+            },
+            ..Settings::default()
+        };
+        settings.save(&workspace).unwrap();
+        let loaded = Settings::load(&workspace);
+        assert_eq!(loaded.model.as_deref(), Some("deepseek-v4-flash"));
+        assert!(loaded.read_only);
+        assert_eq!(loaded.stt.model, "Other-Model");
+        assert_eq!(loaded.stt.language, "zh");
+        assert!(!loaded.stt.itn);
+        assert!(!loaded.proactive.enabled);
+        assert!(!loaded.egress.cloud_enabled);
         let _ = std::fs::remove_dir_all(&workspace);
     }
 }
