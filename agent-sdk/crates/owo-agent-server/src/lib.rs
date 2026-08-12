@@ -129,6 +129,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/perception/tree", post(perception_tree))
         .route("/perception/ocr", post(perception_ocr))
         .route("/perception/ocr/status", get(ocr_status))
+        .route("/perception/ocr/region", post(perception_ocr_region))
         .route("/learn/start", post(learn_start))
         .route("/learn/record", post(learn_record))
         .route("/learn/pause", post(learn_pause))
@@ -226,6 +227,7 @@ async fn openapi_spec() -> Json<Value> {
             "/perception/tree": { "post": { "operationId": "perceptionTree", "responses": { "200": { "description": "deep UI tree dump" } } } },
             "/perception/ocr": { "post": { "operationId": "perceptionOcr", "responses": { "200": { "description": "OCR text with bounding boxes" } } } },
             "/perception/ocr/status": { "get": { "operationId": "ocrStatus", "responses": { "200": { "description": "OCR engine diagnostics" } } } },
+            "/perception/ocr/region": { "post": { "operationId": "perceptionOcrRegion", "responses": { "200": { "description": "region OCR text with bounding boxes" } } } },
             "/learn/record": { "post": { "operationId": "learnRecord", "responses": { "200": { "description": "learn state" } } } },
             "/learn/start": { "post": { "operationId": "learnStart", "responses": { "200": { "description": "learn state" } } } },
             "/learn/pause": { "post": { "operationId": "learnPause", "responses": { "200": { "description": "learn state" } } } },
@@ -1161,6 +1163,47 @@ async fn perception_ocr(
 
 async fn ocr_status() -> Json<owo_agent_core::OcrEngineStatus> {
     Json(owo_agent_core::ocr_engine_status())
+}
+
+#[derive(serde::Deserialize)]
+struct OcrRegionRequest {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    #[serde(default = "default_ocr_scale")]
+    scale: u32,
+}
+
+fn default_ocr_scale() -> u32 {
+    2
+}
+
+/// 区域 OCR：裁剪 + 放大后识别（小字验证窗口/自绘面板）。
+async fn perception_ocr_region(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<OcrRegionRequest>,
+) -> Result<Json<owo_agent_core::OcrSummary>, (StatusCode, String)> {
+    if !state
+        .perception
+        .lock()
+        .map_err(poison)?
+        .is_enabled(owo_agent_core::PerceptionLayer::L2Visual)
+    {
+        return Err((StatusCode::BAD_REQUEST, "L2 视觉层未授权".to_string()));
+    }
+    let bytes = owo_agent_core::capture_screen()
+        .ok_or((StatusCode::BAD_REQUEST, "屏幕截图失败".to_string()))?;
+    owo_agent_core::ocr_bmp_region(
+        &bytes,
+        request.x,
+        request.y,
+        request.width,
+        request.height,
+        request.scale,
+    )
+    .map(Json)
+    .map_err(|error| (StatusCode::BAD_REQUEST, error))
 }
 
 #[derive(serde::Deserialize)]
