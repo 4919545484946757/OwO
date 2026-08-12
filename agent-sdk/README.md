@@ -20,7 +20,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 操作学习（`learn.rs`）：示范录制（暂停/清空/敏感面熔断）、动作图、流程技能包（SKILL.md + graph.json + manifest.json，可校验/存取/删除）、主动建议（阈值/频控/静默）。
 - 内置技能包（`skills/`）：documents / spreadsheets / pdf / browser，遵循 SKILL.md + manifest.json + tests/ 契约，启动时自动安装到数据目录。
 - HTTP 新接口：`GET /context/snapshot`、`GET /perception/events`（SSE）、`POST /learn/record|pause|resume|clear`、`GET /learn/status`、`POST /skill/verify`、`POST /proactive/observe|decide`、`GET /whitelist`、`POST /whitelist/manage`。
-- 设置组：`stt` / `explore` / `proactive` / `skills` / `whitelist`（参考 `settings.example.json`）。
+- 设置组：`stt` / `explore` / `proactive` / `skills` / `whitelist` / `egress`（参考 `settings.example.json`）。
 - 桌面工作台 Web 壳（P1 骨架）：`desktop/web/`（任务列表/对话 SSE 流式/审批条/diff 审阅/技能中心/感知状态区/白名单管理），由 HTTP 服务在 `/` 静态托管，后续用 Tauri 2 封装为桌面主客户端。
 - L0 前台窗口事件源（Windows）：`platform.rs` 用 Win32 轮询前台应用（app_id + 标题），`/context/snapshot` 自动刷新并去重写入情景快照。
 - L0 剪贴板事件源：轮询 `GetClipboardSequenceNumber`，只记录“内容已变化”（掩码），不读取/不保存剪贴板内容。
@@ -35,6 +35,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 自动化面板（P1）：`automation.rs` 定时任务（单次/间隔/每天）+ 提醒动作，持久化 `<data>/automations.json`，常驻循环每秒检查、触发写审计；接口 `GET/POST /automations`、`POST /automations/{id}/toggle`、`DELETE /automations/{id}`、`GET /automations/reminders`、`POST /automations/reminders/clear`；Web 工作台自动化面板（创建/启停/删除/提醒列表）。
 - 流程技能包分享（D26）：`share_skill.rs` 导出/导入 `.owskill`（ZIP，含 SKILL.md/graph.json/manifest.json/versions.json）；导入校验顺序为 schema → 权限白名单（默认 deny）→ 敏感度必填 → 变量/动作图合法，zip-slip 拒绝；接口 `GET /learn/export/{name}`、`POST /learn/import`（raw ZIP），Web 工作台支持导出/导入。
 - 语音输入（本地优先）：Web 工作台 🎤 按钮用 WebAudio 采集麦克风 → 16k WAV → `POST /stt/transcribe`（SenseVoice-Small 本地推理）→ 转写进输入框；本地 STT 不可用（模型缺失/权限拒绝）时自动回退系统 Web Speech；最长录 10 秒自动停止。
+- 数据出境开关（7.5）：`settings.egress.cloud_enabled`（默认开，可用 `OWO_CLOUD_ENABLED=false` 覆盖）；关闭后模型网关在发起任何网络请求前直接拒绝（完整/流式两条路径），HTTP `GET /settings` / `POST /settings/egress` 读写，Web 工作台“设置与诊断”区一键切换；写回 `settings.json`，重启核心服务后对网关生效。
 - 桌面自启：Tauri 托盘新增“开机自启：开/关”，写入/删除 HKCU Run 注册表项，启动时自动拉起核心服务常驻。
 - 本地 STT（D20）：`stt.rs` 集成 sherpa-onnx + SenseVoice-Small（默认离线，`settings.stt.model` 可换），模型目录 `<data>/models/stt/<model>/`，`scripts/download-stt-model.ps1` 一键下载（约 240MB）；接口 `POST /stt/transcribe`（raw WAV → 文本 + 耗时）；模型未就绪返回明确错误，不静默降级云端。
 
@@ -135,6 +136,7 @@ Tauri 壳为无状态窗口：加载 `desktop/web/` 工作台，启动时自动�
 OPENAI_API_KEY=<你的 API Key>
 OPENAI_BASE_URL=https://api.openai.com/v1      # 可指向 Ollama/兼容代理
 OPENAI_MODEL=deepseek-v4-flash                  # 可替换任意 OpenAI-compatible 模型
+OWO_CLOUD_ENABLED=false                         # 关闭云端模型调用（settings.json egress 同样生效）
 OWO_AGENT_DATA=%LOCALAPPDATA%\OwO\Agent         # 会话/审计数据目录（可选）
 ```
 

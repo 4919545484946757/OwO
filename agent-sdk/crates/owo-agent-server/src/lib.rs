@@ -51,6 +51,7 @@ pub struct AppState {
     pub proactive: Arc<Mutex<ProactiveEngine>>,
     pub stt: owo_agent_core::LocalStt,
     pub automations: Arc<Mutex<AutomationStore>>,
+    pub workspace: PathBuf,
 }
 
 impl AppState {
@@ -59,6 +60,7 @@ impl AppState {
         store: impl SessionStore + 'static,
         traces_dir: PathBuf,
         data_root: PathBuf,
+        workspace: PathBuf,
     ) -> Self {
         Self {
             agent: Arc::new(agent),
@@ -75,6 +77,7 @@ impl AppState {
             proactive: Arc::new(Mutex::new(ProactiveEngine::new(Default::default()))),
             stt: owo_agent_core::LocalStt::default_local(),
             automations: Arc::new(Mutex::new(AutomationStore::new(data_root))),
+            workspace,
         }
     }
 }
@@ -134,6 +137,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/automations/reminders/clear",
             post(automations_clear_reminders),
         )
+        .route("/settings", get(settings_get))
+        .route("/settings/egress", post(settings_egress))
         .route("/whitelist", get(whitelist_list))
         .route("/whitelist/manage", post(whitelist_manage))
         .fallback_service(ServeDir::new(desktop_web_dir()))
@@ -206,6 +211,8 @@ async fn openapi_spec() -> Json<Value> {
             "/automations/{id}": { "delete": { "operationId": "automationsDelete", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
             "/automations/reminders": { "get": { "operationId": "automationsReminders", "responses": { "200": { "description": "pending reminders" } } } },
             "/automations/reminders/clear": { "post": { "operationId": "automationsClearReminders", "responses": { "200": { "description": "ok" } } } },
+            "/settings": { "get": { "operationId": "settingsGet", "responses": { "200": { "description": "workspace settings" } } } },
+            "/settings/egress": { "post": { "operationId": "settingsEgress", "responses": { "200": { "description": "cloud enabled state" } } } },
             "/whitelist": { "get": { "operationId": "whitelistList", "responses": { "200": { "description": "whitelist entries" } } } },
             "/whitelist/manage": { "post": { "operationId": "whitelistManage", "responses": { "200": { "description": "whitelist entries" } } } }
         },
@@ -1162,6 +1169,45 @@ pub async fn start_automation_loop(state: Arc<AppState>) {
             }
         }
     }
+}
+
+// ---------- 设置与诊断 ----------
+
+async fn settings_get(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let settings = owo_agent_core::Settings::load(&state.workspace);
+    serde_json::to_value(&settings)
+        .map(Json)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+#[derive(serde::Deserialize)]
+struct EgressRequest {
+    cloud_enabled: bool,
+}
+
+async fn settings_egress(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<EgressRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut settings = owo_agent_core::Settings::load(&state.workspace);
+    settings.egress.cloud_enabled = request.cloud_enabled;
+    settings
+        .save(&state.workspace)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    std::env::set_var(
+        "OWO_CLOUD_ENABLED",
+        if request.cloud_enabled {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    Ok(Json(json!({
+        "cloud_enabled": request.cloud_enabled,
+        "note": "已写入 settings.json；重启核心服务后对模型网关生效",
+    })))
 }
 
 async fn whitelist_list(

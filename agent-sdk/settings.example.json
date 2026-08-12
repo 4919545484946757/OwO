@@ -48,6 +48,9 @@
       "sensitive": false
     }
   ],
+  "egress": {
+    "cloud_enabled": true
+  },
   "mcp_servers": [
     {
       "name": "files",

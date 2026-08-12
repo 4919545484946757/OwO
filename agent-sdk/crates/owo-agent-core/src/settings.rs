@@ -173,6 +173,21 @@ impl Default for SkillsSettings {
     }
 }
 
+/// 数据出境开关（v0.3 7.5）：关闭后拒绝云端模型调用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EgressSettings {
+    #[serde(default = "default_true")]
+    pub cloud_enabled: bool,
+}
+
+impl Default for EgressSettings {
+    fn default() -> Self {
+        Self {
+            cloud_enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Settings {
     /// 默认模型（低于环境变量与命令行参数）。
@@ -208,6 +223,9 @@ pub struct Settings {
     /// v0.4 应用白名单（可被默认清单覆盖，用户增删）。
     #[serde(default)]
     pub whitelist: Vec<WhitelistEntry>,
+    /// 数据出境开关。
+    #[serde(default)]
+    pub egress: EgressSettings,
 }
 
 impl Settings {
@@ -217,6 +235,15 @@ impl Settings {
             .ok()
             .and_then(|content| serde_json::from_str(&content).ok())
             .unwrap_or_default()
+    }
+
+    pub fn save(&self, workspace: &Path) -> Result<(), String> {
+        let path = workspace.join("settings.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(self).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -295,6 +322,7 @@ mod tests {
         assert_eq!(settings.skills.share_format, "owskill");
         assert!(!settings.skills.require_signature);
         assert!(settings.whitelist.is_empty());
+        assert!(settings.egress.cloud_enabled);
         let _ = std::fs::remove_dir_all(&workspace);
     }
 }

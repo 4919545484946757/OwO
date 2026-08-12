@@ -105,6 +105,8 @@ pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// 数据出境开关：false 时拒绝一切云端模型调用。
+    pub cloud_enabled: bool,
 }
 
 impl OpenAiCompatibleConfig {
@@ -116,10 +118,15 @@ impl OpenAiCompatibleConfig {
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
         let model =
             std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
+        let cloud_enabled = std::env::var("OWO_CLOUD_ENABLED")
+            .ok()
+            .and_then(|value| value.parse::<bool>().ok())
+            .unwrap_or(true);
         Ok(Self {
             base_url,
             api_key,
             model,
+            cloud_enabled,
         })
     }
 }
@@ -314,6 +321,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> Result<ModelOutput, String> {
+        if !self.config.cloud_enabled {
+            return Err("云端模型已禁用（数据出境开关关闭）".to_string());
+        }
         let body = self.request_body(messages, tools, false);
         let url = format!(
             "{}/chat/completions",
@@ -387,6 +397,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
         tools: &[ToolSpec],
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelOutput, String> {
+        if !self.config.cloud_enabled {
+            return Err("云端模型已禁用（数据出境开关关闭）".to_string());
+        }
         let body = self.request_body(messages, tools, true);
         let url = format!(
             "{}/chat/completions",
@@ -492,5 +505,19 @@ mod tests {
         assert!(parse_sse_payload("").is_none());
         assert!(parse_sse_payload("[DONE]").is_none());
         assert!(parse_sse_payload(": keep-alive").is_none());
+    }
+
+    #[test]
+    fn cloud_disabled_rejects_requests_before_network() {
+        std::env::set_var("OPENAI_API_KEY", "test");
+        std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9");
+        std::env::set_var("OPENAI_MODEL", "mock");
+        std::env::set_var("OWO_CLOUD_ENABLED", "false");
+        let config = OpenAiCompatibleConfig::from_env().unwrap();
+        assert!(!config.cloud_enabled);
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+        let error = futures::executor::block_on(provider.complete(&[], &[])).unwrap_err();
+        assert!(error.contains("数据出境"));
+        std::env::remove_var("OWO_CLOUD_ENABLED");
     }
 }

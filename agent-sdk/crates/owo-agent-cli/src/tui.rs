@@ -47,6 +47,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let workspace = args.workspace.canonicalize()?;
     let settings = Settings::load(&workspace);
+    crate::apply_egress_setting(&settings);
     let model = resolve_model(args.model, settings.model.as_deref());
     let read_only = args.agent == "plan" || settings.read_only;
     let root = ensure_data_root(args.data_dir, &workspace);

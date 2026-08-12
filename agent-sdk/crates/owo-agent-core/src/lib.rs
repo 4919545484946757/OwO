@@ -56,7 +56,7 @@ pub use permissions::{Approver, Decision, Level, PermissionRequest, Policy};
 pub use platform::{capture_screen, clipboard_sequence, poll_foreground_app};
 pub use plugin::{discover_plugins, PluginManifest};
 pub use session::{JsonSessionStore, Session, SessionStore};
-pub use settings::Settings;
+pub use settings::{EgressSettings, Settings};
 pub use share::{export_html, export_markdown};
 pub use share_skill::{export_flow_skill_package, import_flow_skill_package};
 pub use skill::{Skill, SkillRegistry};

@@ -326,6 +326,28 @@ async function refreshReminders() {
   }
 }
 
+async function refreshSettings() {
+  try {
+    const settings = await api("/settings");
+    const cloudEnabled = settings.egress && settings.egress.cloud_enabled;
+    const button = $("egressToggle");
+    button.textContent = cloudEnabled ? "开" : "关";
+    button.dataset.enabled = String(cloudEnabled);
+    $("settingsPreview").textContent = JSON.stringify(
+      {
+        model: settings.model,
+        stt: settings.stt,
+        proactive: settings.proactive,
+        egress: settings.egress,
+      },
+      null,
+      2
+    );
+  } catch (_) {
+    $("settingsPreview").textContent = "读取失败";
+  }
+}
+
 async function executePackage(pkg) {
   let variables = {};
   if (pkg.variables && pkg.variables.length) {
@@ -660,6 +682,15 @@ $("clearReminders").addEventListener("click", async () => {
   await api("/automations/reminders/clear", { method: "POST" });
   await refreshReminders();
 });
+$("egressToggle").addEventListener("click", async () => {
+  const enabled = $("egressToggle").dataset.enabled !== "true";
+  await api("/settings/egress", {
+    method: "POST",
+    body: JSON.stringify({ cloud_enabled: enabled }),
+  });
+  await refreshSettings();
+  addMessage("system", `云端模型已${enabled ? "开启" : "关闭"}（重启核心服务后对模型网关生效）`);
+});
 $("whitelistForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const appId = $("wlAppId").value.trim();
@@ -758,6 +789,7 @@ async function boot() {
     refreshSuggestions(),
     refreshAutomations(),
     refreshReminders(),
+    refreshSettings(),
     refreshWhitelist(),
     refreshPerception(),
     refreshLearn(),
@@ -768,6 +800,7 @@ async function boot() {
   setInterval(refreshSuggestions, 10000);
   setInterval(refreshAutomations, 10000);
   setInterval(refreshReminders, 5000);
+  setInterval(refreshSettings, 15000);
   setInterval(refreshHealth, 15000);
 }
 

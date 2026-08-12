@@ -219,8 +219,8 @@ mod tests {
 
     #[test]
     fn qq_send_file_example_package_is_valid_and_round_trips() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../skills/user/qq-send-file");
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/user/qq-send-file");
         let skill_md = std::fs::read_to_string(root.join("SKILL.md")).unwrap();
         let graph: ActionGraph =
             serde_json::from_str(&std::fs::read_to_string(root.join("graph.json")).unwrap())

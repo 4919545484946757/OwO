@@ -38,6 +38,12 @@ const AGENTS_TEMPLATE: &str = r#"# AGENTS.md
 - 说明哪些目录/文件禁止修改。
 "#;
 
+fn apply_egress_setting(settings: &Settings) {
+    if !settings.egress.cloud_enabled {
+        std::env::set_var("OWO_CLOUD_ENABLED", "false");
+    }
+}
+
 /// 开发环境下的内置技能包根目录：`<repo>/agent-sdk/skills`。
 fn builtin_skills_root() -> PathBuf {
     if let Ok(dir) = std::env::var("OWO_SKILLS_DIR") {
@@ -223,6 +229,7 @@ async fn run_bench(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
         store,
         root.join("traces"),
         root.clone(),
+        std::env::temp_dir(),
     ));
     let app = owo_agent_server::build_router(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -402,6 +409,7 @@ fn display_path(path: &std::path::Path) -> String {
 async fn run_turn(args: TurnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
     let settings = Settings::load(&workspace);
+    apply_egress_setting(&settings);
     let model = resolve_model(args.model, settings.model.as_deref());
     let agent = build_agent(&workspace, &model, false)?;
     let mut session = Session::new(workspace.clone(), model, None);
@@ -468,6 +476,7 @@ async fn run_turn(args: TurnArgs) -> Result<(), Box<dyn std::error::Error>> {
 async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
     let settings = Settings::load(&workspace);
+    apply_egress_setting(&settings);
     let model = resolve_model(None, settings.model.as_deref());
     let root = ensure_data_root(None, &workspace);
     let plugins = discover_plugins(&workspace, &root);
@@ -490,6 +499,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         store,
         root.join("traces"),
         root.clone(),
+        workspace.clone(),
     ));
     let observer_state = Arc::clone(&state);
     tokio::spawn(async move {
@@ -636,6 +646,7 @@ impl Repl {
     async fn run(args: ReplArgs) -> Result<(), Box<dyn std::error::Error>> {
         let workspace = args.workspace.canonicalize()?;
         let settings = Settings::load(&workspace);
+        apply_egress_setting(&settings);
         let model = resolve_model(args.model, settings.model.as_deref());
         let read_only = args.agent == "plan" || settings.read_only;
         let root = ensure_data_root(args.data_dir, &workspace);
