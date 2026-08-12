@@ -65,6 +65,9 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
   动作摘要（内容掩码）写入本地情景记忆 `memory.jsonl`；`GET /memory/observations` 查看、
   `POST /memory/mine-skill` 一键把观察序列挖掘为流程技能包（复用 LearnPipeline 泛化）；
   `scripts/sim-qq-observe-e2e.py` 演示“静默观察→挖掘→换参数复用执行”闭环。
+- BYOK 视觉通道已验证（v0.4.6）：`scripts/vision-mock-e2e.py` 用 mock OpenAI-compatible 端点
+  验证 `screen_vision`/`vision_verify`/`/vision/describe`/`/vision/verify` 全链路（含图片 payload）；
+  本地 VL 模型就绪后 `scripts/sim-qq-vision-e2e.py` 可跑真实视觉描述/验证。
 
 ### STT WER/CER 评估
 

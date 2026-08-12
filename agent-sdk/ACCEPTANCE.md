@@ -205,3 +205,15 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 94） |
 
 下一步：真实面观察源（UIA 事件/窗口状态采样）、候选技能“用户确认转 active”、情景记忆保留期滚动清理。
+
+## 十二、v0.4.6 BYOK 视觉通道端到端验证（2026-08-12 续）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `POST /vision/verify` 接口 | ✅ | 对当前截图（模拟帧/真实屏幕）问 yes/no 问题，返回 answer + confidence |
+| BYOK（OpenAI-compatible）通道 e2e | ✅ 1/1 | `vision-mock-e2e.py`：mock 端点收到 3 次带图请求（data:image/png，b64≈114KB）→ describe 返回界面描述、verify 解析 yes/0.95 与 yes/0.93 |
+| 本地 VL 模型（qwen2.5vl:3b） | ⏳ 后台下载中 | 3.2GB 受网络限速，已续传；就绪后 `scripts/sim-qq-vision-e2e.py` 直接跑真实视觉描述/验证 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿 |
+
+视觉通道优先级：本地 Ollama（默认）→ BYOK 云端（`OWO_VISION_PROVIDER=openai`）；
+模型不可用时返回明确错误，主链路（OCR+坐标）不受影响。

@@ -146,6 +146,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/desktop/wait", post(desktop_wait))
         .route("/vision/status", get(vision_status))
         .route("/vision/describe", post(vision_describe))
+        .route("/vision/verify", post(vision_verify))
         .route("/memory/observations", get(memory_observations))
         .route("/memory/clear", post(memory_clear))
         .route("/memory/mine-skill", post(memory_mine_skill))
@@ -1421,6 +1422,38 @@ async fn vision_describe(
         "provider": config.provider,
         "model": config.model,
         "description": description,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct VisionVerifyRequest {
+    question: String,
+}
+
+/// 视觉完成验证：对当前截图回答 yes/no 问题，返回 answer + confidence。
+async fn vision_verify(
+    Json(request): Json<VisionVerifyRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let (png, surface) = owo_agent_core::capture_vision_png()
+        .await
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let prompt = format!(
+        "请只看这张截图回答问题。先回答 YES 或 NO，再给出 0-1 置信度。问题：{}",
+        request.question
+    );
+    let raw = owo_agent_core::describe_image(&png, &prompt)
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    let (answer, confidence) = owo_agent_core::parse_verification(&raw);
+    let config = owo_agent_core::VisionConfig::from_env();
+    Ok(Json(json!({
+        "surface": surface,
+        "provider": config.provider,
+        "model": config.model,
+        "question": request.question,
+        "answer": answer,
+        "confidence": confidence,
+        "raw": raw,
     })))
 }
 
