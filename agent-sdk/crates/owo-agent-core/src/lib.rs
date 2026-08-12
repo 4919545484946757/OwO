@@ -11,6 +11,7 @@ pub mod learn;
 pub mod mcp;
 pub mod perception;
 pub mod permissions;
+pub mod platform;
 pub mod plugin;
 pub mod session;
 pub mod settings;
@@ -42,6 +43,7 @@ pub use perception::{
     SituationStore, TaskHypothesis, UiContext,
 };
 pub use permissions::{Approver, Decision, Level, PermissionRequest, Policy};
+pub use platform::poll_foreground_app;
 pub use plugin::{discover_plugins, PluginManifest};
 pub use session::{JsonSessionStore, Session, SessionStore};
 pub use settings::Settings;

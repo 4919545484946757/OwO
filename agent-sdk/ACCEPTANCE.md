@@ -84,9 +84,10 @@ scripts\run-eval-gate.ps1 -Threshold 0.8  # 评估门禁
 | v0.4 HTTP 接口 | ✅ | context.snapshot / perception.events(SSE) / learn.* / skill.verify / proactive.* / whitelist.*；OpenAPI 补充；本机冒烟通过（含 UTF-8 中文路径） |
 | CLI 接入 | ✅ | `/whitelist`、`/perception`、`/learn`、`/proactive` |
 | 桌面工作台 Web 壳（P1 骨架） | ✅ | `desktop/web/`：任务列表、对话 SSE 流式、审批条、diff 审阅、技能中心、感知状态区、白名单管理；`owo-agent serve` 在 `/` 静态托管；GET /、/app.js、/style.css、/sessions、/skills 冒烟通过 |
+| L0 前台窗口事件源（P2） | ✅ Windows | platform.rs（Win32 GetForegroundWindow/QueryFullProcessImageNameW）；`/context/snapshot` 自动刷新并去重；冒烟实测捕获 Obsidian 前台窗口且不重复记录 focus |
 
 ### 下一迭代（P1 剩余 / P2）
 
 - 将 Web 壳封装进 Tauri 2 桌面主客户端（窗口壳、全局快捷键、系统托盘），核心服务常驻。
 - 内置技能的真实执行链路：documents/spreadsheets/pdf/browser 各 ≥3 端到端用例接入 eval 门禁。
-- L0 事件源（前台窗口/剪贴板）、L1 无障碍 UI 树、L2 按需截图 + 本地摘要、语音 STT 插件（SenseVoice-Small）。
+- L1 无障碍 UI 树、L2 按需截图 + 本地摘要、剪贴板事件源、语音 STT 插件（SenseVoice-Small）。

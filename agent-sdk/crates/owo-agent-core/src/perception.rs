@@ -231,6 +231,30 @@ impl SituationStore {
         let _ = self.record_event(PerceptionEvent::Hypothesis { hypothesis });
     }
 
+    /// L0 事件源：从平台轮询前台应用并记录（Windows 前台窗口）。
+    /// 前台应用无变化时返回当前缓存，不重复记录事件。
+    pub fn refresh_from_platform(&mut self) -> Option<ForegroundApp> {
+        #[cfg(target_os = "windows")]
+        {
+            let (id, title) = crate::platform::poll_foreground_app()?;
+            let unchanged = self
+                .foreground
+                .as_ref()
+                .map(|app| app.id == id && app.title == title)
+                .unwrap_or(false);
+            let app = ForegroundApp { id, title };
+            if !unchanged {
+                let _ = self.record_event(PerceptionEvent::ForegroundChanged { app: app.clone() });
+            }
+            Some(app)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = &self;
+            None
+        }
+    }
+
     pub fn clear(&mut self) {
         self.recent_actions.clear();
         self.capture_ring.clear();
@@ -351,5 +375,12 @@ mod tests {
         assert_eq!(snapshot.permission_level, "l3_semantic");
         assert_eq!(snapshot.task_hypothesis.unwrap().label, "coding");
         assert!(snapshot.recent_actions.contains(&"hypothesis".to_string()));
+    }
+
+    #[test]
+    fn platform_refresh_is_callable() {
+        let mut store = SituationStore::new();
+        let _ = store.refresh_from_platform();
+        assert!(store.snapshot().permission_level == "l0_l1");
     }
 }

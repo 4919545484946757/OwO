@@ -22,6 +22,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - HTTP 新接口：`GET /context/snapshot`、`GET /perception/events`（SSE）、`POST /learn/record|pause|resume|clear`、`GET /learn/status`、`POST /skill/verify`、`POST /proactive/observe|decide`、`GET /whitelist`、`POST /whitelist/manage`。
 - 设置组：`stt` / `explore` / `proactive` / `skills` / `whitelist`（参考 `settings.example.json`）。
 - 桌面工作台 Web 壳（P1 骨架）：`desktop/web/`（任务列表/对话 SSE 流式/审批条/diff 审阅/技能中心/感知状态区/白名单管理），由 HTTP 服务在 `/` 静态托管，后续用 Tauri 2 封装为桌面主客户端。
+- L0 前台窗口事件源（Windows）：`platform.rs` 用 Win32 轮询前台应用（app_id + 标题），`/context/snapshot` 自动刷新并去重写入情景快照。
 
 ### 打开桌面工作台
 

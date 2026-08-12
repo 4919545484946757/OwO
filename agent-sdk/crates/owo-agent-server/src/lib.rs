@@ -535,7 +535,8 @@ async fn run_eval(
 async fn context_snapshot(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SituationSnapshot>, (StatusCode, String)> {
-    let perception = state.perception.lock().map_err(poison)?;
+    let mut perception = state.perception.lock().map_err(poison)?;
+    let _ = perception.refresh_from_platform();
     Ok(Json(perception.snapshot()))
 }
 
@@ -544,6 +545,7 @@ async fn perception_events(
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, String)> {
     let mut perception = state.perception.lock().map_err(poison)?;
+    let _ = perception.refresh_from_platform();
     let mut receiver = perception.subscribe();
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
