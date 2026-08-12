@@ -1,7 +1,9 @@
 //! Agent Skills：遵循 Agent Skills 开放标准（目录 + SKILL.md），
 //! 支持 frontmatter（name/description）与正文指令。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct Skill {
@@ -34,9 +36,28 @@ impl Skill {
 #[derive(Debug, Clone, Default)]
 pub struct SkillRegistry {
     skills: Vec<Skill>,
+    /// 运行时禁用集合（进程内共享，设置页切换即时生效；重启时从 settings.json 重建）。
+    disabled: Arc<Mutex<HashSet<String>>>,
 }
 
 impl SkillRegistry {
+    /// 注入运行时禁用集合（与设置持久化共用同一集合）。
+    pub fn set_disabled(&mut self, disabled: Arc<Mutex<HashSet<String>>>) {
+        self.disabled = disabled;
+    }
+
+    pub fn disabled_set(&self) -> Arc<Mutex<HashSet<String>>> {
+        Arc::clone(&self.disabled)
+    }
+
+    pub fn is_enabled(&self, name: &str) -> bool {
+        !self
+            .disabled
+            .lock()
+            .map(|disabled| disabled.contains(name))
+            .unwrap_or(false)
+    }
+
     /// 从全局数据目录 `<data>/skills` 与工作区 `.agents/skills` 发现技能。
     pub fn discover(workspace: &Path, data_root: &Path) -> Self {
         let mut registry = Self::default();
@@ -80,6 +101,20 @@ impl SkillRegistry {
 
     pub fn get(&self, name: &str) -> Option<&Skill> {
         self.skills.iter().find(|skill| skill.name == name)
+    }
+
+    /// 仅返回启用的技能（供系统提示注入与 use_skill 使用）。
+    pub fn list_enabled(&self) -> Vec<&Skill> {
+        self.skills
+            .iter()
+            .filter(|skill| self.is_enabled(&skill.name))
+            .collect()
+    }
+
+    pub fn get_enabled(&self, name: &str) -> Option<&Skill> {
+        self.skills
+            .iter()
+            .find(|skill| skill.name == name && self.is_enabled(&skill.name))
     }
 }
 
@@ -148,6 +183,43 @@ mod tests {
             .unwrap()
             .instructions
             .contains("执行 A"));
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn disabled_skills_are_filtered_and_shared() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-skill-disable-ws-{}", uuid::Uuid::new_v4()));
+        let data =
+            std::env::temp_dir().join(format!("owo-skill-disable-data-{}", uuid::Uuid::new_v4()));
+        for name in ["demo", "other"] {
+            let dir = workspace.join(".agents").join("skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: 测试\n---\n正文 {name}。"),
+            )
+            .unwrap();
+        }
+        let mut registry = SkillRegistry::discover(&workspace, &data);
+        let disabled = Arc::new(Mutex::new(HashSet::from(["demo".to_string()])));
+        registry.set_disabled(Arc::clone(&disabled));
+        assert!(!registry.is_enabled("demo"));
+        assert!(registry.is_enabled("other"));
+        let names: Vec<&str> = registry
+            .list_enabled()
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
+        assert!(!names.contains(&"demo"));
+        assert!(names.contains(&"other"));
+        assert!(registry.get_enabled("demo").is_none());
+        assert!(registry.get_enabled("other").is_some());
+        // 共享集合运行时变更即时生效。
+        disabled.lock().unwrap().remove("demo");
+        assert!(registry.is_enabled("demo"));
+        assert!(registry.get_enabled("demo").is_some());
         let _ = std::fs::remove_dir_all(&workspace);
         let _ = std::fs::remove_dir_all(&data);
     }

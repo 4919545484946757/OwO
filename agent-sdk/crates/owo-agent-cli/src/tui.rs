@@ -1,8 +1,9 @@
 //! OpenCode 式全屏 TUI（ratatui + crossterm）。
 
 use crate::{
-    build_agent_with_mcp, builtin_skills_root, connect_mcp_clients, display_path, ensure_data_root,
-    load_mcp_configs, resolve_model, save_mcp_configs, AGENTS_TEMPLATE,
+    apply_disabled_skills, build_agent_with_mcp, builtin_skills_root, connect_mcp_clients,
+    display_path, ensure_data_root, load_mcp_configs, resolve_model, save_mcp_configs,
+    AGENTS_TEMPLATE,
 };
 use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -66,7 +67,8 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let mcp_clients = runtime.block_on(connect_mcp_clients(&mcp_configs));
     let _ = install_builtin_packages(&builtin_skills_root(), &root);
-    let skills = SkillRegistry::discover(&workspace, &root);
+    let mut skills = SkillRegistry::discover(&workspace, &root);
+    apply_disabled_skills(&mut skills, &settings);
     let agent = Arc::new(build_agent_with_mcp(
         &workspace,
         &model,

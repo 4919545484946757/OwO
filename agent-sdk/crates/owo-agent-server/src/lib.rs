@@ -117,6 +117,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/export/{format}", get(export_session))
         .route("/sessions", get(list_sessions))
         .route("/skills", get(list_skills))
+        .route("/skills/{name}", get(skill_detail).post(skill_edit))
+        .route("/skills/{name}/enabled", post(skill_enabled))
         .route("/eval/run", post(run_eval))
         .route("/context/snapshot", get(context_snapshot))
         .route("/perception/events", get(perception_events))
@@ -131,6 +133,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/learn/status", get(learn_status))
         .route("/learn/execute", post(learn_execute))
         .route("/learn/packages", get(learn_packages))
+        .route(
+            "/learn/packages/{name}",
+            get(learn_package_detail).delete(learn_package_delete),
+        )
         .route("/learn/sink", post(learn_sink))
         .route("/learn/execute-package", post(learn_execute_package))
         .route("/learn/export/{name}", get(learn_export))
@@ -204,6 +210,8 @@ async fn openapi_spec() -> Json<Value> {
             "/session/{id}/export/{format}": { "get": { "operationId": "exportSession", "parameters": [path_param("id"), path_param("format")], "responses": { "200": { "description": "md or html" } } } },
             "/sessions": { "get": { "operationId": "listSessions", "responses": { "200": { "description": "session list" } } } },
             "/skills": { "get": { "operationId": "listSkills", "responses": { "200": { "description": "skill list" } } } },
+            "/skills/{name}": { "get": { "operationId": "skillDetail", "parameters": [path_param("name")], "responses": { "200": { "description": "skill detail with SKILL.md content" } } }, "post": { "operationId": "skillEdit", "parameters": [path_param("name")], "responses": { "200": { "description": "updated" } } } },
+            "/skills/{name}/enabled": { "post": { "operationId": "skillEnabled", "parameters": [path_param("name")], "responses": { "200": { "description": "enabled state" } } } },
             "/eval/run": { "post": { "operationId": "runEval", "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EvalRunRequest" } } } }, "responses": { "200": { "description": "eval report" } } } },
             "/context/snapshot": { "get": { "operationId": "contextSnapshot", "responses": { "200": { "description": "situation snapshot" } } } },
             "/perception/events": { "get": { "operationId": "perceptionSubscribe", "responses": { "200": { "description": "SSE perception event stream" } } } },
@@ -217,6 +225,7 @@ async fn openapi_spec() -> Json<Value> {
             "/learn/clear": { "post": { "operationId": "learnClear", "responses": { "200": { "description": "ok" } } } },
             "/learn/execute": { "post": { "operationId": "learnExecute", "responses": { "200": { "description": "execution report" } } } },
             "/learn/packages": { "get": { "operationId": "learnPackages", "responses": { "200": { "description": "flow skill packages" } } } },
+            "/learn/packages/{name}": { "get": { "operationId": "learnPackageDetail", "parameters": [path_param("name")], "responses": { "200": { "description": "package detail" } } }, "delete": { "operationId": "learnPackageDelete", "parameters": [path_param("name")], "responses": { "200": { "description": "deleted" } } } },
             "/learn/sink": { "post": { "operationId": "learnSink", "responses": { "200": { "description": "sunk package" } } } },
             "/learn/execute-package": { "post": { "operationId": "learnExecutePackage", "responses": { "200": { "description": "execution report" } } } },
             "/learn/export/{name}": { "get": { "operationId": "learnExport", "parameters": [path_param("name")], "responses": { "200": { "description": "owskill zip" } } } },
@@ -370,7 +379,8 @@ async fn list_sessions(
 async fn list_skills(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
-    let skills = state.agent.skills().list();
+    let registry = state.agent.skills();
+    let skills = registry.list();
     Ok(Json(
         skills
             .iter()
@@ -379,10 +389,125 @@ async fn list_skills(
                     "name": skill.name,
                     "description": skill.description,
                     "path": skill.path.to_string_lossy(),
+                    "enabled": registry.is_enabled(&skill.name),
                 })
             })
             .collect(),
     ))
+}
+
+async fn skill_detail(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let registry = state.agent.skills();
+    let skill = registry
+        .get(&name)
+        .ok_or((StatusCode::NOT_FOUND, format!("技能不存在：{name}")))?;
+    let content = std::fs::read_to_string(&skill.path)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(json!({
+        "name": skill.name,
+        "description": skill.description,
+        "path": skill.path.to_string_lossy(),
+        "enabled": registry.is_enabled(&name),
+        "content": content,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct SkillEditRequest {
+    content: String,
+}
+
+async fn skill_edit(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+    Json(request): Json<SkillEditRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let skill = state
+        .agent
+        .skills()
+        .get(&name)
+        .ok_or((StatusCode::NOT_FOUND, format!("技能不存在：{name}")))?;
+    std::fs::write(&skill.path, &request.content)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "skills",
+            "edit",
+            Some(name.clone()),
+            Some(true),
+            "SKILL.md 已更新",
+        );
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "note": "SKILL.md 已更新（注册表内技能重启核心服务后生效）",
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct SkillEnabledRequest {
+    enabled: bool,
+}
+
+async fn skill_enabled(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+    Json(request): Json<SkillEnabledRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let registry = state.agent.skills();
+    if registry.get(&name).is_none() {
+        return Err((StatusCode::NOT_FOUND, format!("技能不存在：{name}")));
+    }
+    let disabled = registry.disabled_set();
+    {
+        let mut set = disabled.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "禁用集合锁中毒".to_string(),
+            )
+        })?;
+        if request.enabled {
+            set.remove(&name);
+        } else {
+            set.insert(name.clone());
+        }
+    }
+    let mut settings = owo_agent_core::Settings::load(&state.workspace);
+    let mut list = {
+        let set = disabled.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "禁用集合锁中毒".to_string(),
+            )
+        })?;
+        let mut list: Vec<String> = set.iter().cloned().collect();
+        list.sort();
+        list
+    };
+    settings.skills.disabled = std::mem::take(&mut list);
+    settings
+        .save(&state.workspace)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "skills",
+            "enabled",
+            Some(name.clone()),
+            Some(request.enabled),
+            format!(
+                "技能{}：{name}",
+                if request.enabled { "启用" } else { "禁用" }
+            ),
+        );
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "enabled": request.enabled,
+        "note": "已即时生效",
+    })))
 }
 
 async fn create_session(
@@ -1005,6 +1130,47 @@ async fn learn_packages(
         }
     }
     Ok(Json(packages))
+}
+
+async fn learn_package_detail(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let pipeline = state.pipeline.lock().map_err(poison)?;
+    let package = pipeline
+        .store
+        .load(&name)
+        .map_err(|error| (StatusCode::NOT_FOUND, error))?;
+    Ok(Json(json!({
+        "name": package.manifest.name,
+        "target_apps": package.manifest.target_apps,
+        "variables": package.manifest.variables,
+        "sensitivity": package.manifest.sensitivity,
+        "version": package.manifest.version,
+        "skill_md": package.skill_md,
+        "graph": package.graph,
+    })))
+}
+
+async fn learn_package_delete(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let pipeline = state.pipeline.lock().map_err(poison)?;
+    pipeline
+        .store
+        .delete(&name)
+        .map_err(|error| (StatusCode::NOT_FOUND, error))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "learn",
+            "delete-package",
+            Some(name.clone()),
+            Some(true),
+            format!("删除流程技能包：{name}"),
+        );
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(serde::Deserialize)]

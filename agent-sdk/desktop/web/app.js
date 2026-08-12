@@ -204,6 +204,32 @@ async function refreshPackages() {
         await exportPackage(pkg.name);
       });
       li.appendChild(exportBtn);
+      const detailBtn = document.createElement("button");
+      detailBtn.textContent = "查看";
+      detailBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        try {
+          const detail = await api(`/learn/packages/${encodeURIComponent(pkg.name)}`);
+          $("packageDetail").textContent = JSON.stringify(detail, null, 2);
+        } catch (error) {
+          addMessage("system", `查看失败：${error.message || error}`);
+        }
+      });
+      li.appendChild(detailBtn);
+      const deleteBtn = document.createElement("button");
+      deleteBtn.textContent = "删除";
+      deleteBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        if (!window.confirm(`删除流程技能包 ${pkg.name}？`)) return;
+        try {
+          await api(`/learn/packages/${encodeURIComponent(pkg.name)}`, { method: "DELETE" });
+          await refreshPackages();
+          addMessage("system", `已删除流程技能包 ${pkg.name}`);
+        } catch (error) {
+          addMessage("system", `删除失败：${error.message || error}`);
+        }
+      });
+      li.appendChild(deleteBtn);
       list.appendChild(li);
     }
     if (!packages.length) list.innerHTML = '<li class="sub">暂无流程技能包（先录制再沉淀）</li>';
@@ -732,7 +758,61 @@ async function refreshSkills() {
     list.innerHTML = "";
     for (const skill of skills) {
       const li = document.createElement("li");
-      li.innerHTML = `<strong>${esc(skill.name)}</strong><span class="sub">${esc(skill.description || "")}</span>`;
+      const enabled = skill.enabled !== false;
+      li.innerHTML = `<strong>${esc(skill.name)} ${enabled ? "" : "🔇"}</strong><span class="sub">${esc(skill.description || "")}</span>`;
+      const actions = document.createElement("div");
+      actions.className = "inline";
+      const toggle = document.createElement("button");
+      toggle.textContent = enabled ? "禁用" : "启用";
+      toggle.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        try {
+          await api(`/skills/${encodeURIComponent(skill.name)}/enabled`, {
+            method: "POST",
+            body: JSON.stringify({ enabled: !enabled }),
+          });
+          await refreshSkills();
+          addMessage("system", `技能 ${skill.name} 已${enabled ? "禁用" : "启用"}（即时生效）`);
+        } catch (error) {
+          addMessage("system", `操作失败：${error.message || error}`);
+        }
+      });
+      const view = document.createElement("button");
+      view.textContent = "查看";
+      view.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        try {
+          const detail = await api(`/skills/${encodeURIComponent(skill.name)}`);
+          $("skillDetail").textContent = detail.content || "";
+          addMessage("system", `技能 ${skill.name}：${detail.path}`);
+        } catch (error) {
+          addMessage("system", `查看失败：${error.message || error}`);
+        }
+      });
+      const edit = document.createElement("button");
+      edit.textContent = "编辑";
+      edit.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        try {
+          const detail = await api(`/skills/${encodeURIComponent(skill.name)}`);
+          const content = window.prompt(
+            `编辑 ${skill.name} 的 SKILL.md：`,
+            detail.content || ""
+          );
+          if (content === null) return;
+          await api(`/skills/${encodeURIComponent(skill.name)}`, {
+            method: "POST",
+            body: JSON.stringify({ content }),
+          });
+          addMessage("system", `技能 ${skill.name} 已保存（注册表内技能重启核心服务后生效）`);
+        } catch (error) {
+          addMessage("system", `编辑失败：${error.message || error}`);
+        }
+      });
+      actions.appendChild(toggle);
+      actions.appendChild(view);
+      actions.appendChild(edit);
+      li.appendChild(actions);
       list.appendChild(li);
     }
     if (!skills.length) list.innerHTML = '<li class="sub">暂无技能</li>';

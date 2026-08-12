@@ -501,15 +501,17 @@ impl Tool for UseSkillTool {
             .get("name")
             .and_then(Value::as_str)
             .ok_or("参数缺少字符串字段：name")?;
-        let Some(skill) = ctx.skills.get(name) else {
+        let Some(skill) = ctx.skills.get_enabled(name) else {
             let available = ctx
                 .skills
-                .list()
+                .list_enabled()
                 .iter()
                 .map(|skill| skill.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(format!("未找到技能 {name}；可用技能：{available}"));
+            return Err(format!(
+                "未找到技能或技能已禁用：{name}；可用技能：{available}"
+            ));
         };
         let task = args.get("task").and_then(Value::as_str).unwrap_or_default();
         Ok(json!({

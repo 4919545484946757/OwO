@@ -13,11 +13,12 @@ use owo_agent_core::{
     TurnEvent, Whitelist,
 };
 use rustyline::error::ReadlineError;
+use std::collections::HashSet;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 mod tui;
 
@@ -42,6 +43,19 @@ fn apply_egress_setting(settings: &Settings) {
     if !settings.egress.cloud_enabled {
         std::env::set_var("OWO_CLOUD_ENABLED", "false");
     }
+}
+
+/// 把 settings.json 的禁用技能列表注入技能注册表（进程内共享集合，Web 切换即时生效）。
+fn apply_disabled_skills(skills: &mut SkillRegistry, settings: &Settings) {
+    let disabled = Arc::new(Mutex::new(
+        settings
+            .skills
+            .disabled
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>(),
+    ));
+    skills.set_disabled(disabled);
 }
 
 /// 开发环境下的内置技能包根目录：`<repo>/agent-sdk/skills`。
@@ -284,8 +298,9 @@ fn build_agent(
     read_only: bool,
 ) -> Result<Agent, Box<dyn std::error::Error>> {
     let root = ensure_data_root(None, workspace);
-    let skills = SkillRegistry::discover(workspace, &root);
     let settings = Settings::load(workspace);
+    let mut skills = SkillRegistry::discover(workspace, &root);
+    apply_disabled_skills(&mut skills, &settings);
     build_agent_with_mcp(
         workspace,
         model,
@@ -665,7 +680,8 @@ impl Repl {
             .collect();
         let mcp_clients = connect_mcp_clients(&mcp_configs).await;
         let _ = install_builtin_packages(&builtin_skills_root(), &root);
-        let skills = SkillRegistry::discover(&workspace, &root);
+        let mut skills = SkillRegistry::discover(&workspace, &root);
+        apply_disabled_skills(&mut skills, &settings);
         let mut whitelist = Whitelist::default();
         for entry in settings.whitelist.clone() {
             whitelist.upsert(entry);
@@ -936,12 +952,19 @@ impl Repl {
             return;
         }
         for skill in skills {
-            println!("{}：{}", skill.name.cyan(), skill.description);
+            let marker = if self.skills.is_enabled(&skill.name) {
+                String::new()
+            } else {
+                " [禁用]".dimmed().to_string()
+            };
+            println!("{}：{}{}", skill.name.cyan(), skill.description, marker);
         }
     }
 
     fn reload_skills(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.skills = SkillRegistry::discover(&self.workspace, &self.data_root);
+        let mut skills = SkillRegistry::discover(&self.workspace, &self.data_root);
+        apply_disabled_skills(&mut skills, &self.settings);
+        self.skills = skills;
         self.rebuild_agent()?;
         println!(
             "{} 已重新加载 {} 个技能",

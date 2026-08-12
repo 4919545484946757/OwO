@@ -102,6 +102,9 @@ pub struct SkillsSettings {
     pub share_format: String,
     #[serde(default = "default_false")]
     pub require_signature: bool,
+    /// 禁用的技能名列表（设置页启用/禁用，重启后从 settings.json 恢复）。
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 fn default_stt_model() -> String {
@@ -169,6 +172,7 @@ impl Default for SkillsSettings {
         Self {
             share_format: "owskill".to_string(),
             require_signature: false,
+            disabled: Vec::new(),
         }
     }
 }
@@ -345,6 +349,10 @@ mod tests {
                 enabled: false,
                 ..ProactiveSettings::default()
             },
+            skills: SkillsSettings {
+                disabled: vec!["demo".to_string()],
+                ..SkillsSettings::default()
+            },
             egress: EgressSettings {
                 cloud_enabled: false,
             },
@@ -358,6 +366,7 @@ mod tests {
         assert_eq!(loaded.stt.language, "zh");
         assert!(!loaded.stt.itn);
         assert!(!loaded.proactive.enabled);
+        assert_eq!(loaded.skills.disabled, vec!["demo"]);
         assert!(!loaded.egress.cloud_enabled);
         let _ = std::fs::remove_dir_all(&workspace);
     }

@@ -159,9 +159,9 @@ impl Agent {
         let started = std::time::Instant::now();
         let rules = load_project_rules(&session.workspace);
         let mut system = build_system_prompt(session.system_prompt.as_deref(), &rules);
-        if !self.skills.list().is_empty() {
+        if !self.skills.list_enabled().is_empty() {
             let mut catalog = vec!["可用技能（通过 use_skill 工具按名调用）：".to_string()];
-            for skill in self.skills.list() {
+            for skill in self.skills.list_enabled() {
                 catalog.push(format!("- {}：{}", skill.name, skill.description));
             }
             system.push_str("\n\n");
