@@ -54,6 +54,7 @@ pub struct AppState {
     pub memory: Arc<Mutex<owo_agent_core::MemoryStore>>,
     pub audit_flushed: Arc<Mutex<usize>>,
     pub workspace: PathBuf,
+    pub data_root: PathBuf,
 }
 
 impl AppState {
@@ -92,6 +93,7 @@ impl AppState {
             ))),
             audit_flushed: Arc::new(Mutex::new(0)),
             workspace,
+            data_root,
         }
     }
 }
@@ -131,6 +133,26 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/perception/capture", post(perception_capture))
         .route("/perception/layers", post(perception_layers))
         .route("/perception/tree", post(perception_tree))
+        .route(
+            "/perception/template/build",
+            post(perception_template_build),
+        )
+        .route(
+            "/perception/template/build-ocr",
+            post(perception_template_build_ocr),
+        )
+        .route(
+            "/perception/template/detect",
+            post(perception_template_detect),
+        )
+        .route(
+            "/perception/template/detect-ocr",
+            post(perception_template_detect_ocr),
+        )
+        .route(
+            "/perception/template/{app_id}",
+            get(perception_template_get),
+        )
         .route("/perception/ocr", post(perception_ocr))
         .route("/perception/ocr/bytes", post(perception_ocr_bytes))
         .route("/perception/ocr/status", get(ocr_status))
@@ -1147,6 +1169,9 @@ struct TreeDumpRequest {
     max_depth: u32,
     #[serde(default = "default_tree_nodes")]
     max_nodes: usize,
+    /// 可选：按窗口句柄抓树（不要求前台），用于窗口模板/后台情景理解。
+    #[serde(default)]
+    hwnd: Option<i64>,
 }
 
 fn default_tree_depth() -> u32 {
@@ -1161,9 +1186,108 @@ fn default_tree_nodes() -> usize {
 async fn perception_tree(
     Json(request): Json<TreeDumpRequest>,
 ) -> Result<Json<Vec<owo_agent_core::UiNode>>, (StatusCode, String)> {
-    owo_agent_core::foreground_ui_tree(request.max_depth, request.max_nodes)
+    let tree = match request.hwnd {
+        Some(hwnd) => {
+            owo_agent_core::ui_tree_for_hwnd(hwnd as isize, request.max_depth, request.max_nodes)
+        }
+        None => owo_agent_core::foreground_ui_tree(request.max_depth, request.max_nodes),
+    };
+    tree.map(Json)
+        .ok_or((StatusCode::BAD_REQUEST, "无法获取 UI 树".to_string()))
+}
+
+#[derive(serde::Deserialize)]
+struct TemplateBuildRequest {
+    hwnd: i64,
+    app_id: String,
+}
+
+async fn perception_template_build(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<TemplateBuildRequest>,
+) -> Result<Json<owo_agent_core::WindowTemplate>, (StatusCode, String)> {
+    let tree = owo_agent_core::ui_tree_for_hwnd(request.hwnd as isize, 14, 10000)
+        .ok_or((StatusCode::BAD_REQUEST, "无法获取窗口 UI 树".to_string()))?;
+    let template = owo_agent_core::build_template(&request.app_id, &tree);
+    owo_agent_core::save_template(&state.data_root, &template)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "template",
+            "build",
+            Some(request.app_id.clone()),
+            Some(true),
+            format!(
+                "构建窗口模板：{}（{} 个 ROI）",
+                request.app_id,
+                template.rois.len()
+            ),
+        );
+    }
+    Ok(Json(template))
+}
+
+async fn perception_template_get(
+    State(state): State<Arc<AppState>>,
+    AxumPath(app_id): AxumPath<String>,
+) -> Result<Json<owo_agent_core::WindowTemplate>, (StatusCode, String)> {
+    owo_agent_core::load_template(&state.data_root, &app_id)
         .map(Json)
-        .ok_or((StatusCode::BAD_REQUEST, "无法获取前台 UI 树".to_string()))
+        .ok_or((StatusCode::NOT_FOUND, format!("窗口模板不存在：{app_id}")))
+}
+
+#[derive(serde::Deserialize)]
+struct TemplateDetectRequest {
+    hwnd: i64,
+    app_id: String,
+}
+
+async fn perception_template_detect(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<TemplateDetectRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let template = owo_agent_core::load_template(&state.data_root, &request.app_id).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("窗口模板不存在：{}", request.app_id),
+    ))?;
+    let tree = owo_agent_core::ui_tree_for_hwnd(request.hwnd as isize, 14, 10000)
+        .ok_or((StatusCode::BAD_REQUEST, "无法获取窗口 UI 树".to_string()))?;
+    Ok(Json(owo_agent_core::detect_template(&template, &tree)))
+}
+
+/// OCR 版模板构建：PrintWindow 抓窗口 → PP-OCRv6 → 按语义文本提取 ROI（后台可用）。
+async fn perception_template_build_ocr(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<TemplateBuildRequest>,
+) -> Result<Json<owo_agent_core::WindowTemplate>, (StatusCode, String)> {
+    let (bmp, _rect) = owo_agent_core::platform::capture_window_bmp_deep(request.hwnd as isize)
+        .ok_or((StatusCode::BAD_REQUEST, "窗口截图失败".to_string()))?;
+    let summary = owo_agent_core::ocr_preferred(&bmp)
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    let template = owo_agent_core::build_template_from_ocr(&request.app_id, &summary);
+    owo_agent_core::save_template(&state.data_root, &template)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(template))
+}
+
+/// OCR 版模板检测：当前窗口 OCR 行中心 vs 模板 ROI 命中率。
+async fn perception_template_detect_ocr(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<TemplateDetectRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let template = owo_agent_core::load_template(&state.data_root, &request.app_id).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("窗口模板不存在：{}", request.app_id),
+    ))?;
+    let (bmp, _rect) = owo_agent_core::platform::capture_window_bmp_deep(request.hwnd as isize)
+        .ok_or((StatusCode::BAD_REQUEST, "窗口截图失败".to_string()))?;
+    let summary = owo_agent_core::ocr_preferred(&bmp)
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    Ok(Json(owo_agent_core::detect_template_ocr(
+        &template, &summary,
+    )))
 }
 
 /// 全屏 OCR（含文本框坐标），供 OCR+坐标点击（自绘面板，如 QQ 红包/表情）。
@@ -1262,7 +1386,7 @@ struct WindowOcrRequest {
 async fn perception_window(
     Json(request): Json<WindowOcrRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (bmp, rect) = owo_agent_core::platform::capture_window_bmp(request.hwnd as isize)
+    let (bmp, rect) = owo_agent_core::platform::capture_window_bmp_deep(request.hwnd as isize)
         .ok_or((StatusCode::BAD_REQUEST, "窗口截图失败".to_string()))?;
     let summary = owo_agent_core::ocr_preferred(&bmp)
         .await

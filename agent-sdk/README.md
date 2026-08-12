@@ -78,6 +78,9 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 窗口级截取（v0.4.9，M-A）：`POST /perception/window {hwnd}` 与 `desktop_window_ocr` 工具
   用 PrintWindow 后台只读抓指定窗口并用 PP-OCRv6 识别（返回屏幕坐标）；实测后台抓 QQ 窗口
   339 字符/33 行，不切前台。
+- 窗口模板（v0.4.10，M-A）：`/perception/template/build[-ocr]|detect[-ocr]` 从 UIA 树或 OCR 版面
+  提取/检测“发送/输入框/搜索”等 ROI 并持久化；`capture_window_bmp_deep` 枚举子窗口择优抓帧。
+  注意：锁屏时 Chromium 应用（QQ）不向窗口 DC 呈现底部输入区，完整窗口内容需交互桌面会话。
 
 ### STT WER/CER 评估
 

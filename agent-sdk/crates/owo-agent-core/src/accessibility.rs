@@ -35,16 +35,26 @@ pub struct UiNode {
 /// 抓取前台窗口的无障碍 UI 树摘要（Windows UI Automation）。
 #[cfg(target_os = "windows")]
 pub fn foreground_ui_tree(max_depth: u32, max_nodes: usize) -> Option<Vec<UiNode>> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    ui_tree_for_hwnd(hwnd.0 as isize, max_depth, max_nodes)
+}
+
+/// 按窗口句柄抓取无障碍 UI 树（不要求前台，窗口存在即可，用于窗口模板/后台情景理解）。
+#[cfg(target_os = "windows")]
+pub fn ui_tree_for_hwnd(hwnd: isize, max_depth: u32, max_nodes: usize) -> Option<Vec<UiNode>> {
     unsafe {
         // COM 已在 MTA 时忽略错误，UIA 仍可工作。
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         let automation: IUIAutomation =
             CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            return None;
-        }
-        let root = automation.ElementFromHandle(hwnd).ok()?;
+        let root = automation
+            .ElementFromHandle(windows::Win32::Foundation::HWND(
+                hwnd as *mut core::ffi::c_void,
+            ))
+            .ok()?;
         let mut nodes = Vec::new();
         collect_ui(&automation, &root, 0, max_depth, max_nodes, &mut nodes);
         if nodes.is_empty() {
@@ -53,6 +63,11 @@ pub fn foreground_ui_tree(max_depth: u32, max_nodes: usize) -> Option<Vec<UiNode
             Some(nodes)
         }
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn ui_tree_for_hwnd(_hwnd: isize, _max_depth: u32, _max_nodes: usize) -> Option<Vec<UiNode>> {
+    None
 }
 
 #[cfg(target_os = "windows")]

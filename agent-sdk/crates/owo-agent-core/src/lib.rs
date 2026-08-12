@@ -33,8 +33,9 @@ pub mod tools;
 pub mod trace;
 pub mod vision;
 pub mod whitelist;
+pub mod window_template;
 
-pub use accessibility::{foreground_ui_tree, UiNode};
+pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};
 pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
 pub use audit::{AuditEntry, AuditLog};
 pub use automation::{AutomationAction, AutomationStore, AutomationTask, Schedule};
@@ -84,3 +85,7 @@ pub use vision::{
     ground_element, ollama_models, parse_verification, parse_vision_box, VisionConfig,
 };
 pub use whitelist::{AppTier, Whitelist, WhitelistEntry};
+pub use window_template::{
+    build_template, build_template_from_ocr, detect_template, detect_template_ocr, load_template,
+    save_template, WindowRoi, WindowTemplate,
+};

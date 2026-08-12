@@ -240,6 +240,17 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 
 下一步：窗口模板（ROI 集合）与“窗口元素注册表”，把窗口级 OCR 稳定用于真实 QQ 会话定位。
 
+## 十六、v0.4.10 窗口模板（UIA/OCR 双路径）+ 深度抓窗（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| UIA-by-hwnd | ✅ | `ui_tree_for_hwnd`（不要求前台，`/perception/tree` 支持 hwnd 参数）；Chromium 应用（QQ）在非激活态只暴露 2 节点（内容仅激活时提供） |
+| 窗口模板（UIA 版） | ✅ | `window_template.rs`：从 UIA 树提取“会话列表/消息列表/Rich Text Editor/发送/搜索/表情/文件/红包”ROI；`/perception/template/build|detect` + 持久化；单测（构建/检测/存取） |
+| 窗口模板（OCR 版） | ✅ | `build_template_from_ocr`/`detect_template_ocr`：PrintWindow+PP-OCRv6 按语义文本提取 ROI，后台可用；实测锁屏下 QQ 窗口提取到“搜索”ROI 并命中 |
+| 深度抓窗 | ✅ | `capture_window_bmp_deep`：枚举子窗口逐帧 PrintWindow+BitBlt 择优（Chromium 渲染子窗口）；实测锁屏下 QQ 仍缺底部输入区（D3D 呈现暂停，属环境限制） |
+| 锁屏限制说明 | ⚠️ | 锁屏/无人值守时 Chromium 应用不向窗口 DC 呈现底部区域，完整窗口 OCR/模板需交互桌面会话；会话列表/消息区可后台读取（339 字符） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 102） |
+
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
 

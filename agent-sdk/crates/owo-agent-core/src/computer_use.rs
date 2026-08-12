@@ -388,7 +388,7 @@ impl Tool for DesktopWindowOcrTool {
                 .map(|window| window.hwnd)
                 .ok_or_else(|| format!("未找到窗口（process={process}, title={title}）"))?
         };
-        let (bmp, rect) = crate::platform::capture_window_bmp(hwnd)
+        let (bmp, rect) = crate::platform::capture_window_bmp_deep(hwnd)
             .ok_or_else(|| format!("窗口截图失败（hwnd={hwnd}）"))?;
         let summary = crate::paddle_ocr::ocr_preferred(&bmp).await?;
         let mut result = ocr_summary_json(&summary, 200);

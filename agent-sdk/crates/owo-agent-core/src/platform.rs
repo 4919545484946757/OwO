@@ -216,7 +216,15 @@ pub fn capture_window_bmp(hwnd: isize) -> Option<WindowBmp> {
             return None;
         }
         let old = SelectObject(memory, bitmap as HGDIOBJ);
-        let printed = PrintWindow(hwnd, memory, PW_RENDERFULLCONTENT);
+        // D3D/Chromium 窗口 PrintWindow 偶发只捕获部分内容：重试几次。
+        let mut printed = 0;
+        for _attempt in 0..3 {
+            printed = PrintWindow(hwnd, memory, PW_RENDERFULLCONTENT);
+            if printed != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         if printed == 0 {
             BitBlt(memory, 0, 0, width, height, window_dc, 0, 0, SRCCOPY);
         }
@@ -229,6 +237,20 @@ pub fn capture_window_bmp(hwnd: isize) -> Option<WindowBmp> {
         info.bmiHeader.biBitCount = 32;
         info.bmiHeader.biCompression = BI_RGB;
         let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+        // D3D/Chromium 窗口 PrintWindow 可能缺底部：再用 BitBlt 抓一次，选内容更丰富的一帧。
+        let mut bitblt_pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+        let bitblt_ok = BitBlt(memory, 0, 0, width, height, window_dc, 0, 0, SRCCOPY) != 0;
+        if bitblt_ok {
+            GetDIBits(
+                memory,
+                bitmap,
+                0,
+                height as u32,
+                bitblt_pixels.as_mut_ptr() as *mut core::ffi::c_void,
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+        }
         let got = GetDIBits(
             memory,
             bitmap,
@@ -244,11 +266,78 @@ pub fn capture_window_bmp(hwnd: isize) -> Option<WindowBmp> {
         if got == 0 {
             return None;
         }
+        if bitblt_ok && bmp_richness(&bitblt_pixels) > bmp_richness(&pixels) * 1.1 {
+            pixels = bitblt_pixels;
+        }
         Some((
             encode_bmp(width, height, &pixels),
             (rect.left, rect.top, rect.right, rect.bottom),
         ))
     }
+}
+
+/// 深度窗口抓取：主窗口 + 所有子窗口逐帧 PrintWindow，选内容最丰富的一帧。
+/// Chromium/D3D 应用（如 QQ）主窗口 DC 不含渲染子窗口内容时使用。
+#[cfg(target_os = "windows")]
+pub fn capture_window_bmp_deep(hwnd: isize) -> Option<WindowBmp> {
+    use windows_sys::Win32::Foundation::{BOOL, HWND};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetWindowRect};
+    let mut candidates: Vec<isize> = vec![hwnd];
+    unsafe extern "system" fn collect_child(hwnd: HWND, param: isize) -> BOOL {
+        let list = &mut *(param as *mut Vec<isize>);
+        list.push(hwnd as isize);
+        1
+    }
+    unsafe {
+        EnumChildWindows(
+            hwnd as HWND,
+            Some(collect_child),
+            &mut candidates as *mut Vec<isize> as isize,
+        );
+    }
+    let mut best: Option<(f64, WindowBmp)> = None;
+    for candidate in candidates {
+        let mut rect: windows_sys::Win32::Foundation::RECT = unsafe { std::mem::zeroed() };
+        let size_ok = unsafe { GetWindowRect(candidate as HWND, &mut rect) } != 0
+            && (rect.right - rect.left) * (rect.bottom - rect.top) >= 40_000;
+        if !size_ok {
+            continue;
+        }
+        let Some(capture) = capture_window_bmp(candidate) else {
+            continue;
+        };
+        let (bmp, _rect) = &capture;
+        let richness = bmp_richness(bmp);
+        if best
+            .as_ref()
+            .map(|(best_rich, _)| richness > *best_rich)
+            .unwrap_or(true)
+        {
+            best = Some((richness, capture));
+        }
+    }
+    best.map(|(_, capture)| capture)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn capture_window_bmp_deep(_hwnd: isize) -> Option<WindowBmp> {
+    None
+}
+
+/// 内容丰富度：非纯白/纯黑像素占比（用于 D3D 抓帧择优）。
+#[cfg(target_os = "windows")]
+fn bmp_richness(bgra: &[u8]) -> f64 {
+    let total = (bgra.len() / 4).max(1);
+    let mut rich = 0usize;
+    for pixel in bgra.chunks_exact(4) {
+        let (b, g, r) = (pixel[0] as i32, pixel[1] as i32, pixel[2] as i32);
+        let sum = r + g + b;
+        let spread = r.max(g).max(b) - r.min(g).min(b);
+        if spread > 24 || sum < 690 {
+            rich += 1;
+        }
+    }
+    rich as f64 / total as f64
 }
 
 #[cfg(not(target_os = "windows"))]
