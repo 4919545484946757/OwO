@@ -48,6 +48,18 @@ powershell -ExecutionPolicy Bypass -File scripts\eval-stt-wer.ps1 `
 
 评估工具自动启动核心服务、逐条调 `/stt/transcribe`、计算字符级 CER（中文）与词级 WER（英文），输出聚合报告 JSON。
 
+### VSCode 语音改代码 E2E
+
+```powershell
+# 需要：DeepSeek/OpenAI 兼容密钥、本地 SenseVoice 模型、VSCode
+$env:OPENAI_API_KEY="<key>"; $env:OPENAI_BASE_URL="https://api.deepseek.com/v1"
+$env:OPENAI_MODEL="deepseek-v4-flash"; $env:OWO_HTTP_PROXY="http://127.0.0.1:7897"
+owo-agent serve --port 4097 --workspace .          # 另开终端
+python scripts\voice_code_e2e.py                   # 见脚本内环境变量（E2E_*）
+```
+
+完整链路：TTS/真实语音 → `/stt/transcribe`（SenseVoice）→ `/session/{id}/turn`（Agent 读文件→改文件→跑测试）→ 审批自动放行 → 文件验证。
+
 ### 便携打包
 
 ```powershell

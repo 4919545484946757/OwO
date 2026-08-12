@@ -132,8 +132,26 @@ pub struct OpenAiCompatibleProvider {
 
 impl OpenAiCompatibleProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, String> {
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(180));
+        for name in [
+            "OWO_HTTP_PROXY",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "https_proxy",
+            "http_proxy",
+        ] {
+            if let Ok(proxy) = std::env::var(name) {
+                if !proxy.trim().is_empty() {
+                    let proxy = reqwest::Proxy::all(proxy)
+                        .map_err(|e| format!("代理配置无效（{name}）：{e}"))?;
+                    builder = builder.proxy(proxy);
+                    break;
+                }
+            }
+        }
+        let client = builder
             .build()
             .map_err(|e| format!("HTTP 客户端创建失败：{e}"))?;
         Ok(Self { client, config })

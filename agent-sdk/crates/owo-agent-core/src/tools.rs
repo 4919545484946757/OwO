@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
@@ -141,6 +141,25 @@ fn snapshot_key(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// 以会话工作区为基座解析相对路径，并做策略工作区越界检查。
+fn resolve_session_path(ctx: &ToolContext, path: &str) -> Result<PathBuf, String> {
+    let base = ctx
+        .workspace
+        .canonicalize()
+        .map_err(|error| format!("工作区不可访问：{error}"))?;
+    let candidate = base.join(path);
+    let candidate = candidate.canonicalize().unwrap_or(candidate);
+    let policy_workspace = ctx
+        .policy
+        .workspace()
+        .canonicalize()
+        .unwrap_or_else(|_| ctx.policy.workspace().to_path_buf());
+    if !candidate.starts_with(&policy_workspace) {
+        return Err(format!("路径越界：{path}"));
+    }
+    Ok(candidate)
+}
+
 struct ReadFileTool;
 
 #[async_trait]
@@ -159,7 +178,7 @@ impl Tool for ReadFileTool {
 
     async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
         let path = required_string(&args, "path")?;
-        let abs = ctx.policy.resolve_within_workspace(&path)?;
+        let abs = resolve_session_path(ctx, &path)?;
         let content = tokio::fs::read_to_string(&abs)
             .await
             .map_err(|e| format!("读取 {path} 失败：{e}"))?;
@@ -193,7 +212,7 @@ impl Tool for WriteFileTool {
     async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
         let path = required_string(&args, "path")?;
         let content = required_string(&args, "content")?;
-        let abs = ctx.policy.resolve_within_workspace(&path)?;
+        let abs = resolve_session_path(ctx, &path)?;
         let key = snapshot_key(&abs);
         if let std::collections::hash_map::Entry::Vacant(entry) = ctx.session.snapshots.entry(key) {
             let original = match tokio::fs::read(&abs).await {
@@ -241,7 +260,7 @@ impl Tool for ListDirTool {
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| ".".to_string());
-        let abs = ctx.policy.resolve_within_workspace(&path)?;
+        let abs = resolve_session_path(ctx, &path)?;
         let mut entries = Vec::new();
         let mut reader = tokio::fs::read_dir(&abs)
             .await
@@ -342,7 +361,7 @@ impl Tool for RunCommandTool {
             .get("cwd")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .map(|path| ctx.policy.resolve_within_workspace(&path))
+            .map(|path| resolve_session_path(ctx, &path))
             .transpose()?
             .unwrap_or_else(|| ctx.workspace.to_path_buf());
 

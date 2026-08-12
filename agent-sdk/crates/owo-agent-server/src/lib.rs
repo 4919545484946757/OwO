@@ -350,7 +350,6 @@ async fn turn(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
     let approver = ChannelApprover {
         pending: Arc::clone(&state.pending_approvals),
-        event_tx: tx.clone(),
     };
     let abort_flag = {
         let mut aborts = state.aborts.lock().map_err(poison)?;
@@ -1211,7 +1210,6 @@ async fn whitelist_manage(
 
 struct ChannelApprover {
     pending: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Decision>>>>,
-    event_tx: mpsc::Sender<Result<Event, Infallible>>,
 }
 
 impl ChannelApprover {
@@ -1223,14 +1221,6 @@ impl ChannelApprover {
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(request.request_id.clone(), tx);
         }
-        let _ = self
-            .event_tx
-            .try_send(to_event(SseEvent::PermissionRequest {
-                request_id: request.request_id.clone(),
-                tool: request.tool.clone(),
-                args: request.args.clone(),
-                reason: request.reason.clone(),
-            }));
         rx
     }
 }
