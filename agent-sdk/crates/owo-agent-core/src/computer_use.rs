@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex as AsyncMutex;
@@ -143,6 +143,55 @@ fn ocr_summary_json(summary: &crate::ocr::OcrSummary, max_boxes: usize) -> Value
     })
 }
 
+/// 统一 OCR 入口（模拟面走真值版面，真实面走 Media.Ocr），返回 screen_ocr 同构 JSON。
+async fn ocr_screen(max_boxes: usize) -> Result<Value, String> {
+    if on_sim_surface() {
+        if let Some(mut result) = sim_ocr_lines().await {
+            if let Value::Object(map) = &mut result {
+                map.insert("surface".into(), json!("sim"));
+            }
+            return Ok(result);
+        }
+    }
+    let (bmp, surface) = if on_sim_surface() {
+        (sim_fetch_frame().await?, "sim")
+    } else {
+        (
+            crate::platform::capture_screen().ok_or("屏幕截图失败")?,
+            "desktop",
+        )
+    };
+    let summary = crate::ocr::ocr_bmp_detailed(&bmp).map_err(|e| format!("OCR 失败：{e}"))?;
+    let mut result = ocr_summary_json(&summary, max_boxes);
+    if let Value::Object(map) = &mut result {
+        map.insert("surface".into(), json!(surface));
+    }
+    Ok(result)
+}
+
+/// 在 OCR lines 中查找包含目标文本的行（可带 role_hint 过滤）。
+fn find_ocr_line(ocr: &Value, needle: &str, role: &str) -> Option<Value> {
+    let needle_lower = needle.to_lowercase();
+    let lines = ocr.get("lines")?.as_array()?;
+    lines
+        .iter()
+        .find(|line| {
+            let text = line
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_lowercase();
+            let role_ok = role.is_empty()
+                || line
+                    .get("role_hint")
+                    .and_then(Value::as_str)
+                    .map(|line_role| line_role == role)
+                    .unwrap_or(false);
+            role_ok && text.contains(&needle_lower)
+        })
+        .cloned()
+}
+
 /// 公开同步入口：屏幕坐标单击（HTTP 服务与 Agent 工具共用）。
 pub fn desktop_click(x: i32, y: i32) -> Result<(), String> {
     executor::click_at_screen(x, y)
@@ -186,29 +235,8 @@ impl Tool for ScreenOcrTool {
     }
 
     async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
-        if on_sim_surface() {
-            if let Some(mut result) = sim_ocr_lines().await {
-                if let Value::Object(map) = &mut result {
-                    map.insert("surface".into(), json!("sim"));
-                }
-                return Ok(result);
-            }
-        }
-        let (bmp, surface) = if on_sim_surface() {
-            (sim_fetch_frame().await?, "sim")
-        } else {
-            (
-                crate::platform::capture_screen().ok_or("屏幕截图失败")?,
-                "desktop",
-            )
-        };
-        let summary = crate::ocr::ocr_bmp_detailed(&bmp).map_err(|e| format!("OCR 失败：{e}"))?;
         let max_boxes = args.get("max_boxes").and_then(Value::as_u64).unwrap_or(120) as usize;
-        let mut result = ocr_summary_json(&summary, max_boxes);
-        if let Value::Object(map) = &mut result {
-            map.insert("surface".into(), json!(surface));
-        }
-        Ok(result)
+        ocr_screen(max_boxes).await
     }
 }
 
@@ -580,6 +608,95 @@ impl Tool for DesktopWaitTool {
     }
 }
 
+pub struct DesktopWaitUntilTool;
+
+#[async_trait]
+impl Tool for DesktopWaitUntilTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "desktop_wait_until".into(),
+            description: "轮询屏幕 OCR，直到出现包含指定文本的行（可限定 role_hint=button/input/message/header）；用于等待对方回复/页面加载/消息上屏，返回匹配行与坐标；超时返回 matched=false".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "要等待出现的文本" },
+                    "role": { "type": "string", "description": "可选：限定行类型 button/input/message/header" },
+                    "timeout_ms": { "type": "integer", "description": "最长等待毫秒，默认 30000，最大 120000" },
+                    "interval_ms": { "type": "integer", "description": "轮询间隔毫秒，默认 1000" }
+                },
+                "required": ["text"]
+            }),
+        }
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let needle = required_string(&args, "text")?;
+        let role = args
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let timeout_ms = args
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(30_000)
+            .min(120_000);
+        let interval_ms = args
+            .get("interval_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(1_000)
+            .max(200);
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let mut last_ocr = Value::Null;
+        let mut last_error = String::new();
+        while Instant::now() < deadline {
+            match ocr_screen(200).await {
+                Ok(ocr) => {
+                    last_ocr = ocr.clone();
+                    if let Some(line) = find_ocr_line(&ocr, &needle, &role) {
+                        let elapsed = timeout_ms.saturating_sub(
+                            deadline
+                                .saturating_duration_since(Instant::now())
+                                .as_millis() as u64,
+                        );
+                        return Ok(json!({
+                            "matched": true,
+                            "text": needle,
+                            "line": line,
+                            "elapsed_ms": elapsed,
+                            "surface": ocr.get("surface").cloned().unwrap_or(json!("unknown")),
+                        }));
+                    }
+                }
+                Err(error) => {
+                    last_error = error;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+        }
+        let elapsed_ms = timeout_ms.saturating_sub(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64,
+        );
+        let preview: String = last_ocr
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(500)
+            .collect();
+        Ok(json!({
+            "matched": false,
+            "text": needle,
+            "elapsed_ms": elapsed_ms,
+            "surface": last_ocr.get("surface").cloned().unwrap_or(json!("unknown")),
+            "last_error": last_error,
+            "last_ocr_preview": preview,
+        }))
+    }
+}
+
 // ---------- 浏览器工具（Playwright + 本机 Edge） ----------
 
 struct BrowserDriver {
@@ -922,5 +1039,30 @@ mod tests {
         let (node, node_path) = node_runtime();
         assert!(!node.is_empty());
         let _ = node_path;
+    }
+
+    #[test]
+    fn find_ocr_line_matches_text_and_role_filter() {
+        let ocr = json!({
+            "lines": [
+                { "text": "发送", "x": 0, "y": 0, "width": 10, "height": 10, "role_hint": "button" },
+                { "text": "对方正在输入…", "x": 0, "y": 20, "width": 10, "height": 10, "role_hint": "status" },
+                { "text": "今晚吃什么", "x": 0, "y": 40, "width": 10, "height": 10, "role_hint": "message" }
+            ]
+        });
+        let button = find_ocr_line(&ocr, "发送", "button").expect("应匹配发送按钮");
+        assert_eq!(button["role_hint"], "button");
+        assert!(find_ocr_line(&ocr, "发送", "message").is_none());
+        assert!(find_ocr_line(&ocr, "输入中", "").is_none());
+        let message = find_ocr_line(&ocr, "吃什么", "").expect("应匹配消息行");
+        assert_eq!(message["y"], 40);
+    }
+
+    #[test]
+    fn find_ocr_line_is_case_insensitive() {
+        let ocr = json!({
+            "lines": [{ "text": "Hello World", "x": 0, "y": 0, "width": 10, "height": 10, "role_hint": "text" }]
+        });
+        assert!(find_ocr_line(&ocr, "hello", "").is_some());
     }
 }

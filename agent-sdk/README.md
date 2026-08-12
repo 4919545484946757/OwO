@@ -46,12 +46,15 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 本地 STT（D20）：`stt.rs` 集成 sherpa-onnx + SenseVoice-Small（默认离线，`settings.stt.model` 可换），模型目录 `<data>/models/stt/<model>/`，`scripts/download-stt-model.ps1` 一键下载（约 240MB）；接口 `POST /stt/transcribe`（raw WAV → 文本 + 耗时）；模型未就绪返回明确错误，不静默降级云端。
 - 桌面/浏览器双表面工具（v0.4.1）：`screen_ocr`/`ocr_region` 返回整行文本（`lines` + 坐标 + `role_hint`），
   `desktop_click/type/key/shortcut/activate/window_list/foreground/launch/wait` 走 SendInput/UIA/窗口枚举，
+  `desktop_wait_until` 按 OCR 谓词轮询等待（等对方回复/消息上屏，可限定 role_hint），
   `browser_navigate/search/snapshot/click/type/press/screenshot/download_image/close` 走 Playwright + 本机 Edge
-  （持久化 profile、可 headless）；设置 `OWO_SIM_QQ_URL=http://127.0.0.1:18500` 后，桌面工具自动落到
+  （持久化 profile、可 headless、支持 `OWO_BROWSER_PROXY` 代理）；设置 `OWO_SIM_QQ_URL=http://127.0.0.1:18500` 后，桌面工具自动落到
   headless 模拟窗口（离屏渲染 + HTTP 虚拟输入），完全不碰真实桌面；服务端直连写接口在模拟面下被禁用。
 - 模拟实验台（`sim/`）：`owo-sim-qq --headless` 提供自绘 QQ 聊天窗口的 `/frame`（BMP）、`/ocr`（真值版面）、
   `/click`、`/type`、`/key`、`/state`、`/log`、`/reset`；`owo-sim-browser` 提供本地搜索/文章/图片下载站；
-  `scripts/run-sim-e2e.ps1` 一键跑 QQ 回复闭环 + 浏览器搜索/下载两个端到端验收（后台静默，不弹窗）。
+  附带多联系人场景（`sim/scenarios/qq-multi-contact.json` + 对应提示词）；
+  `scripts/run-sim-e2e.ps1` 一键跑 QQ 回复闭环 + 浏览器搜索/下载两个端到端验收（后台静默，不弹窗）；
+  `scripts/web-browser-e2e.py` 可对真实网页（headless Edge）跑搜索→打开结果→下载图片验收。
 
 ### STT WER/CER 评估
 

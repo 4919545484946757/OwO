@@ -35,7 +35,18 @@ def main():
     parser.add_argument("--base", default="http://127.0.0.1:4096")
     parser.add_argument("--sim", default="http://127.0.0.1:18500")
     parser.add_argument("--prompt", default=None)
+    parser.add_argument("--prompt-file", default=None)
     parser.add_argument("--workspace", default=os.getcwd())
+    parser.add_argument(
+        "--require-contacts",
+        default="",
+        help="逗号分隔的联系人名单：断言 outgoing 必须覆盖这些 to",
+    )
+    parser.add_argument(
+        "--require-contacts-file",
+        default=None,
+        help="UTF-8 文本文件，内容为逗号分隔的联系人名单",
+    )
     args = parser.parse_args()
 
     http_json("POST", args.sim + "/reset", {}, timeout=10)
@@ -62,17 +73,21 @@ def main():
         timeout=30,
     )
     session_id = session["id"]
-    prompt = args.prompt or (
-        "你现在操作一个模拟 QQ 聊天窗口（虚拟桌面，窗口大小为 1020x700）。请完成：\n"
-        "1. 用 screen_ocr 读取屏幕。返回的 lines 是整行文本，带坐标和 role_hint；"
-        "发送按钮行 role_hint=button，输入框行 role_hint=input。理解张子豪发来了什么消息。\n"
-        "2. 找到输入框（占位文字'输入消息...'），点击它，输入一句合适的回复"
-        "（对方在问今晚吃什么，且想吃清淡的）。\n"
-        "3. 点击 role_hint=button 且文本为'发送'的行中心，再用 screen_ocr 验证：回复已上屏、输入框已清空。\n"
-        "4. 用 desktop_wait 等几秒，再 screen_ocr 读取对方的新回复。\n"
-        "5. 根据对方的新回复再回复一句并点击发送，再次验证。\n"
-        "最后报告：你看到的聊天内容、发送的每条消息、验证结果。"
-    )
+    if args.prompt_file:
+        with open(args.prompt_file, "r", encoding="utf-8") as handle:
+            prompt = handle.read()
+    else:
+        prompt = args.prompt or (
+            "你现在操作一个模拟 QQ 聊天窗口（虚拟桌面，窗口大小为 1020x700）。请完成：\n"
+            "1. 用 screen_ocr 读取屏幕。返回的 lines 是整行文本，带坐标和 role_hint；"
+            "发送按钮行 role_hint=button，输入框行 role_hint=input。理解张子豪发来了什么消息。\n"
+            "2. 找到输入框（占位文字'输入消息...'），点击它，输入一句合适的回复"
+            "（对方在问今晚吃什么，且想吃清淡的）。\n"
+            "3. 点击 role_hint=button 且文本为'发送'的行中心，再用 screen_ocr 验证：回复已上屏、输入框已清空。\n"
+            "4. 用 desktop_wait 等几秒，再 screen_ocr 读取对方的新回复。\n"
+            "5. 根据对方的新回复再回复一句并点击发送，再次验证。\n"
+            "最后报告：你看到的聊天内容、发送的每条消息、验证结果。"
+        )
     body = json.dumps({"prompt": prompt}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         args.base + "/session/" + session_id + "/turn", data=body, method="POST"
@@ -124,6 +139,17 @@ def main():
         and len(send_clicks) >= 1
         and state.get("input") == ""
     )
+    contacts_spec = args.require_contacts
+    if args.require_contacts_file:
+        with open(args.require_contacts_file, "r", encoding="utf-8") as handle:
+            contacts_spec = handle.read()
+    required_contacts = [
+        item.strip() for item in contacts_spec.split(",") if item.strip()
+    ]
+    sent_to = {entry.get("to") for entry in outgoing}
+    contacts_covered = all(contact in sent_to for contact in required_contacts)
+    if required_contacts:
+        passed = passed and contacts_covered
     report = {
         "ok": passed,
         "elapsed_s": round(elapsed, 1),
@@ -132,6 +158,8 @@ def main():
         "send_clicks": len(send_clicks),
         "incoming_count": len(incoming),
         "outgoing": [entry.get("text") for entry in outgoing],
+        "required_contacts": required_contacts,
+        "contacts_covered": contacts_covered,
         "input_after": state.get("input"),
         "final_text": final_text,
     }

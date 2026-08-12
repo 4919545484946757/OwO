@@ -15,6 +15,10 @@ let context = null;
 let page = null;
 const profileDir =
   process.env.OWO_BROWSER_PROFILE || path.join(os.tmpdir(), "owo-agent-browser-profile");
+const launchArgs = ["--disable-blink-features=AutomationControlled"];
+if (process.env.OWO_BROWSER_PROXY) {
+  launchArgs.push(`--proxy-server=${process.env.OWO_BROWSER_PROXY}`);
+}
 
 async function ensureBrowser() {
   if (context) return;
@@ -26,7 +30,7 @@ async function ensureBrowser() {
       process.env.OWO_BROWSER_HEADLESS === "true",
     viewport: { width: 1280, height: 860 },
     acceptDownloads: true,
-    args: ["--disable-blink-features=AutomationControlled"],
+    args: launchArgs,
   });
   page = context.pages()[0] || (await context.newPage());
 }

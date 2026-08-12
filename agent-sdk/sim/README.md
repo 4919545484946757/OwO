@@ -17,3 +17,12 @@ powershell -ExecutionPolicy Bypass -File scripts\run-sim-e2e.ps1
 
 验收项：QQ 回复闭环（读上下文→回复→发送→验证→等对方回复→再回复）与
 浏览器搜索/浏览/图片下载。
+
+扩展场景：
+
+- 多联系人切换：`sim/scenarios/qq-multi-contact.json`（张子豪 + 李四），
+  提示词 `sim/prompts/qq-multi-contact.txt`；e2e 用
+  `--prompt-file sim\prompts\qq-multi-contact.txt --require-contacts-file sim\prompts\qq-multi-contacts.txt`
+  断言两条会话都发出过消息。
+- 真实网页（headless）：`scripts/web-browser-e2e.py`（Bing/360 搜索 → 打开结果 → 下载页面图片；
+  网络受限时 Agent 会自动换可用站点）。

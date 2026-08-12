@@ -159,3 +159,12 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 后续（按设计文档 M-A/M-B/M-C 剩余项）：窗口级截取/窗口模板、PaddleOCR、本地视觉模型
 （场景描述/完成验证/grounding 交叉验证）、静默操作学习（情景/语义记忆）；真实 QQ 复用同一套
 `desktop_*` 工具链路（去掉 `OWO_SIM_QQ_URL` 即恢复真实桌面面）。
+
+## 八、v0.4.2 计算机使用增强（2026-08-12 续）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `desktop_wait_until`（OCR 谓词等待） | ✅ | computer_use.rs：按 `text`+可选 `role_hint` 轮询 `screen_ocr`，超时返回 `matched=false`；2 个单测；权限 Read |
+| QQ 多联系人切换 e2e（真实模型） | ✅ 1/1 | `sim-qq-e2e.py --prompt-file qq-multi-contact.txt --require-contacts-file qq-multi-contacts.txt`：55.4s，3 条消息覆盖张子豪+李四，含切会话、`desktop_wait_until` 等回复、每次发送后 OCR 验证 |
+| 真实网页 headless 浏览器 e2e | ✅ 1/1 | `web-browser-e2e.py`：Bing 被网络阻断时 Agent 自动换 360 搜索并选择可达的权威站点，下载 3,587B SVG 图片；含代理支持 `OWO_BROWSER_PROXY` |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 88 等） |
