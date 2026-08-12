@@ -13,6 +13,7 @@ const API_BASE = window.OWO_API_BASE || "";
 
 let recognition = null;
 let listening = false;
+let localRecorder = null;
 
 function initSpeech() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -30,6 +31,69 @@ function initSpeech() {
     listening = false;
     $("micBtn").textContent = "🎤";
   };
+}
+
+function encodeWav(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeString = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+  let offset = 44;
+  for (const sample of samples) {
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(offset, clamped * 0x7fff, true);
+    offset += 2;
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+// 本地优先语音输入：麦克风 → 16k WAV → /stt/transcribe（SenseVoice-Small）。
+// 本地 STT 不可用时回退到系统 Web Speech。
+async function startLocalRecording() {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return false;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (_) {
+    return false;
+  }
+  const context = new AudioCtx({ sampleRate: 16000 });
+  const source = context.createMediaStreamSource(stream);
+  const processor = context.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  source.connect(processor);
+  processor.connect(context.destination);
+  processor.onaudioprocess = (event) => {
+    chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+  };
+  localRecorder = {
+    stop: async () => {
+      source.disconnect();
+      processor.disconnect();
+      stream.getTracks().forEach((track) => track.stop());
+      const sampleRate = context.sampleRate;
+      await context.close();
+      const samples = [];
+      for (const chunk of chunks) samples.push(...chunk);
+      return { blob: encodeWav(samples, sampleRate), sampleCount: samples.length };
+    },
+  };
+  return true;
 }
 
 async function api(path, options = {}) {
@@ -129,15 +193,15 @@ async function refreshPackages() {
     const packages = await api("/learn/packages");
     const list = $("packageList");
     list.innerHTML = "";
-    for (const package of packages) {
+    for (const pkg of packages) {
       const li = document.createElement("li");
-      li.innerHTML = `<strong>${esc(package.name)}</strong><span class="sub">目标：${esc(package.target_apps.join(","))} ｜ 变量：${esc(package.variables.join(",")) || "无"}</span>`;
-      li.addEventListener("click", () => executePackage(package));
+      li.innerHTML = `<strong>${esc(pkg.name)}</strong><span class="sub">目标：${esc(pkg.target_apps.join(","))} ｜ 变量：${esc(pkg.variables.join(",")) || "无"}</span>`;
+      li.addEventListener("click", () => executePackage(pkg));
       const exportBtn = document.createElement("button");
       exportBtn.textContent = "导出";
       exportBtn.addEventListener("click", async (event) => {
         event.stopPropagation();
-        await exportPackage(package.name);
+        await exportPackage(pkg.name);
       });
       li.appendChild(exportBtn);
       list.appendChild(li);
@@ -180,9 +244,9 @@ async function importPackage(file) {
   }
 }
 
-async function executePackage(package) {
+async function executePackage(pkg) {
   let variables = {};
-  if (package.variables && package.variables.length) {
+  if (pkg.variables && pkg.variables.length) {
     const raw = prompt(`为技能包填写变量（JSON，如 {"value":"小李"}）：`, "{}");
     if (raw === null) return;
     try {
@@ -192,21 +256,21 @@ async function executePackage(package) {
       return;
     }
   }
-  if (!confirm(`确认执行技能包 ${package.name}？首次执行需要审批。`)) return;
+  if (!confirm(`确认执行技能包 ${pkg.name}？首次执行需要审批。`)) return;
   let highRiskAck = false;
-  if (package.sensitivity === "high") {
-    if (!confirm(`⚠ ${package.name} 是高敏感技能包（可能操作支付/验证码等场景），再次确认执行？`)) return;
+  if (pkg.sensitivity === "high") {
+    if (!confirm(`⚠ ${pkg.name} 是高敏感技能包（可能操作支付/验证码等场景），再次确认执行？`)) return;
     highRiskAck = true;
   }
   try {
     const report = await api("/learn/execute-package", {
       method: "POST",
-      body: JSON.stringify({ name: package.name, variables, confirm: true, high_risk_ack: highRiskAck }),
+      body: JSON.stringify({ name: pkg.name, variables, confirm: true, high_risk_ack: highRiskAck }),
     });
     if (report.ok) {
-      addMessage("system", `技能包 ${package.name} 执行成功（${report.steps.length} 步）`);
+      addMessage("system", `技能包 ${pkg.name} 执行成功（${report.steps.length} 步）`);
     } else {
-      addMessage("error", `技能包 ${package.name} 执行失败：${report.error || ""}`);
+      addMessage("error", `技能包 ${pkg.name} 执行失败：${report.error || ""}`);
     }
     for (const step of report.steps) {
       addMessage("tool", `${step.status.toUpperCase()} ${step.node_id}（${step.action}）：${step.detail || "ok"}`, "执行步骤");
@@ -534,25 +598,61 @@ $("prompt").addEventListener("keydown", (event) => {
     sendPrompt();
   }
 });
-$("micBtn").addEventListener("click", () => {
-  if (!recognition) {
-    initSpeech();
-    if (!recognition) {
-      alert("当前 WebView 不支持语音识别（可安装语音语言包）");
-      return;
-    }
-  }
+$("micBtn").addEventListener("click", async () => {
   if (listening) {
-    recognition.stop();
-  } else {
-    listening = true;
-    $("micBtn").textContent = "🔴";
-    try {
-      recognition.start();
-    } catch (_) {
+    if (localRecorder) {
+      const { blob, sampleCount } = await localRecorder.stop();
+      localRecorder = null;
       listening = false;
       $("micBtn").textContent = "🎤";
+      if (sampleCount < 1600) {
+        addMessage("system", "录音太短，未识别");
+        return;
+      }
+      try {
+        const response = await fetch(`${API_BASE}/stt/transcribe`, {
+          method: "POST",
+          headers: { "Content-Type": "audio/wav" },
+          body: blob,
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || response.statusText);
+        const prompt = $("prompt");
+        prompt.value = (prompt.value ? prompt.value + " " : "") + result.text;
+      } catch (error) {
+        addMessage("error", `本地语音识别失败（${error.message}）`);
+      }
+      return;
     }
+    if (recognition) recognition.stop();
+    return;
+  }
+  listening = true;
+  $("micBtn").textContent = "🔴";
+  const started = await startLocalRecording();
+  if (!started) {
+    listening = false;
+    $("micBtn").textContent = "🎤";
+    if (!recognition) {
+      initSpeech();
+    }
+    if (recognition) {
+      try {
+        recognition.start();
+      } catch (_) {
+        listening = false;
+        $("micBtn").textContent = "🎤";
+        alert("无法访问麦克风或系统语音识别");
+      }
+    } else {
+      alert("无法访问麦克风（请允许麦克风权限）");
+    }
+  } else {
+    setTimeout(async () => {
+      if (listening && localRecorder) {
+        $("micBtn").click();
+      }
+    }, 10000);
   }
 });
 

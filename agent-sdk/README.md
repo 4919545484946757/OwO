@@ -33,7 +33,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - P3 执行审批：`/learn/execute` 与 `/learn/execute-package` 服务端强制 `confirm: true`（首次执行必须确认），确认与分步结果写入审计；录制自动观察（`start_observer`）在录制中每 2s 采样前台/剪贴板掩码事件（前台变化去重、剪贴板按序列号去重）。
 - P3 高敏感二次确认：`sensitivity=high` 的流程技能包执行还需 `high_risk_ack: true`，否则 400；确认写入审计。
 - 流程技能包分享（D26）：`share_skill.rs` 导出/导入 `.owskill`（ZIP，含 SKILL.md/graph.json/manifest.json/versions.json）；导入校验顺序为 schema → 权限白名单（默认 deny）→ 敏感度必填 → 变量/动作图合法，zip-slip 拒绝；接口 `GET /learn/export/{name}`、`POST /learn/import`（raw ZIP），Web 工作台支持导出/导入。
-- 语音输入兜底：Web 工作台输入框旁 🎤 按钮调用系统语音识别（Edge/Web Speech，云端服务），转写文本进输入框；本地 SenseVoice-Small（`settings.stt.model`）仍为默认离线配置，待 sherpa-onnx 集成。
+- 语音输入（本地优先）：Web 工作台 🎤 按钮用 WebAudio 采集麦克风 → 16k WAV → `POST /stt/transcribe`（SenseVoice-Small 本地推理）→ 转写进输入框；本地 STT 不可用（模型缺失/权限拒绝）时自动回退系统 Web Speech；最长录 10 秒自动停止。
 - 桌面自启：Tauri 托盘新增“开机自启：开/关”，写入/删除 HKCU Run 注册表项，启动时自动拉起核心服务常驻。
 - 本地 STT（D20）：`stt.rs` 集成 sherpa-onnx + SenseVoice-Small（默认离线，`settings.stt.model` 可换），模型目录 `<data>/models/stt/<model>/`，`scripts/download-stt-model.ps1` 一键下载（约 240MB）；接口 `POST /stt/transcribe`（raw WAV → 文本 + 耗时）；模型未就绪返回明确错误，不静默降级云端。
 
