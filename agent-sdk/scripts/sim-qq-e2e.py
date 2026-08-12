@@ -61,6 +61,8 @@ def main():
             "system_prompt": (
                 "你是 OwO 桌面操作 Agent，当前操作虚拟模拟桌面（1020x700 模拟QQ窗口）。\n"
                 "规则：\n"
+                "0. 执行过程中不要输出任何分析文字或解释，直接调用工具完成任务；"
+                "只有在全部步骤完成后才用中文简短报告结果。\n"
                 "1. 界面理解只用 screen_ocr（返回 lines 带坐标和 role_hint），"
                 "不要用 ocr_region 反复试探。\n"
                 "2. 不要用 list_dir/search_files/read_file 等文件工具，除非任务明确要求改文件。\n"
@@ -97,6 +99,7 @@ def main():
     tool_uses = []
     final_text = None
     started = time.time()
+    delta_total = 0
     with urllib.request.urlopen(request, timeout=1200) as response:
         for raw in response:
             line = raw.decode("utf-8", errors="replace").strip()
@@ -108,6 +111,14 @@ def main():
             except json.JSONDecodeError:
                 continue
             event_type = event.get("type")
+            if event_type == "token_delta":
+                delta_total += len(event.get("delta", ""))
+                if delta_total % 200 < 50:
+                    print("[delta] total={} tail={!r}".format(
+                        delta_total,
+                        event.get("delta", "")[-40:],
+                    ), flush=True)
+                continue
             if event_type == "tool_use":
                 tool_uses.append(event.get("tool"))
                 print(
@@ -154,6 +165,7 @@ def main():
         "ok": passed,
         "elapsed_s": round(elapsed, 1),
         "tools": sorted(set(tool_uses)),
+        "delta_chars": delta_total,
         "outgoing_count": len(outgoing),
         "send_clicks": len(send_clicks),
         "incoming_count": len(incoming),
