@@ -12,6 +12,7 @@ import socket
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 
 def post_json(endpoint, path, payload=None):
@@ -104,10 +105,16 @@ def main() -> int:
         os.remove(log_path)
 
     results = []
+    executor = ThreadPoolExecutor(max_workers=1)
     for i in range(1, rounds + 1):
         started = time.time()
         try:
-            ok, final_text = run_one(endpoint, workspace, target, prompt, timeout_s, log_path)
+            future = executor.submit(run_one, endpoint, workspace, target, prompt, timeout_s, log_path)
+            try:
+                ok, final_text = future.result(timeout=timeout_s + 15)
+            except FutureTimeout:
+                ok, final_text = False, None
+                print(f"round {i}/{rounds}: TIMEOUT（硬看门狗）", flush=True)
             elapsed = round(time.time() - started, 1)
             results.append({"round": i, "ok": ok, "elapsed_s": elapsed, "final_text": final_text or ""})
             print(f"round {i}/{rounds}: {'PASS' if ok else 'FAIL'} ({elapsed}s)", flush=True)
@@ -115,6 +122,7 @@ def main() -> int:
             elapsed = round(time.time() - started, 1)
             results.append({"round": i, "ok": False, "elapsed_s": elapsed, "error": str(error)})
             print(f"round {i}/{rounds}: ERROR {error}", flush=True)
+    executor.shutdown(wait=False)
 
     passed = sum(1 for r in results if r["ok"])
     report = {
