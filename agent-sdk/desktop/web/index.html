@@ -107,6 +107,9 @@
     </div>
     <div id="messages"></div>
     <form id="chatForm">
+      <div id="attachmentChips" class="inline"></div>
+      <input type="file" id="attachmentInput" multiple hidden>
+      <button type="button" id="attachmentBtn" title="添加附件（图片/文件）">📎</button>
       <textarea id="prompt" rows="3" placeholder="输入任务，Enter 发送（Shift+Enter 换行）；/new 建新会话"></textarea>
       <button type="button" id="micBtn" title="语音输入（系统语音服务）">🎤</button>
       <button type="submit" class="primary">发送</button>

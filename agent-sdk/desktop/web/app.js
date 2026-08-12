@@ -5,6 +5,7 @@ const state = {
   sessionId: null,
   pendingApproval: null,
   reading: false,
+  attachments: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -572,6 +573,8 @@ async function refreshSessions(selectId) {
 
 async function selectSession(id) {
   state.sessionId = id;
+  state.attachments = [];
+  renderAttachmentChips();
   try {
     const detail = await api(`/session/${id}`);
     $("messages").innerHTML = "";
@@ -623,6 +626,10 @@ async function sendPrompt() {
   if (!prompt) return;
   $("prompt").value = "";
   addMessage("user", prompt);
+  const attachments = state.attachments.map((attachment) => attachment.id);
+  if (attachments.length) {
+    addMessage("system", `附带 ${attachments.length} 个附件`);
+  }
   const streaming = addMessage("assistant", "");
 
   state.reading = true;
@@ -630,7 +637,7 @@ async function sendPrompt() {
     const response = await fetch(`${API_BASE}/session/${state.sessionId}/turn`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, attachments }),
     });
     if (!response.ok || !response.body) {
       throw new Error(await response.text());
@@ -683,6 +690,8 @@ async function sendPrompt() {
     }
     if (!finished && !assistantText) streaming.remove();
     hideApproval();
+    state.attachments = [];
+    renderAttachmentChips();
     await refreshSessions(state.sessionId);
     await refreshDiff(state.sessionId);
   } catch (error) {
@@ -690,6 +699,56 @@ async function sendPrompt() {
   } finally {
     state.reading = false;
   }
+}
+
+function renderAttachmentChips() {
+  const container = $("attachmentChips");
+  container.innerHTML = "";
+  for (const attachment of state.attachments) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = `${attachment.name} ×`;
+    chip.title = attachment.mime || "attachment";
+    chip.addEventListener("click", () => {
+      state.attachments = state.attachments.filter(
+        (item) => item.id !== attachment.id
+      );
+      renderAttachmentChips();
+    });
+    container.appendChild(chip);
+  }
+}
+
+async function uploadAttachments(files) {
+  if (!state.sessionId) {
+    addMessage("system", "请先新建或选择一个会话，再添加附件");
+    return;
+  }
+  for (const file of files) {
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      const comma = String(dataUrl).indexOf(",");
+      const dataB64 = comma >= 0 ? String(dataUrl).slice(comma + 1) : String(dataUrl);
+      const uploaded = await api(`/session/${state.sessionId}/attachments`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: file.name,
+          mime: file.type || "application/octet-stream",
+          data_b64: dataB64,
+        }),
+      });
+      state.attachments.push({ id: uploaded.id, name: uploaded.name, mime: uploaded.mime });
+      renderAttachmentChips();
+    } catch (error) {
+      addMessage("system", `附件上传失败 ${file.name}：${error.message || error}`);
+    }
+  }
+  $("attachmentInput").value = "";
 }
 
 // ---------- 审批条 ----------
@@ -849,6 +908,8 @@ async function refreshWhitelist() {
 
 $("newSession").addEventListener("click", newSession);
 $("showArchived").addEventListener("change", () => refreshSessions(state.sessionId));
+$("attachmentBtn").addEventListener("click", () => $("attachmentInput").click());
+$("attachmentInput").addEventListener("change", () => uploadAttachments($("attachmentInput").files));
 $("chatForm").addEventListener("submit", (event) => {
   event.preventDefault();
   sendPrompt();

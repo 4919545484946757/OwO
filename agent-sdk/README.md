@@ -40,6 +40,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 会话管理（P1）：会话新增 `title` / `archived` / `pinned`（SQLite 自动迁移），`GET /session/{id}` 返回历史消息支持断点恢复，`POST /session/{id}/rename|archive|pin` 修改元数据，列表按置顶 + 更新时间排序、归档默认隐藏；Web 工作台“任务”区为会话树（子会话缩进展示），每个会话可继续/重命名/置顶/归档/fork/回退/重做。
 - 审计落库与日志（P1）：`SessionStore` 提供 `append_audit` / `recent_audit`（SQLite 落库，条目自带 session_id）；服务端回合结束后与设置/学习等操作的内存审计统一 flush 到 SQLite；`GET /audit?limit=N` 返回最近审计；Web 工作台右侧“审计日志”面板 5s 刷新。
 - 技能中心（P1）：技能启用/禁用（运行时共享禁用集合，切换即时生效并持久化到 `settings.json`；系统提示注入与 `use_skill` 均只放行启用技能）；`GET /skills/{name}` 查看、`POST /skills/{name}` 编辑 SKILL.md；`GET /learn/packages/{name}` 流程技能包详情、`DELETE /learn/packages/{name}` 删除（写审计）；Web 技能中心含启用/禁用、查看、编辑、导出、删除按钮。
+- 对话附件（P1）：`POST /session/{id}/attachments` 上传（base64 JSON、文件名清洗防穿越、50MB 上限、保存到工作区 `.owo-attachments/<会话>/`），`GET /session/{id}/attachments` 列表；`TurnRequest.attachments` 发送时自动注入附件路径上下文（Agent 可用内置文件工具读取）；Web 📎 多选上传 + 附件 chips（可移除）。
 - 桌面自启：Tauri 托盘新增“开机自启：开/关”，写入/删除 HKCU Run 注册表项，启动时自动拉起核心服务常驻。
 - 本地 STT（D20）：`stt.rs` 集成 sherpa-onnx + SenseVoice-Small（默认离线，`settings.stt.model` 可换），模型目录 `<data>/models/stt/<model>/`，`scripts/download-stt-model.ps1` 一键下载（约 240MB）；接口 `POST /stt/transcribe`（raw WAV → 文本 + 耗时）；模型未就绪返回明确错误，不静默降级云端。
 

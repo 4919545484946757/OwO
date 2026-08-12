@@ -35,6 +35,9 @@ pub struct SessionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnRequest {
     pub prompt: String,
+    /// 附件 ID（由 `POST /session/{id}/attachments` 返回；发送时注入路径上下文）。
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

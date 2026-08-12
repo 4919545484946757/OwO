@@ -29,7 +29,7 @@ use owo_agent_protocol::{
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -100,6 +100,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session", post(create_session))
         .route("/session/{id}", get(get_session))
         .route("/session/{id}/turn", post(turn))
+        .route("/session/{id}/attachments", get(attachments_list))
+        .route("/session/{id}/attachments", post(attachment_upload))
         .route(
             "/session/{id}/permission/{request_id}",
             post(respond_permission),
@@ -196,6 +198,7 @@ async fn openapi_spec() -> Json<Value> {
                 "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TurnRequest" } } } },
                 "responses": { "200": { "description": "SSE event stream" } }
             } },
+            "/session/{id}/attachments": { "get": { "operationId": "attachmentsList", "parameters": [path_param("id")], "responses": { "200": { "description": "attachment list" } } }, "post": { "operationId": "attachmentUpload", "parameters": [path_param("id")], "responses": { "200": { "description": "uploaded attachment" } } } },
             "/session/{id}/abort": { "post": { "operationId": "abortTurn", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
             "/session/{id}/permission/{request_id}": { "post": { "operationId": "respondPermission", "parameters": [path_param("id"), path_param("request_id")], "responses": { "200": { "description": "ok" } } } },
             "/session/{id}/diff": { "get": { "operationId": "sessionDiff", "parameters": [path_param("id")], "responses": { "200": { "description": "diff list" } } } },
@@ -273,7 +276,10 @@ async fn openapi_spec() -> Json<Value> {
                 },
                 "TurnRequest": {
                     "type": "object",
-                    "properties": { "prompt": { "type": "string" } },
+                    "properties": {
+                        "prompt": { "type": "string" },
+                        "attachments": { "type": "array", "items": { "type": "string" } }
+                    },
                     "required": ["prompt"]
                 },
                 "EvalRunRequest": {
@@ -574,6 +580,30 @@ async fn turn(
     Json(request): Json<TurnRequest>,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, String)> {
     let session = load_session(&state, &id)?;
+    let mut effective_prompt = request.prompt.clone();
+    if !request.attachments.is_empty() {
+        let dir = attachment_dir(&state, &id);
+        let mut lines = Vec::new();
+        for attachment in &request.attachments {
+            let safe = Path::new(attachment)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(attachment);
+            let path = dir.join(safe);
+            if !path.is_file() {
+                return Err((StatusCode::BAD_REQUEST, format!("附件不存在：{safe}")));
+            }
+            let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            lines.push(format!(
+                "- {}（{} 字节，路径 {}）",
+                safe,
+                size,
+                path.display()
+            ));
+        }
+        effective_prompt.push_str("\n\n附件：\n");
+        effective_prompt.push_str(&lines.join("\n"));
+    }
 
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
     let approver = ChannelApprover {
@@ -602,7 +632,7 @@ async fn turn(
         match agent
             .run_turn(
                 &mut current,
-                &request.prompt,
+                &effective_prompt,
                 &approver,
                 &abort_flag,
                 &mut on_event,
@@ -631,6 +661,103 @@ async fn turn(
     });
 
     Ok(Sse::new(ReceiverStream::new(rx)))
+}
+
+fn attachment_dir(state: &AppState, session_id: &str) -> std::path::PathBuf {
+    state.workspace.join(".owo-attachments").join(session_id)
+}
+
+fn sanitize_attachment_name(name: &str) -> Option<String> {
+    let file_name = Path::new(name).file_name()?.to_str()?;
+    let cleaned: String = file_name
+        .chars()
+        .filter(|character| {
+            !matches!(
+                character,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            )
+        })
+        .collect();
+    let trimmed = cleaned.trim().to_string();
+    if trimmed.is_empty() || trimmed.len() > 200 {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AttachmentUploadRequest {
+    name: String,
+    #[serde(default)]
+    mime: Option<String>,
+    data_b64: String,
+}
+
+async fn attachment_upload(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<AttachmentUploadRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    load_session(&state, &id)?;
+    let safe_name = sanitize_attachment_name(&request.name)
+        .ok_or((StatusCode::BAD_REQUEST, "附件名非法".to_string()))?;
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&request.data_b64)
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("附件 base64 解码失败：{error}"),
+            )
+        })?;
+    if bytes.len() > 50 * 1024 * 1024 {
+        return Err((StatusCode::BAD_REQUEST, "附件超过 50MB 上限".to_string()));
+    }
+    let dir = attachment_dir(&state, &id);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let path = dir.join(&safe_name);
+    std::fs::write(&path, &bytes)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            &id,
+            "attachment",
+            Some(safe_name.clone()),
+            Some(true),
+            format!("上传附件 {}（{} 字节）", safe_name, bytes.len()),
+        );
+    }
+    Ok(Json(json!({
+        "id": safe_name,
+        "name": request.name,
+        "mime": request.mime,
+        "size": bytes.len(),
+        "path": path.to_string_lossy(),
+    })))
+}
+
+async fn attachments_list(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+    load_session(&state, &id)?;
+    let dir = attachment_dir(&state, &id);
+    let mut attachments = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            attachments.push(json!({ "id": name, "name": name, "size": size }));
+        }
+    }
+    attachments.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    Ok(Json(attachments))
 }
 
 async fn respond_permission(
@@ -1480,6 +1607,34 @@ async fn automations_clear_reminders(
         .clear_reminders()
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_attachment_name;
+
+    #[test]
+    fn sanitizes_attachment_names() {
+        assert_eq!(
+            sanitize_attachment_name("report.pdf").as_deref(),
+            Some("report.pdf")
+        );
+        assert_eq!(
+            sanitize_attachment_name("a/b/c.txt").as_deref(),
+            Some("c.txt")
+        );
+        assert_eq!(
+            sanitize_attachment_name("..\\evil.txt").as_deref(),
+            Some("evil.txt")
+        );
+        assert_eq!(
+            sanitize_attachment_name("a:b*c?.txt").as_deref(),
+            Some("bc.txt")
+        );
+        assert!(sanitize_attachment_name("").is_none());
+        assert!(sanitize_attachment_name("   ").is_none());
+        assert!(sanitize_attachment_name("x".repeat(201).as_str()).is_none());
+    }
 }
 
 /// 自动化常驻循环：每秒检查到期任务，触发提醒并写审计。
