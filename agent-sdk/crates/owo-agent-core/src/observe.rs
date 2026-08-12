@@ -1,0 +1,255 @@
+//! 静默观察与情景记忆（v0.4.5，设计文档 M-D 起步）。
+//!
+//! Observer 后台轮询应用状态流（模拟面取模拟窗口日志，真实面后续接 UIA/窗口快照），
+//! 把动作摘要（内容掩码）与结果写入本地情景记忆（JSONL，可换成 SQLite）。
+//! `map_sim_events_to_actions` 把观察到的动作序列映射为录制样本，
+//! 供 `/memory/mine-skill` 聚合 → 泛化 → 沉淀流程技能包（候选 → 用户确认 → active）。
+
+use crate::learn::RecordedAction;
+use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Observation {
+    pub ts: String,
+    pub app_id: String,
+    pub kind: String,
+    pub summary: String,
+    pub detail: serde_json::Value,
+    pub state_hash: u64,
+}
+
+/// 本地情景记忆：JSONL 追加写，进程内缓存列表。
+pub struct MemoryStore {
+    path: PathBuf,
+    entries: Vec<Observation>,
+}
+
+impl MemoryStore {
+    pub fn new(path: PathBuf) -> Self {
+        let entries = Self::load(&path);
+        Self { path, entries }
+    }
+
+    fn load(path: &std::path::Path) -> Vec<Observation> {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        content
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Observation>(line).ok())
+            .collect()
+    }
+
+    pub fn append(&mut self, observation: Observation) -> Result<(), String> {
+        use std::io::Write;
+        self.entries.push(observation.clone());
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|e| format!("打开情景记忆失败：{e}"))?;
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&observation).map_err(|e| e.to_string())?
+        )
+        .map_err(|e| format!("写入情景记忆失败：{e}"))?;
+        Ok(())
+    }
+
+    pub fn list(&self, limit: usize) -> Vec<Observation> {
+        if limit == 0 {
+            self.entries.clone()
+        } else {
+            self.entries
+                .iter()
+                .rev()
+                .take(limit)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        }
+    }
+
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn clear(&mut self) -> Result<(), String> {
+        self.entries.clear();
+        std::fs::write(&self.path, "").map_err(|e| format!("清空情景记忆失败：{e}"))
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+/// 把模拟窗口日志条目转换为观察记录（只保留动作摘要，不记录消息正文）。
+pub fn observation_from_sim_event(entry: &serde_json::Value) -> Option<Observation> {
+    let kind = entry.get("type").and_then(serde_json::Value::as_str)?;
+    if !matches!(
+        kind,
+        "incoming" | "outgoing" | "typed" | "send_clicked" | "input_clicked" | "contact_switched"
+    ) {
+        return None;
+    }
+    let summary = match kind {
+        "typed" => "键盘输入（内容掩码）".to_string(),
+        "send_clicked" => "点击发送".to_string(),
+        "input_clicked" => "聚焦输入框".to_string(),
+        "contact_switched" => format!(
+            "切换联系人：{}",
+            entry
+                .get("contact")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?")
+        ),
+        "outgoing" => "发出消息（内容掩码）".to_string(),
+        "incoming" => "收到消息（内容掩码）".to_string(),
+        _ => kind.to_string(),
+    };
+    Some(Observation {
+        ts: entry
+            .get("ts")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        app_id: "qq".to_string(),
+        kind: "sim_event".to_string(),
+        summary,
+        detail: entry.clone(),
+        state_hash: value_hash(entry),
+    })
+}
+
+pub fn value_hash(value: &serde_json::Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// 把观察记录中的模拟动作映射为学习样本（内容掩码：不保存消息正文）。
+pub fn map_sim_events_to_actions(observations: &[Observation]) -> Vec<RecordedAction> {
+    let mut actions = Vec::new();
+    for observation in observations {
+        if observation.kind != "sim_event" {
+            continue;
+        }
+        let Some(kind) = observation
+            .detail
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let (action_type, name, role) = match kind {
+            "input_clicked" => (crate::learn::ActionType::Click, "输入消息", "edit"),
+            "typed" => (crate::learn::ActionType::Type, "输入消息", "edit"),
+            "send_clicked" => (crate::learn::ActionType::Click, "发送", "button"),
+            "contact_switched" => {
+                let contact = observation
+                    .detail
+                    .get("contact")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("联系人");
+                actions.push(RecordedAction {
+                    app_id: "qq".to_string(),
+                    anchor: crate::learn::SemanticAnchor {
+                        app_id: Some("qq".to_string()),
+                        role: Some("list".to_string()),
+                        name: contact.to_string(),
+                        parent: None,
+                    },
+                    action_type: crate::learn::ActionType::Click,
+                    value_masked: true,
+                    sensitive: false,
+                    at: observation.ts.clone(),
+                });
+                continue;
+            }
+            _ => continue,
+        };
+        actions.push(RecordedAction {
+            app_id: "qq".to_string(),
+            anchor: crate::learn::SemanticAnchor {
+                app_id: Some("qq".to_string()),
+                role: Some(role.to_string()),
+                name: name.to_string(),
+                parent: None,
+            },
+            action_type,
+            value_masked: true,
+            sensitive: false,
+            at: observation.ts.clone(),
+        });
+    }
+    actions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn temp_store() -> (MemoryStore, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("owo-memory-test-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        (MemoryStore::new(path.clone()), path)
+    }
+
+    #[test]
+    fn memory_store_round_trip_and_clear() {
+        let (mut store, path) = temp_store();
+        let observation = Observation {
+            ts: "2026-08-12T00:00:00Z".to_string(),
+            app_id: "qq".to_string(),
+            kind: "sim_event".to_string(),
+            summary: "点击发送".to_string(),
+            detail: json!({ "type": "send_clicked", "x": 900, "y": 645 }),
+            state_hash: 42,
+        };
+        store.append(observation.clone()).expect("追加成功");
+        let loaded = MemoryStore::new(path.clone());
+        assert_eq!(loaded.count(), 1);
+        assert_eq!(loaded.list(1)[0].summary, "点击发送");
+        let mut store = loaded;
+        store.clear().expect("清空成功");
+        assert_eq!(store.count(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn observation_from_sim_event_filters_and_masks() {
+        let typed = json!({ "type": "typed", "chars": 5 });
+        let observation = observation_from_sim_event(&typed).expect("typed 应被观察");
+        assert_eq!(observation.summary, "键盘输入（内容掩码）");
+        assert!(observation_from_sim_event(&json!({ "type": "ready" })).is_none());
+    }
+
+    #[test]
+    fn map_sim_events_to_actions_produces_click_type_sequence() {
+        let events = [
+            json!({ "type": "input_clicked", "x": 500, "y": 640 }),
+            json!({ "type": "typed", "chars": 6 }),
+            json!({ "type": "send_clicked", "x": 900, "y": 645 }),
+            json!({ "type": "contact_switched", "contact": "李四" }),
+        ];
+        let observations: Vec<Observation> = events
+            .iter()
+            .filter_map(observation_from_sim_event)
+            .collect();
+        let actions = map_sim_events_to_actions(&observations);
+        assert_eq!(actions.len(), 4);
+        assert_eq!(actions[0].action_type, crate::learn::ActionType::Click);
+        assert_eq!(actions[1].action_type, crate::learn::ActionType::Type);
+        assert!(actions[1].value_masked);
+        assert_eq!(actions[3].anchor.name, "李四");
+    }
+}

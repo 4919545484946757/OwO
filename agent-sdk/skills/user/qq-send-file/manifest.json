@@ -1,0 +1,10 @@
+{
+  "id": "com.owo.learned.qq-send-file",
+  "name": "qq-send-file",
+  "version": "1.0.0",
+  "min_app_version": "0.4.0",
+  "target_apps": ["qq"],
+  "permissions": ["ui:operate", "text:inject"],
+  "variables": ["contact", "file"],
+  "sensitivity": "medium"
+}

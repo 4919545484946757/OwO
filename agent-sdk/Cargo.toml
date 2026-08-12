@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/owo-agent-protocol",
+    "crates/owo-agent-core",
+    "crates/owo-agent-server",
+    "crates/owo-agent-cli",
+    "crates/owo-sim",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+authors = ["OwO Agent SDK Team"]
+repository = ""
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "default-tls", "stream"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+axum = "0.8"
+tokio-stream = { version = "0.1", features = ["sync"] }
+owo-agent-protocol = { path = "crates/owo-agent-protocol" }
+owo-agent-core = { path = "crates/owo-agent-core" }
+owo-agent-server = { path = "crates/owo-agent-server" }

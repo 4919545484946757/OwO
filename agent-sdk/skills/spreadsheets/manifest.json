@@ -1,0 +1,9 @@
+{
+  "id": "com.owo.skills.spreadsheets",
+  "name": "spreadsheets",
+  "version": "1.0.0",
+  "description": "生成/分析/验证 xlsx/csv 表格",
+  "permissions": ["files:read", "files:write"],
+  "min_app_version": "0.4.0",
+  "tools": ["read_file", "write_file", "run_command"]
+}

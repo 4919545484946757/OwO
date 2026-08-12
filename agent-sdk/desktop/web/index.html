@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OwO Agent 工作台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>OwO Agent 工作台 <span class="tag">v0.4 P1</span></h1>
+    <div class="header-right">
+      <span id="health" class="pill">连接中…</span>
+      <span id="permission" class="pill">感知：—</span>
+      <span id="learnState" class="pill">学习：—</span>
+    </div>
+  </header>
+
+  <aside id="sidebar">
+    <section>
+      <h2>工作区</h2>
+      <input id="workspace" value="D:\大创\智能输入法\OwO-master\agent-sdk" placeholder="工作区绝对路径">
+    </section>
+    <section>
+      <h2>任务</h2>
+      <button id="newSession" class="primary">＋ 新建会话</button>
+      <label class="inline"><input type="checkbox" id="showArchived"> 显示归档</label>
+      <ul id="sessionList" class="list"></ul>
+    </section>
+    <section>
+      <h2>技能中心</h2>
+      <ul id="skillList" class="list"></ul>
+      <details><summary>技能 SKILL.md</summary><pre id="skillDetail">—</pre></details>
+    </section>
+    <section>
+      <h2>操作学习</h2>
+      <div class="inline">
+        <button id="learnStart">开始</button>
+        <button id="learnPause">暂停</button>
+        <button id="learnResume">恢复</button>
+        <button id="learnStop">结束</button>
+      </div>
+      <button id="learnClear" style="margin-top:6px">清空样本</button>
+      <form id="sinkForm" class="stack">
+        <input id="sinkName" placeholder="技能名（如 send-file）" required>
+        <input id="sinkApps" placeholder="目标应用，逗号分隔（如 qq）" required>
+        <select id="sinkSensitivity">
+          <option value="low">低敏感</option>
+          <option value="medium">中敏感</option>
+          <option value="high">高敏感</option>
+        </select>
+        <input id="sinkDesc" placeholder="描述">
+        <button type="submit">沉淀为技能包</button>
+      </form>
+      <div class="inline" style="margin-top:6px">
+        <input type="file" id="skillImport" accept=".owskill,application/zip">
+        <button type="button" id="skillImportBtn">导入 .owskill</button>
+      </div>
+      <ul id="packageList" class="list"></ul>
+      <details><summary>流程技能包详情</summary><pre id="packageDetail">—</pre></details>
+    </section>
+    <section>
+      <h2>自动化</h2>
+      <form id="automationForm" class="stack">
+        <input id="autoName" placeholder="任务名（如 每小时提醒）" required>
+        <select id="autoKind">
+          <option value="interval">间隔（秒）</option>
+          <option value="daily">每天（HH:MM）</option>
+          <option value="oneshot">单次（RFC3339）</option>
+        </select>
+        <input id="autoValue" placeholder="60 / 09:00 / 2026-08-12T12:00:00Z" required>
+        <input id="autoReminder" placeholder="提醒内容" required>
+        <button type="submit">创建任务</button>
+      </form>
+      <ul id="automationList" class="list"></ul>
+      <div class="inline" style="margin-top:6px">
+        <button id="clearReminders">清除提醒</button>
+      </div>
+      <ul id="reminderList" class="list"></ul>
+    </section>
+    <section>
+      <h2>应用白名单</h2>
+      <ul id="whitelistList" class="list"></ul>
+      <form id="whitelistForm" class="inline">
+        <input id="wlAppId" placeholder="app_id" required>
+        <button type="submit">添加 P0</button>
+      </form>
+    </section>
+    <section>
+      <h2>设置与诊断</h2>
+      <div class="inline">
+        <span>云端模型（数据出境）</span>
+        <button id="egressToggle">…</button>
+      </div>
+      <pre id="settingsPreview">—</pre>
+      <textarea id="settingsEditor" rows="10" spellcheck="false" placeholder='{"model": "...", "stt": {...}, ...}'></textarea>
+      <button id="settingsSave">保存设置（JSON）</button>
+      <a href="openapi.json" target="_blank" rel="noopener">OpenAPI 3.1</a>
+    </section>
+  </aside>
+
+  <main>
+    <div id="approvalBar" class="hidden">
+      <span id="approvalText"></span>
+      <button id="approveBtn" class="allow">允许</button>
+      <button id="denyBtn" class="deny">拒绝</button>
+    </div>
+    <div id="messages"></div>
+    <form id="chatForm">
+      <div id="attachmentChips" class="inline"></div>
+      <input type="file" id="attachmentInput" multiple hidden>
+      <button type="button" id="attachmentBtn" title="添加附件（图片/文件）">📎</button>
+      <textarea id="prompt" rows="3" placeholder="输入任务，Enter 发送（Shift+Enter 换行）；/new 建新会话"></textarea>
+      <button type="button" id="micBtn" title="语音输入（系统语音服务）">🎤</button>
+      <button type="submit" class="primary">发送</button>
+    </form>
+  </main>
+
+  <aside id="right">
+    <section>
+      <h2>情景感知</h2>
+      <pre id="snapshot">—</pre>
+    </section>
+    <section>
+      <h2>主动建议</h2>
+      <ul id="suggestionList" class="list"></ul>
+    </section>
+    <section>
+      <h2>审计日志</h2>
+      <ul id="auditList" class="list"></ul>
+    </section>
+    <section>
+      <h2>diff 审阅</h2>
+      <ul id="diffList" class="list"></ul>
+      <button id="revertBtn">回滚全部改动</button>
+    </section>
+  </aside>
+
+  <script>
+    // Tauri 壳内加载时指向常驻核心服务；经核心服务同源托管时保持同源。
+    window.OWO_API_BASE = window.OWO_API_BASE || (window.__TAURI_INTERNALS__ ? "http://127.0.0.1:4096" : "");
+  </script>
+  <script src="app.js"></script>
+</body>
+</html>

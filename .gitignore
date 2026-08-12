@@ -1,6 +1,9 @@
 /build/
 /out/
 /artifacts/
+target/
+/agent-sdk/dist/
+/.owo-agent/
 /.vs/
 /.vscode/
 CMakeUserPresets.json
