@@ -68,9 +68,119 @@ async function refreshPerception() {
 async function refreshLearn() {
   try {
     const status = await api("/learn/status");
-    $("learnState").textContent = `学习：${status.state}`;
+    $("learnState").textContent = `学习：${status.state}（${status.samples}）`;
   } catch (_) {
     $("learnState").textContent = "学习：—";
+  }
+}
+
+async function learnControl(action) {
+  try {
+    await api(`/learn/${action}`, { method: "POST" });
+    await refreshLearn();
+  } catch (error) {
+    addMessage("error", `学习控制失败：${error.message}`);
+  }
+}
+
+async function sinkSkill() {
+  const name = $("sinkName").value.trim();
+  const apps = $("sinkApps").value.split(",").map((item) => item.trim()).filter(Boolean);
+  const sensitivity = $("sinkSensitivity").value;
+  const description = $("sinkDesc").value.trim();
+  if (!name || !apps.length) return;
+  try {
+    const result = await api("/learn/sink", {
+      method: "POST",
+      body: JSON.stringify({ name, target_apps: apps, sensitivity, description }),
+    });
+    $("sinkName").value = "";
+    $("sinkDesc").value = "";
+    addMessage("system", `已沉淀技能包 ${result.name}（变量：${result.variables.join(", ") || "无"}）`);
+    await refreshPackages();
+  } catch (error) {
+    addMessage("error", `沉淀失败：${error.message}`);
+  }
+}
+
+async function refreshPackages() {
+  try {
+    const packages = await api("/learn/packages");
+    const list = $("packageList");
+    list.innerHTML = "";
+    for (const package of packages) {
+      const li = document.createElement("li");
+      li.innerHTML = `<strong>${esc(package.name)}</strong><span class="sub">目标：${esc(package.target_apps.join(","))} ｜ 变量：${esc(package.variables.join(",")) || "无"}</span>`;
+      li.addEventListener("click", () => executePackage(package));
+      list.appendChild(li);
+    }
+    if (!packages.length) list.innerHTML = '<li class="sub">暂无流程技能包（先录制再沉淀）</li>';
+  } catch (_) {
+    $("packageList").innerHTML = '<li class="sub">加载失败</li>';
+  }
+}
+
+async function executePackage(package) {
+  let variables = {};
+  if (package.variables && package.variables.length) {
+    const raw = prompt(`为技能包填写变量（JSON，如 {"value":"小李"}）：`, "{}");
+    if (raw === null) return;
+    try {
+      variables = JSON.parse(raw);
+    } catch (_) {
+      addMessage("error", "变量 JSON 解析失败");
+      return;
+    }
+  }
+  try {
+    const report = await api("/learn/execute-package", {
+      method: "POST",
+      body: JSON.stringify({ name: package.name, variables }),
+    });
+    if (report.ok) {
+      addMessage("system", `技能包 ${package.name} 执行成功（${report.steps.length} 步）`);
+    } else {
+      addMessage("error", `技能包 ${package.name} 执行失败：${report.error || ""}`);
+    }
+    for (const step of report.steps) {
+      addMessage("tool", `${step.status.toUpperCase()} ${step.node_id}（${step.action}）：${step.detail || "ok"}`, "执行步骤");
+    }
+  } catch (error) {
+    addMessage("error", `执行失败：${error.message}`);
+  }
+}
+
+async function refreshSuggestions() {
+  try {
+    const suggestions = await api("/proactive/suggestions");
+    const list = $("suggestionList");
+    list.innerHTML = "";
+    for (const suggestion of suggestions) {
+      const li = document.createElement("li");
+      li.innerHTML = `<strong>${esc(suggestion.app_id)}</strong><span class="sub">${esc(suggestion.summary)}</span><span class="sub">${esc(suggestion.sequence.join(" → "))}</span>`;
+      const actions = ["learn", "execute", "ignore", "mute"];
+      const labels = { learn: "学习", execute: "执行一次", ignore: "忽略", mute: "静默" };
+      for (const action of actions) {
+        const button = document.createElement("button");
+        button.textContent = labels[action];
+        button.addEventListener("click", async () => {
+          try {
+            await api("/proactive/decide", {
+              method: "POST",
+              body: JSON.stringify({ suggestion_id: suggestion.id, action }),
+            });
+            await refreshSuggestions();
+          } catch (error) {
+            addMessage("error", `建议处理失败：${error.message}`);
+          }
+        });
+        li.appendChild(button);
+      }
+      list.appendChild(li);
+    }
+    if (!suggestions.length) list.innerHTML = '<li class="sub">暂无建议</li>';
+  } catch (_) {
+    $("suggestionList").innerHTML = '<li class="sub">加载失败</li>';
   }
 }
 
@@ -312,6 +422,15 @@ $("chatForm").addEventListener("submit", (event) => {
 $("approveBtn").addEventListener("click", () => respondApproval(true));
 $("denyBtn").addEventListener("click", () => respondApproval(false));
 $("revertBtn").addEventListener("click", revertAll);
+$("learnStart").addEventListener("click", () => learnControl("start"));
+$("learnPause").addEventListener("click", () => learnControl("pause"));
+$("learnResume").addEventListener("click", () => learnControl("resume"));
+$("learnStop").addEventListener("click", () => learnControl("stop"));
+$("learnClear").addEventListener("click", () => learnControl("clear"));
+$("sinkForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  sinkSkill();
+});
 $("whitelistForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const appId = $("wlAppId").value.trim();
@@ -345,9 +464,19 @@ $("prompt").addEventListener("keydown", (event) => {
 
 async function boot() {
   await refreshHealth();
-  await Promise.all([refreshSessions(), refreshSkills(), refreshWhitelist(), refreshPerception(), refreshLearn()]);
+  await Promise.all([
+    refreshSessions(),
+    refreshSkills(),
+    refreshPackages(),
+    refreshSuggestions(),
+    refreshWhitelist(),
+    refreshPerception(),
+    refreshLearn(),
+  ]);
   setInterval(refreshPerception, 3000);
   setInterval(refreshLearn, 5000);
+  setInterval(refreshPackages, 10000);
+  setInterval(refreshSuggestions, 10000);
   setInterval(refreshHealth, 15000);
 }
 

@@ -31,6 +31,28 @@
       <ul id="skillList" class="list"></ul>
     </section>
     <section>
+      <h2>操作学习</h2>
+      <div class="inline">
+        <button id="learnStart">开始</button>
+        <button id="learnPause">暂停</button>
+        <button id="learnResume">恢复</button>
+        <button id="learnStop">结束</button>
+      </div>
+      <button id="learnClear" style="margin-top:6px">清空样本</button>
+      <form id="sinkForm" class="stack">
+        <input id="sinkName" placeholder="技能名（如 send-file）" required>
+        <input id="sinkApps" placeholder="目标应用，逗号分隔（如 qq）" required>
+        <select id="sinkSensitivity">
+          <option value="low">低敏感</option>
+          <option value="medium">中敏感</option>
+          <option value="high">高敏感</option>
+        </select>
+        <input id="sinkDesc" placeholder="描述">
+        <button type="submit">沉淀为技能包</button>
+      </form>
+      <ul id="packageList" class="list"></ul>
+    </section>
+    <section>
       <h2>应用白名单</h2>
       <ul id="whitelistList" class="list"></ul>
       <form id="whitelistForm" class="inline">
@@ -57,6 +79,10 @@
     <section>
       <h2>情景感知</h2>
       <pre id="snapshot">—</pre>
+    </section>
+    <section>
+      <h2>主动建议</h2>
+      <ul id="suggestionList" class="list"></ul>
     </section>
     <section>
       <h2>diff 审阅</h2>

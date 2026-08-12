@@ -222,6 +222,7 @@ async fn run_bench(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
         agent,
         store,
         root.join("traces"),
+        root.join("skills").join("user"),
     ));
     let app = owo_agent_server::build_router(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -488,6 +489,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         agent,
         store,
         root.join("traces"),
+        root.join("skills").join("user"),
     ));
     let app = owo_agent_server::build_router(state);
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));

@@ -468,6 +468,7 @@ pub fn generalize_to_graph(samples: &[RecordedAction]) -> Result<ActionGraph, St
 pub struct LearnPipeline {
     pub recorder: LearnRecorder,
     pub store: FlowSkillStore,
+    last_samples: Vec<RecordedAction>,
 }
 
 impl LearnPipeline {
@@ -475,7 +476,15 @@ impl LearnPipeline {
         Self {
             recorder: LearnRecorder::new(),
             store: FlowSkillStore::new(store_root),
+            last_samples: Vec::new(),
         }
+    }
+
+    /// 结束录制并保留样本（供随后沉淀）。
+    pub fn stop_recording(&mut self) -> Vec<RecordedAction> {
+        let samples = self.recorder.stop();
+        self.last_samples = samples.clone();
+        samples
     }
 
     /// 结束录制并沉淀为流程技能包（SKILL.md + graph.json + manifest.json）。
@@ -486,7 +495,11 @@ impl LearnPipeline {
         sensitivity: Sensitivity,
         description: &str,
     ) -> Result<FlowSkillPackage, String> {
-        let samples = self.recorder.stop();
+        let samples = if self.last_samples.is_empty() {
+            self.recorder.stop()
+        } else {
+            std::mem::take(&mut self.last_samples)
+        };
         let graph = generalize_to_graph(&samples)?;
         let variables = graph.variables();
         let package = FlowSkillPackage {
@@ -993,6 +1006,7 @@ mod tests {
                 at: "t2".to_string(),
             })
             .unwrap();
+        pipeline.stop_recording();
         let package = pipeline
             .sink_skill(
                 "send-file",

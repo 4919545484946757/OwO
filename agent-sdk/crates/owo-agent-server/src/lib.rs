@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! OwO Agent SDK HTTP 服务（M1 + v0.4）：session/turn/permission/diff/revert/abort + SSE，
 //! 以及 v0.4 接口：context.snapshot / perception.subscribe / learn.* / skill.verify /
 //! proactive.suggest / whitelist.manage。
@@ -9,7 +11,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use owo_agent_core::learn::{
-    LearnRecorder, LearnState, ProactiveEngine, ProactiveSuggestion, RecordedAction,
+    LearnPipeline, LearnState, ProactiveEngine, ProactiveSuggestion, RecordedAction, Sensitivity,
     SuggestionAction,
 };
 use owo_agent_core::perception::{SituationSnapshot, SituationStore};
@@ -42,12 +44,17 @@ pub struct AppState {
     pub traces_dir: PathBuf,
     pub perception: Arc<Mutex<SituationStore>>,
     pub whitelist: Arc<Mutex<Whitelist>>,
-    pub learn: Arc<Mutex<LearnRecorder>>,
+    pub pipeline: Arc<Mutex<LearnPipeline>>,
     pub proactive: Arc<Mutex<ProactiveEngine>>,
 }
 
 impl AppState {
-    pub fn new(agent: Agent, store: impl SessionStore + 'static, traces_dir: PathBuf) -> Self {
+    pub fn new(
+        agent: Agent,
+        store: impl SessionStore + 'static,
+        traces_dir: PathBuf,
+        flow_skills_root: PathBuf,
+    ) -> Self {
         Self {
             agent: Arc::new(agent),
             store: Arc::new(store),
@@ -57,7 +64,7 @@ impl AppState {
             traces_dir,
             perception: Arc::new(Mutex::new(SituationStore::new())),
             whitelist: Arc::new(Mutex::new(Whitelist::default())),
-            learn: Arc::new(Mutex::new(LearnRecorder::new())),
+            pipeline: Arc::new(Mutex::new(LearnPipeline::new(flow_skills_root))),
             proactive: Arc::new(Mutex::new(ProactiveEngine::new(Default::default()))),
         }
     }
@@ -88,15 +95,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/perception/events", get(perception_events))
         .route("/perception/capture", post(perception_capture))
         .route("/perception/layers", post(perception_layers))
+        .route("/learn/start", post(learn_start))
         .route("/learn/record", post(learn_record))
         .route("/learn/pause", post(learn_pause))
         .route("/learn/resume", post(learn_resume))
+        .route("/learn/stop", post(learn_stop))
         .route("/learn/clear", post(learn_clear))
         .route("/learn/status", get(learn_status))
         .route("/learn/execute", post(learn_execute))
+        .route("/learn/packages", get(learn_packages))
+        .route("/learn/sink", post(learn_sink))
+        .route("/learn/execute-package", post(learn_execute_package))
         .route("/skill/verify", post(skill_verify))
         .route("/proactive/observe", post(proactive_observe))
         .route("/proactive/decide", post(proactive_decide))
+        .route("/proactive/suggestions", get(proactive_suggestions))
         .route("/whitelist", get(whitelist_list))
         .route("/whitelist/manage", post(whitelist_manage))
         .fallback_service(ServeDir::new(desktop_web_dir()))
@@ -148,13 +161,19 @@ async fn openapi_spec() -> Json<Value> {
             "/perception/capture": { "post": { "operationId": "perceptionCapture", "responses": { "200": { "description": "capture meta with OCR summary" } } } },
             "/perception/layers": { "post": { "operationId": "perceptionLayers", "responses": { "200": { "description": "layer authorization updated" } } } },
             "/learn/record": { "post": { "operationId": "learnRecord", "responses": { "200": { "description": "learn state" } } } },
+            "/learn/start": { "post": { "operationId": "learnStart", "responses": { "200": { "description": "learn state" } } } },
             "/learn/pause": { "post": { "operationId": "learnPause", "responses": { "200": { "description": "learn state" } } } },
             "/learn/resume": { "post": { "operationId": "learnResume", "responses": { "200": { "description": "learn state" } } } },
+            "/learn/stop": { "post": { "operationId": "learnStop", "responses": { "200": { "description": "stopped with sample count" } } } },
             "/learn/clear": { "post": { "operationId": "learnClear", "responses": { "200": { "description": "ok" } } } },
             "/learn/execute": { "post": { "operationId": "learnExecute", "responses": { "200": { "description": "execution report" } } } },
+            "/learn/packages": { "get": { "operationId": "learnPackages", "responses": { "200": { "description": "flow skill packages" } } } },
+            "/learn/sink": { "post": { "operationId": "learnSink", "responses": { "200": { "description": "sunk package" } } } },
+            "/learn/execute-package": { "post": { "operationId": "learnExecutePackage", "responses": { "200": { "description": "execution report" } } } },
             "/skill/verify": { "post": { "operationId": "skillVerify", "responses": { "200": { "description": "validation result" } } } },
             "/proactive/observe": { "post": { "operationId": "proactiveObserve", "responses": { "200": { "description": "optional suggestion" } } } },
             "/proactive/decide": { "post": { "operationId": "proactiveDecide", "responses": { "200": { "description": "ok" } } } },
+            "/proactive/suggestions": { "get": { "operationId": "proactiveSuggestions", "responses": { "200": { "description": "suggestion list" } } } },
             "/whitelist": { "get": { "operationId": "whitelistList", "responses": { "200": { "description": "whitelist entries" } } } },
             "/whitelist/manage": { "post": { "operationId": "whitelistManage", "responses": { "200": { "description": "whitelist entries" } } } }
         },
@@ -635,49 +654,69 @@ struct LearnRecordRequest {
     action: RecordedAction,
 }
 
+async fn learn_start(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LearnState>, (StatusCode, String)> {
+    let mut pipeline = state.pipeline.lock().map_err(poison)?;
+    pipeline.recorder.start();
+    Ok(Json(pipeline.recorder.state()))
+}
+
 async fn learn_record(
     State(state): State<Arc<AppState>>,
     Json(request): Json<LearnRecordRequest>,
 ) -> Result<Json<LearnState>, (StatusCode, String)> {
-    let mut learn = state.learn.lock().map_err(poison)?;
-    learn
+    let mut pipeline = state.pipeline.lock().map_err(poison)?;
+    pipeline
+        .recorder
         .record(request.action)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-    Ok(Json(learn.state()))
+    Ok(Json(pipeline.recorder.state()))
 }
 
 async fn learn_pause(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<LearnState>, (StatusCode, String)> {
-    let mut learn = state.learn.lock().map_err(poison)?;
-    learn.pause();
-    Ok(Json(learn.state()))
+    let mut pipeline = state.pipeline.lock().map_err(poison)?;
+    pipeline.recorder.pause();
+    Ok(Json(pipeline.recorder.state()))
 }
 
 async fn learn_resume(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<LearnState>, (StatusCode, String)> {
-    let mut learn = state.learn.lock().map_err(poison)?;
-    learn.resume();
-    Ok(Json(learn.state()))
+    let mut pipeline = state.pipeline.lock().map_err(poison)?;
+    pipeline.recorder.resume();
+    Ok(Json(pipeline.recorder.state()))
+}
+
+async fn learn_stop(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut pipeline = state.pipeline.lock().map_err(poison)?;
+    let samples = pipeline.stop_recording().len();
+    Ok(Json(json!({
+        "state": pipeline.recorder.state(),
+        "samples": samples,
+    })))
 }
 
 async fn learn_clear(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let mut learn = state.learn.lock().map_err(poison)?;
-    learn.clear();
+    let mut pipeline = state.pipeline.lock().map_err(poison)?;
+    pipeline.recorder.clear();
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn learn_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let learn = state.learn.lock().map_err(poison)?;
+    let pipeline = state.pipeline.lock().map_err(poison)?;
     Ok(Json(json!({
-        "state": learn.state(),
-        "samples": learn.samples(),
-        "sensitive_break": learn.sensitive_break(),
+        "state": pipeline.recorder.state(),
+        "samples": pipeline.recorder.samples(),
+        "sensitive_break": pipeline.recorder.sensitive_break(),
     })))
 }
 
@@ -707,6 +746,114 @@ async fn learn_execute(
         for step in &report.steps {
             audit.record(
                 "learn-execute",
+                "exec",
+                Some(step.node_id.clone()),
+                Some(step.status == "ok"),
+                step.detail.clone(),
+            );
+        }
+    }
+    Ok(Json(report))
+}
+
+fn parse_sensitivity(value: &str) -> Result<Sensitivity, String> {
+    match value {
+        "low" => Ok(Sensitivity::Low),
+        "medium" => Ok(Sensitivity::Medium),
+        "high" => Ok(Sensitivity::High),
+        "none" => Ok(Sensitivity::None),
+        other => Err(format!("未知敏感度：{other}（low/medium/high/none）")),
+    }
+}
+
+/// 流程技能包列表（用户学习产物）。
+async fn learn_packages(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
+    let pipeline = state.pipeline.lock().map_err(poison)?;
+    let mut packages = Vec::new();
+    for name in pipeline
+        .store
+        .list()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?
+    {
+        if let Ok(package) = pipeline.store.load(&name) {
+            packages.push(json!({
+                "name": package.manifest.name,
+                "target_apps": package.manifest.target_apps,
+                "variables": package.manifest.variables,
+                "sensitivity": package.manifest.sensitivity,
+                "version": package.manifest.version,
+            }));
+        }
+    }
+    Ok(Json(packages))
+}
+
+#[derive(serde::Deserialize)]
+struct SinkRequest {
+    name: String,
+    target_apps: Vec<String>,
+    sensitivity: String,
+    description: String,
+}
+
+/// 结束录制并沉淀为流程技能包。
+async fn learn_sink(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SinkRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let sensitivity = parse_sensitivity(&request.sensitivity)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let mut pipeline = state.pipeline.lock().map_err(poison)?;
+    let package = pipeline
+        .sink_skill(
+            &request.name,
+            request.target_apps,
+            sensitivity,
+            &request.description,
+        )
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    Ok(Json(json!({
+        "ok": true,
+        "name": package.manifest.name,
+        "variables": package.manifest.variables,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct ExecutePackageRequest {
+    name: String,
+    #[serde(default)]
+    variables: HashMap<String, String>,
+    #[serde(default)]
+    max_steps: Option<usize>,
+}
+
+/// 从流程技能包加载动作图并执行（首次执行需在 UI 确认，步审计入库）。
+async fn learn_execute_package(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ExecutePackageRequest>,
+) -> Result<Json<owo_agent_core::ExecReport>, (StatusCode, String)> {
+    let package = {
+        let pipeline = state.pipeline.lock().map_err(poison)?;
+        pipeline
+            .store
+            .load(&request.name)
+            .map_err(|error| (StatusCode::NOT_FOUND, error))?
+    };
+    let source = owo_agent_core::WindowsUiaSource::new()
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let report = owo_agent_core::execute_graph(
+        &source,
+        &package.graph,
+        &request.variables,
+        request.max_steps.unwrap_or(20),
+    );
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        for step in &report.steps {
+            audit.record(
+                "learn-execute-package",
                 "exec",
                 Some(step.node_id.clone()),
                 Some(step.status == "ok"),
@@ -763,6 +910,14 @@ async fn proactive_decide(
         .decide(&request.suggestion_id, request.action)
         .map_err(|error| (StatusCode::NOT_FOUND, error))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// 主动建议列表（桌面端“学习/执行一次/忽略/静默”四选）。
+async fn proactive_suggestions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ProactiveSuggestion>>, (StatusCode, String)> {
+    let proactive = state.proactive.lock().map_err(poison)?;
+    Ok(Json(proactive.suggestions().to_vec()))
 }
 
 async fn whitelist_list(
