@@ -1720,6 +1720,11 @@ async fn settings_update(
     settings
         .save(&state.workspace)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    if let Some(model) = &settings.model {
+        if !model.trim().is_empty() {
+            std::env::set_var("OPENAI_MODEL", model);
+        }
+    }
     std::env::set_var(
         "OWO_CLOUD_ENABLED",
         settings.egress.cloud_enabled.to_string(),
@@ -1748,7 +1753,7 @@ async fn settings_update(
     }
     Ok(Json(json!({
         "ok": true,
-        "note": "已写入 settings.json 并应用运行时设置",
+        "note": "已写入 settings.json 并应用运行时设置（模型对新回合即时生效）",
     })))
 }
 

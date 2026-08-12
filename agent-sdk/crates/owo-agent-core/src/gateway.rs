@@ -172,6 +172,14 @@ impl OpenAiCompatibleProvider {
             .unwrap_or(self.config.cloud_enabled)
     }
 
+    /// 当前模型：优先读运行时环境变量（支持设置页热切换），缺省用启动配置。
+    fn model(&self) -> String {
+        std::env::var("OPENAI_MODEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| self.config.model.clone())
+    }
+
     fn request_body(&self, messages: &[ChatMessage], tools: &[ToolSpec], stream: bool) -> Value {
         let tool_payload: Vec<Value> = tools
             .iter()
@@ -218,7 +226,7 @@ impl OpenAiCompatibleProvider {
             .collect();
 
         let mut body = json!({
-            "model": self.config.model,
+            "model": self.model(),
             "messages": messages_payload,
             "stream": stream,
         });
@@ -555,6 +563,29 @@ mod tests {
         std::env::set_var("OWO_CLOUD_ENABLED", "false");
         let error = provider.complete(&[], &[]).await.unwrap_err();
         assert!(error.contains("数据出境"));
+        std::env::remove_var("OWO_CLOUD_ENABLED");
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OPENAI_BASE_URL");
+        std::env::remove_var("OPENAI_MODEL");
+    }
+
+    #[tokio::test]
+    async fn model_switch_applies_without_reconstruction() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("OPENAI_API_KEY", "test");
+        std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9");
+        std::env::set_var("OPENAI_MODEL", "model-a");
+        std::env::remove_var("OWO_CLOUD_ENABLED");
+        let config = OpenAiCompatibleConfig::from_env().unwrap();
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+        let body = provider.request_body(&[], &[], false);
+        assert_eq!(body["model"], "model-a");
+        std::env::set_var("OPENAI_MODEL", "model-b");
+        let body = provider.request_body(&[], &[], false);
+        assert_eq!(body["model"], "model-b");
+        std::env::set_var("OPENAI_MODEL", "");
+        let body = provider.request_body(&[], &[], false);
+        assert_eq!(body["model"], "model-a");
         std::env::remove_var("OWO_CLOUD_ENABLED");
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("OPENAI_BASE_URL");
