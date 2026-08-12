@@ -81,6 +81,9 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 窗口模板（v0.4.10，M-A）：`/perception/template/build[-ocr]|detect[-ocr]` 从 UIA 树或 OCR 版面
   提取/检测“发送/输入框/搜索”等 ROI 并持久化；`capture_window_bmp_deep` 枚举子窗口择优抓帧。
   注意：锁屏时 Chromium 应用（QQ）不向窗口 DC 呈现底部输入区，完整窗口内容需交互桌面会话。
+- 真实桌面输入注意（v0.4.11）：沙箱/提权子进程没有交互输入桌面（SetCursorPos 0x800700CB），
+  真实 QQ 等应用的鼠标键盘注入需要用户在交互会话启动核心服务；`scripts/owo-session-probe.ps1`
+  可验证桌面可达性。
 
 ### STT WER/CER 评估
 

@@ -397,10 +397,14 @@ pub fn activate_window(process: &str, title: &str) -> Result<(), String> {
             AttachThreadInput(foreground_thread, target_thread, 1);
         }
         if foreground != hwnd {
-            // 经典解锁：发送一次 Alt 键事件，满足 Windows 前台锁的“最近用户输入”条件。
-            keybd_event(VK_MENU as u8, 0, KEYEVENTF_EXTENDEDKEY, 0);
-            keybd_event(VK_MENU as u8, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
-            SetForegroundWindow(hwnd);
+            let activated = SetForegroundWindow(hwnd) != 0;
+            if !activated {
+                // 经典解锁：仅在激活失败时发送 Alt 键，避免破坏输入队列。
+                keybd_event(VK_MENU as u8, 0, KEYEVENTF_EXTENDEDKEY, 0);
+                keybd_event(VK_MENU as u8, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                SetForegroundWindow(hwnd);
+            }
             BringWindowToTop(hwnd);
             SetWindowPos(
                 hwnd,

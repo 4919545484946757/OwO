@@ -39,11 +39,31 @@ def main():
     post("/desktop/activate", {"process": "qq", "title": "QQ"})
     time.sleep(0.6)
 
-    # 1) 搜索群
-    post("/desktop/shortcut", {"combo": "ctrl+f"})
-    time.sleep(0.8)
+    # 1) 点击搜索框（UIA 锚点，避免 Ctrl+F 后 SendInput 失效）
+    focus_search = {
+        "version": 1,
+        "start": "click_search",
+        "nodes": [
+            {
+                "id": "click_search",
+                "action_type": "click",
+                "anchor": {"name": "搜索"},
+                "value_template": None,
+                "verify": None,
+            }
+        ],
+        "edges": [],
+    }
+    post(
+        "/learn/execute",
+        {"graph": focus_search, "variables": {}, "confirm": True, "max_steps": 5},
+        timeout=120,
+    )
+    time.sleep(0.6)
+    post("/desktop/shortcut", {"combo": "ctrl+a"})
+    time.sleep(0.3)
     post("/desktop/type", {"text": args.group})
-    time.sleep(1.2)
+    time.sleep(1.5)
 
     # 2) 用 UIA 动作图点击包含群名的会话行（优先 InvokePattern，不依赖可见性）
     graph = {

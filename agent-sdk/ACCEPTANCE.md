@@ -251,6 +251,19 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 | 锁屏限制说明 | ⚠️ | 锁屏/无人值守时 Chromium 应用不向窗口 DC 呈现底部区域，完整窗口 OCR/模板需交互桌面会话；会话列表/消息区可后台读取（339 字符） |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 102） |
 
+## 十七、v0.4.11 真实桌面输入会话限制与修复（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 激活逻辑修复 | ✅ | `activate_window`：Alt 解锁键仅在 SetForegroundWindow 失败时发送并加沉降延时，避免无谓破坏输入队列；windows-sys BOOL 判定修正 |
+| QQ 群聊脚本改进 | ✅ | `real-qq-group-send.py` 搜索改用 UIA 点击“搜索”+Ctrl+A 清空（避免 Ctrl+F 后 SendInput 偶发失效），仍带“聊天头校验防发错”保护 |
+| 沙箱输入桌面限制 | ⚠️ 环境限制 | 本沙箱拉起的进程（无论是否提权）无交互输入桌面：`SetCursorPos` 报 0x800700CB、`GetForegroundWindow` 为空、SendInput 返回 0；计划任务投递同样不可行（Queued）。真实 QQ 键盘/鼠标注入需在用户交互会话内启动服务（桌面壳自启的 4096 已验证可行） |
+| 会话诊断脚本 | ✅ | `scripts/owo-session-probe.ps1`：由计划任务/交互会话执行时输出 SESSIONNAME 与 QQ 进程，用于验证桌面可达性 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 102） |
+
+建议：真实桌面测试请由用户侧终端/桌面应用启动核心服务（如 `owo-agent serve --port 4096`），
+本沙箱服务（4097）继续用于模型/OCR/模拟面能力。
+
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
 
