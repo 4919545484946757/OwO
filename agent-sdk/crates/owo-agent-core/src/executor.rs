@@ -562,12 +562,29 @@ fn launch_target(target: &str) -> Result<(), String> {
     if target.trim().is_empty() {
         return Err("启动目标为空".to_string());
     }
-    let quoted = format!("\"{}\"", target.replace('"', ""));
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", &quoted])
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("启动失败：{error}"))
+    if is_direct_launch(target) {
+        // exe/可执行文件：CreateProcess 直接启动，失败只返回错误，不弹 Windows 错误框。
+        std::process::Command::new(target.trim())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("启动失败：{error}"))
+    } else {
+        // URL/文档：交给系统默认处理。
+        let quoted = format!("\"{}\"", target.replace('"', ""));
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &quoted])
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("启动失败：{error}"))
+    }
+}
+
+/// exe/已存在文件直接 CreateProcess；URL 走系统默认打开。
+fn is_direct_launch(target: &str) -> bool {
+    let trimmed = target.trim();
+    trimmed.to_ascii_lowercase().ends_with(".exe")
+        || trimmed.starts_with("\\\\")
+        || std::path::Path::new(trimmed).is_file()
 }
 
 fn parse_click_at(text: &str) -> Result<(i32, i32), String> {
@@ -911,6 +928,14 @@ mod tests {
         assert!(parse_click_at("10").is_err());
         assert!(parse_click_at("a,b").is_err());
         assert!(parse_click_at("").is_err());
+    }
+
+    #[test]
+    fn launch_target_kind_distinguishes_exe_and_url() {
+        assert!(is_direct_launch("D:\\QQ\\QQ.exe"));
+        assert!(is_direct_launch("D:\\Weixin\\Weixin.exe"));
+        assert!(!is_direct_launch("https://www.bing.com/search?q=test"));
+        assert!(!is_direct_launch("C:\\Users\\x\\Desktop\\hello.txt"));
     }
 
     #[test]
