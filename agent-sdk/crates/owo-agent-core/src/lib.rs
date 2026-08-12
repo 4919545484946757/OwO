@@ -47,7 +47,7 @@ pub use learn::{
     RecordedAction, SemanticAnchor, Sensitivity, SuggestionAction,
 };
 pub use mcp::{McpClient, McpServerConfig, McpTool};
-pub use ocr::{ocr_bmp, OcrSummary};
+pub use ocr::{ocr_bmp, ocr_bmp_detailed, ocr_engine_status, OcrEngineStatus, OcrSummary};
 pub use perception::{
     CaptureMeta, ContentRef, ForegroundApp, PerceptionEvent, PerceptionLayer, SituationSnapshot,
     SituationStore, TaskHypothesis, UiContext,

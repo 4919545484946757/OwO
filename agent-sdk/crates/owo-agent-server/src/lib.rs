@@ -128,6 +128,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/perception/layers", post(perception_layers))
         .route("/perception/tree", post(perception_tree))
         .route("/perception/ocr", post(perception_ocr))
+        .route("/perception/ocr/status", get(ocr_status))
         .route("/learn/start", post(learn_start))
         .route("/learn/record", post(learn_record))
         .route("/learn/pause", post(learn_pause))
@@ -224,6 +225,7 @@ async fn openapi_spec() -> Json<Value> {
             "/perception/layers": { "post": { "operationId": "perceptionLayers", "responses": { "200": { "description": "layer authorization updated" } } } },
             "/perception/tree": { "post": { "operationId": "perceptionTree", "responses": { "200": { "description": "deep UI tree dump" } } } },
             "/perception/ocr": { "post": { "operationId": "perceptionOcr", "responses": { "200": { "description": "OCR text with bounding boxes" } } } },
+            "/perception/ocr/status": { "get": { "operationId": "ocrStatus", "responses": { "200": { "description": "OCR engine diagnostics" } } } },
             "/learn/record": { "post": { "operationId": "learnRecord", "responses": { "200": { "description": "learn state" } } } },
             "/learn/start": { "post": { "operationId": "learnStart", "responses": { "200": { "description": "learn state" } } } },
             "/learn/pause": { "post": { "operationId": "learnPause", "responses": { "200": { "description": "learn state" } } } },
@@ -1152,9 +1154,13 @@ async fn perception_ocr(
     }
     let bytes = owo_agent_core::capture_screen()
         .ok_or((StatusCode::BAD_REQUEST, "屏幕截图失败".to_string()))?;
-    owo_agent_core::ocr_bmp(&bytes)
-        .ok_or((StatusCode::BAD_REQUEST, "未识别到文字".to_string()))
+    owo_agent_core::ocr_bmp_detailed(&bytes)
         .map(Json)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
+async fn ocr_status() -> Json<owo_agent_core::OcrEngineStatus> {
+    Json(owo_agent_core::ocr_engine_status())
 }
 
 #[derive(serde::Deserialize)]
