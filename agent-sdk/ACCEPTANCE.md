@@ -70,3 +70,22 @@ scripts\run-eval-gate.ps1 -Threshold 0.8  # 评估门禁
 
 - 用量统计（token/成本）、审计入库（FTS5/向量）、OS 级沙箱、文本注入、Tauri 桌面工作台、云执行、公开市场、多格式笔记、computer-use：属 v1 增强或 v2/M4 路线。
 - 云端 /share 链接、可视化工作流、主题扩展（自定义色板）未实现。
+
+## 六、v0.4 迭代记录（2026-08-12，P1/P2/P3 SDK 地基）
+
+| v0.4 项 | 状态 | 证据 |
+|---|---|---|
+| 审计：v0.3 路线完成度 | ✅ M1/M2 完成，M3/M4 待办 | `builGoal/技术路线完成度审计-2026-08-12.md` |
+| 设置组（stt/explore/proactive/skills/whitelist） | ✅ | settings.rs 默认值 + 部分配置解析测试 + `settings.example.json` |
+| 应用白名单（D25） | ✅ | whitelist.rs：分级/敏感默认禁止/全屏游戏启发式；3 个契约测试 |
+| 全域情景感知（D19/D22） | ✅ SDK 层 | perception.rs：L0-L3、快照、掩码、L2 环形缓冲不落盘、SSE 订阅；5 个契约测试 |
+| 操作学习（D23/D26） | ✅ SDK 层 | learn.rs：录制/暂停/清空/敏感熔断、动作图、流程技能包存取删、主动建议阈值/频控/静默；6 个契约测试 |
+| 内置技能包（D18） | ✅ 包结构 + 校验 | skills/{documents,spreadsheets,pdf,browser}（SKILL.md+manifest+tests/3 用例）；skill_pack.rs 校验/发现/安装测试；serve 启动自动安装 |
+| v0.4 HTTP 接口 | ✅ | context.snapshot / perception.events(SSE) / learn.* / skill.verify / proactive.* / whitelist.*；OpenAPI 补充；本机冒烟通过（含 UTF-8 中文路径） |
+| CLI 接入 | ✅ | `/whitelist`、`/perception`、`/learn`、`/proactive` |
+
+### 下一迭代（P1 剩余 / P2）
+
+- Tauri 2 桌面工作台骨架（任务列表/审批条/diff 审阅/技能中心/感知状态区）。
+- 内置技能的真实执行链路：documents/spreadsheets/pdf/browser 各 ≥3 端到端用例接入 eval 门禁。
+- L0 事件源（前台窗口/剪贴板）、L1 无障碍 UI 树、L2 按需截图 + 本地摘要、语音 STT 插件（SenseVoice-Small）。

@@ -1,17 +1,17 @@
 //! OpenCode 式全屏 TUI（ratatui + crossterm）。
 
 use crate::{
-    build_agent_with_mcp, connect_mcp_clients, display_path, ensure_data_root, load_mcp_configs,
-    resolve_model, save_mcp_configs, AGENTS_TEMPLATE,
+    build_agent_with_mcp, builtin_skills_root, connect_mcp_clients, display_path, ensure_data_root,
+    load_mcp_configs, resolve_model, save_mcp_configs, AGENTS_TEMPLATE,
 };
 use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::{
-    discover_plugins, export_html, export_markdown, list_traces, load_trace, save_trace, Agent,
-    McpClient, McpServerConfig, PluginManifest, Settings, SkillRegistry, SqliteSessionStore,
-    TraceRecord, TurnEvent, TurnOutcome,
+    discover_plugins, export_html, export_markdown, install_builtin_packages, list_traces,
+    load_trace, save_trace, Agent, McpClient, McpServerConfig, PluginManifest, Settings,
+    SkillRegistry, SqliteSessionStore, TraceRecord, TurnEvent, TurnOutcome,
 };
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -64,6 +64,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         .map(|(_, manifest)| manifest)
         .collect();
     let mcp_clients = runtime.block_on(connect_mcp_clients(&mcp_configs));
+    let _ = install_builtin_packages(&builtin_skills_root(), &root);
     let skills = SkillRegistry::discover(&workspace, &root);
     let agent = Arc::new(build_agent_with_mcp(
         &workspace,

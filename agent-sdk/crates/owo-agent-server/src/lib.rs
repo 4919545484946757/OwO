@@ -1,4 +1,6 @@
-//! OwO Agent SDK HTTP 服务（M1）：session/turn/permission/diff/revert/abort + SSE。
+//! OwO Agent SDK HTTP 服务（M1 + v0.4）：session/turn/permission/diff/revert/abort + SSE，
+//! 以及 v0.4 接口：context.snapshot / perception.subscribe / learn.* / skill.verify /
+//! proactive.suggest / whitelist.manage。
 
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
@@ -6,8 +8,15 @@ use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use owo_agent_core::learn::{
+    LearnRecorder, LearnState, ProactiveEngine, ProactiveSuggestion, RecordedAction,
+    SuggestionAction,
+};
+use owo_agent_core::perception::{SituationSnapshot, SituationStore};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
 use owo_agent_core::session::{Session, SessionStore};
+use owo_agent_core::validate_skill_package;
+use owo_agent_core::whitelist::{Whitelist, WhitelistEntry};
 use owo_agent_core::Agent;
 use owo_agent_protocol::{
     CreateSessionRequest, EvalRunRequest, FileDiff, ForkRequest, HealthResponse,
@@ -29,6 +38,10 @@ pub struct AppState {
     pub pending_approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Decision>>>>,
     pub aborts: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     pub traces_dir: PathBuf,
+    pub perception: Arc<Mutex<SituationStore>>,
+    pub whitelist: Arc<Mutex<Whitelist>>,
+    pub learn: Arc<Mutex<LearnRecorder>>,
+    pub proactive: Arc<Mutex<ProactiveEngine>>,
 }
 
 impl AppState {
@@ -40,6 +53,10 @@ impl AppState {
             pending_approvals: Arc::new(Mutex::new(HashMap::new())),
             aborts: Arc::new(Mutex::new(HashMap::new())),
             traces_dir,
+            perception: Arc::new(Mutex::new(SituationStore::new())),
+            whitelist: Arc::new(Mutex::new(Whitelist::default())),
+            learn: Arc::new(Mutex::new(LearnRecorder::new())),
+            proactive: Arc::new(Mutex::new(ProactiveEngine::new(Default::default()))),
         }
     }
 }
@@ -63,6 +80,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/session/{id}/children", get(children))
         .route("/session/{id}/export/{format}", get(export_session))
         .route("/eval/run", post(run_eval))
+        .route("/context/snapshot", get(context_snapshot))
+        .route("/perception/events", get(perception_events))
+        .route("/learn/record", post(learn_record))
+        .route("/learn/pause", post(learn_pause))
+        .route("/learn/resume", post(learn_resume))
+        .route("/learn/clear", post(learn_clear))
+        .route("/learn/status", get(learn_status))
+        .route("/skill/verify", post(skill_verify))
+        .route("/proactive/observe", post(proactive_observe))
+        .route("/proactive/decide", post(proactive_decide))
+        .route("/whitelist", get(whitelist_list))
+        .route("/whitelist/manage", post(whitelist_manage))
         .with_state(state)
 }
 
@@ -93,7 +122,18 @@ async fn openapi_spec() -> Json<Value> {
             "/session/{id}/redo": { "post": { "operationId": "sessionRedo", "parameters": [path_param("id")], "responses": { "200": { "description": "ok" } } } },
             "/session/{id}/children": { "get": { "operationId": "sessionChildren", "parameters": [path_param("id")], "responses": { "200": { "description": "children" } } } },
             "/session/{id}/export/{format}": { "get": { "operationId": "exportSession", "parameters": [path_param("id"), path_param("format")], "responses": { "200": { "description": "md or html" } } } },
-            "/eval/run": { "post": { "operationId": "runEval", "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EvalRunRequest" } } } }, "responses": { "200": { "description": "eval report" } } } }
+            "/eval/run": { "post": { "operationId": "runEval", "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EvalRunRequest" } } } }, "responses": { "200": { "description": "eval report" } } } },
+            "/context/snapshot": { "get": { "operationId": "contextSnapshot", "responses": { "200": { "description": "situation snapshot" } } } },
+            "/perception/events": { "get": { "operationId": "perceptionSubscribe", "responses": { "200": { "description": "SSE perception event stream" } } } },
+            "/learn/record": { "post": { "operationId": "learnRecord", "responses": { "200": { "description": "learn state" } } } },
+            "/learn/pause": { "post": { "operationId": "learnPause", "responses": { "200": { "description": "learn state" } } } },
+            "/learn/resume": { "post": { "operationId": "learnResume", "responses": { "200": { "description": "learn state" } } } },
+            "/learn/clear": { "post": { "operationId": "learnClear", "responses": { "200": { "description": "ok" } } } },
+            "/skill/verify": { "post": { "operationId": "skillVerify", "responses": { "200": { "description": "validation result" } } } },
+            "/proactive/observe": { "post": { "operationId": "proactiveObserve", "responses": { "200": { "description": "optional suggestion" } } } },
+            "/proactive/decide": { "post": { "operationId": "proactiveDecide", "responses": { "200": { "description": "ok" } } } },
+            "/whitelist": { "get": { "operationId": "whitelistList", "responses": { "200": { "description": "whitelist entries" } } } },
+            "/whitelist/manage": { "post": { "operationId": "whitelistManage", "responses": { "200": { "description": "whitelist entries" } } } }
         },
         "components": {
             "schemas": {
@@ -442,6 +482,180 @@ async fn run_eval(
     let provider = state.agent.provider();
     let report = owo_agent_core::run_suite(provider, &model, &suite).await;
     Ok(Json(report))
+}
+
+// ---------- v0.4 接口 ----------
+
+async fn context_snapshot(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<SituationSnapshot>, (StatusCode, String)> {
+    let perception = state.perception.lock().map_err(poison)?;
+    Ok(Json(perception.snapshot()))
+}
+
+/// perception.subscribe：订阅 L0/L1 事件流（SSE），桌面端感知状态区使用。
+async fn perception_events(
+    State(state): State<Arc<AppState>>,
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, String)> {
+    let mut perception = state.perception.lock().map_err(poison)?;
+    let mut receiver = perception.subscribe();
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
+    tokio::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+            if tx
+                .send(Ok(Event::default().event("perception").data(data)))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    Ok(Sse::new(ReceiverStream::new(rx)))
+}
+
+#[derive(serde::Deserialize)]
+struct LearnRecordRequest {
+    action: RecordedAction,
+}
+
+async fn learn_record(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<LearnRecordRequest>,
+) -> Result<Json<LearnState>, (StatusCode, String)> {
+    let mut learn = state.learn.lock().map_err(poison)?;
+    learn
+        .record(request.action)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    Ok(Json(learn.state()))
+}
+
+async fn learn_pause(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LearnState>, (StatusCode, String)> {
+    let mut learn = state.learn.lock().map_err(poison)?;
+    learn.pause();
+    Ok(Json(learn.state()))
+}
+
+async fn learn_resume(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LearnState>, (StatusCode, String)> {
+    let mut learn = state.learn.lock().map_err(poison)?;
+    learn.resume();
+    Ok(Json(learn.state()))
+}
+
+async fn learn_clear(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut learn = state.learn.lock().map_err(poison)?;
+    learn.clear();
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn learn_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let learn = state.learn.lock().map_err(poison)?;
+    Ok(Json(json!({
+        "state": learn.state(),
+        "samples": learn.samples(),
+        "sensitive_break": learn.sensitive_break(),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct SkillVerifyRequest {
+    path: PathBuf,
+}
+
+async fn skill_verify(Json(request): Json<SkillVerifyRequest>) -> Json<Value> {
+    match validate_skill_package(&request.path) {
+        Ok(info) => Json(json!({
+            "ok": true,
+            "name": info.name,
+            "permissions": info.permissions,
+            "has_tests": info.has_tests,
+        })),
+        Err(error) => Json(json!({ "ok": false, "error": error })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ProactiveObserveRequest {
+    app_id: String,
+    actions: Vec<String>,
+}
+
+async fn proactive_observe(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ProactiveObserveRequest>,
+) -> Result<Json<Option<ProactiveSuggestion>>, (StatusCode, String)> {
+    let mut proactive = state.proactive.lock().map_err(poison)?;
+    Ok(Json(proactive.observe(&request.app_id, request.actions)))
+}
+
+#[derive(serde::Deserialize)]
+struct ProactiveDecideRequest {
+    suggestion_id: String,
+    action: SuggestionAction,
+}
+
+async fn proactive_decide(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ProactiveDecideRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut proactive = state.proactive.lock().map_err(poison)?;
+    proactive
+        .decide(&request.suggestion_id, request.action)
+        .map_err(|error| (StatusCode::NOT_FOUND, error))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn whitelist_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<WhitelistEntry>>, (StatusCode, String)> {
+    let whitelist = state.whitelist.lock().map_err(poison)?;
+    Ok(Json(whitelist.entries().to_vec()))
+}
+
+#[derive(serde::Deserialize)]
+struct WhitelistManageRequest {
+    action: String,
+    #[serde(default)]
+    entry: Option<WhitelistEntry>,
+    #[serde(default)]
+    app_id: Option<String>,
+}
+
+async fn whitelist_manage(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<WhitelistManageRequest>,
+) -> Result<Json<Vec<WhitelistEntry>>, (StatusCode, String)> {
+    let mut whitelist = state.whitelist.lock().map_err(poison)?;
+    match request.action.as_str() {
+        "upsert" => {
+            let entry = request
+                .entry
+                .ok_or((StatusCode::BAD_REQUEST, "upsert 需要 entry".to_string()))?;
+            whitelist.upsert(entry);
+        }
+        "remove" => {
+            let app_id = request
+                .app_id
+                .ok_or((StatusCode::BAD_REQUEST, "remove 需要 app_id".to_string()))?;
+            whitelist.remove(&app_id);
+        }
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("未知操作：{other}（upsert / remove）"),
+            ))
+        }
+    }
+    Ok(Json(whitelist.entries().to_vec()))
 }
 
 struct ChannelApprover {

@@ -10,6 +10,42 @@
     "scroll_down": "pagedown",
     "clear": "ctrl+l"
   },
+  "stt": {
+    "model": "SenseVoice-Small",
+    "enable_high_accuracy": false,
+    "hotwords": ["VSCode", "提交", "发送"],
+    "latency_budget_ms": 2000
+  },
+  "explore": {
+    "default_tier": "S0",
+    "action_budget": 50,
+    "max_duration_s": 600,
+    "allow_s1": false
+  },
+  "proactive": {
+    "enabled": true,
+    "weekly_threshold": 5,
+    "daily_threshold": 3,
+    "similarity": 0.9,
+    "cooldown_hours": 24,
+    "daily_cap": 3,
+    "auto_silence_days": 30
+  },
+  "skills": {
+    "share_format": "owskill",
+    "require_signature": false
+  },
+  "whitelist": [
+    {
+      "app_id": "code",
+      "name": "VSCode",
+      "tier": "productivity",
+      "chat_authorized": false,
+      "learn_allowed": true,
+      "auto_ops_allowed": true,
+      "sensitive": false
+    }
+  ],
   "mcp_servers": [
     {
       "name": "files",

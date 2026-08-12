@@ -5,10 +5,12 @@ use owo_agent_core::permissions::{Approver, AutoApprover, Decision, PermissionRe
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::tools::ToolRegistry;
 use owo_agent_core::{
-    builtin_suite, discover_plugins, eval_suite_path, export_html, export_markdown, list_traces,
-    load_trace, run_suite, save_trace, Agent, AgentConfig, ChatMessage, McpClient, McpServerConfig,
-    ModelOutput, ModelProvider, OpenAiCompatibleConfig, OpenAiCompatibleProvider, PluginManifest,
-    Settings, SkillRegistry, SqliteSessionStore, ToolSpec, TraceRecord, TurnEvent,
+    builtin_suite, discover_plugins, eval_suite_path, export_html, export_markdown,
+    install_builtin_packages, list_traces, load_trace, run_suite, save_trace, Agent, AgentConfig,
+    ChatMessage, LearnRecorder, McpClient, McpServerConfig, ModelOutput, ModelProvider,
+    OpenAiCompatibleConfig, OpenAiCompatibleProvider, PluginManifest, ProactiveEngine, Settings,
+    SituationStore, SkillRegistry, SqliteSessionStore, SuggestionAction, ToolSpec, TraceRecord,
+    TurnEvent, Whitelist,
 };
 use rustyline::error::ReadlineError;
 use std::future::Future;
@@ -35,6 +37,15 @@ const AGENTS_TEMPLATE: &str = r#"# AGENTS.md
 - 写清楚构建命令、测试命令与代码约定。
 - 说明哪些目录/文件禁止修改。
 "#;
+
+/// 开发环境下的内置技能包根目录：`<repo>/agent-sdk/skills`。
+fn builtin_skills_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|parent| parent.parent())
+        .map(|root| root.join("skills"))
+        .unwrap_or_else(|| PathBuf::from("skills"))
+}
 
 #[derive(Parser)]
 #[command(
@@ -451,6 +462,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut mcp_configs = load_mcp_configs(&root);
     merge_plugin_mcp(&plugins, &mut mcp_configs);
     let mcp_clients = connect_mcp_clients(&mcp_configs).await;
+    let _ = install_builtin_packages(&builtin_skills_root(), &root);
     let skills = SkillRegistry::discover(&workspace, &root);
     let agent = build_agent_with_mcp(
         &workspace,
@@ -593,6 +605,10 @@ struct Repl {
     settings: Settings,
     plugins: Vec<PluginManifest>,
     audit_flushed: usize,
+    perception: SituationStore,
+    learn: LearnRecorder,
+    whitelist: Whitelist,
+    proactive: ProactiveEngine,
 }
 
 impl Repl {
@@ -616,7 +632,13 @@ impl Repl {
             .map(|(_, manifest)| manifest)
             .collect();
         let mcp_clients = connect_mcp_clients(&mcp_configs).await;
+        let _ = install_builtin_packages(&builtin_skills_root(), &root);
         let skills = SkillRegistry::discover(&workspace, &root);
+        let mut whitelist = Whitelist::default();
+        for entry in settings.whitelist.clone() {
+            whitelist.upsert(entry);
+        }
+        let proactive = ProactiveEngine::new(settings.proactive.clone());
         let agent = Arc::new(build_agent_with_mcp(
             &workspace,
             &model,
@@ -642,6 +664,10 @@ impl Repl {
             settings,
             plugins,
             audit_flushed: 0,
+            perception: SituationStore::new(),
+            learn: LearnRecorder::new(),
+            whitelist,
+            proactive,
         };
 
         println!(
@@ -812,6 +838,10 @@ impl Repl {
                 "trace" => self.show_trace(parts.next())?,
                 "settings" => self.show_settings(),
                 "plugins" => self.list_plugins(),
+                "whitelist" => self.show_whitelist(),
+                "perception" => self.show_perception(),
+                "learn" => self.handle_learn(command)?,
+                "proactive" => self.handle_proactive(command)?,
                 "status" => self.show_status(),
                 "permissions" => self.show_permissions(),
                 "audit" => self.show_audit(),
@@ -1366,6 +1396,139 @@ impl Repl {
         }
     }
 
+    fn show_whitelist(&self) {
+        println!(
+            "{}",
+            format!("应用白名单（{} 项）：", self.whitelist.entries().len()).bold()
+        );
+        for entry in self.whitelist.entries() {
+            println!(
+                "  {} {}（{}）操作={} 学习={} 敏感={}",
+                entry.app_id,
+                entry.name,
+                entry.tier.label(),
+                if entry.auto_ops_allowed {
+                    "允许".green()
+                } else {
+                    "禁止".red()
+                },
+                if entry.learn_allowed {
+                    "允许".green()
+                } else {
+                    "禁止".red()
+                },
+                entry.sensitive
+            );
+        }
+    }
+
+    fn show_perception(&self) {
+        let snapshot = self.perception.snapshot();
+        println!("{}", "当前情景快照（按权限过滤）：".bold());
+        println!(
+            "  {}",
+            serde_json::to_string_pretty(&snapshot).unwrap_or_default()
+        );
+    }
+
+    fn handle_learn(&mut self, command: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut parts = command.split_whitespace();
+        parts.next(); // "learn"
+        match parts.next() {
+            Some("start") => {
+                self.learn.start();
+                println!(
+                    "{}",
+                    "开始录制示范操作（Ctrl+C 前的操作会保留在当前样本）".green()
+                );
+            }
+            Some("pause") => {
+                self.learn.pause();
+                println!("录制已暂停");
+            }
+            Some("resume") => {
+                self.learn.resume();
+                println!("录制已恢复");
+            }
+            Some("stop") => {
+                let samples = self.learn.stop();
+                println!("录制结束，共 {} 条动作样本", samples.len());
+            }
+            Some("clear") => {
+                self.learn.clear();
+                println!("已清空本次样本");
+            }
+            Some("status") | None => {
+                println!(
+                    "状态：{:?} ｜ 样本：{} ｜ 敏感面熔断：{}",
+                    self.learn.state(),
+                    self.learn.samples(),
+                    self.learn.sensitive_break()
+                );
+            }
+            Some(other) => println!("未知子命令：{other}（start/pause/resume/stop/clear/status）"),
+        }
+        Ok(())
+    }
+
+    fn handle_proactive(&mut self, command: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut parts = command.split_whitespace();
+        parts.next(); // "proactive"
+        match parts.next() {
+            Some("status") | None => {
+                let suggestions = self.proactive.suggestions();
+                if suggestions.is_empty() {
+                    println!("暂无主动建议（默认仅提示，不执行）");
+                } else {
+                    for suggestion in suggestions {
+                        println!(
+                            "  [{}] {} ｜ {}",
+                            suggestion.id, suggestion.app_id, suggestion.summary
+                        );
+                    }
+                }
+            }
+            Some("observe") => {
+                let app_id = parts
+                    .next()
+                    .ok_or("用法：/proactive observe <应用ID> <动作序列>")?;
+                let actions: Vec<String> = parts
+                    .flat_map(|part| part.split(','))
+                    .map(|action| action.trim().to_string())
+                    .filter(|action| !action.is_empty())
+                    .collect();
+                if actions.is_empty() {
+                    return Err("动作序列不能为空".into());
+                }
+                match self.proactive.observe(app_id, actions) {
+                    Some(suggestion) => println!(
+                        "{} [{}] {}",
+                        "建议：".yellow(),
+                        suggestion.id,
+                        suggestion.summary
+                    ),
+                    None => println!("未达到建议阈值"),
+                }
+            }
+            Some("decide") => {
+                let id = parts
+                    .next()
+                    .ok_or("用法：/proactive decide <建议ID> <learn|execute|ignore|mute>")?;
+                let action = match parts.next() {
+                    Some("learn") => SuggestionAction::Learn,
+                    Some("execute") => SuggestionAction::ExecuteOnce,
+                    Some("ignore") => SuggestionAction::Ignore,
+                    Some("mute") => SuggestionAction::MuteForever,
+                    _ => return Err("动作需为 learn/execute/ignore/mute".into()),
+                };
+                self.proactive.decide(id, action)?;
+                println!("已处理建议 {id}");
+            }
+            Some(other) => println!("未知子命令：{other}（status/observe/decide）"),
+        }
+        Ok(())
+    }
+
     async fn run_turn(&mut self, prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
         if self.session.is_none() {
             self.new_session(None).await?;
@@ -1499,6 +1662,10 @@ fn print_help() {
     println!("  /audit              查看最近审计记录");
     println!("  /mcp add|list|remove  管理 MCP 服务器");
     println!("  /skills             列出已加载技能");
+    println!("  /whitelist          查看应用白名单（v0.4）");
+    println!("  /perception         查看当前情景快照（v0.4）");
+    println!("  /learn <start|pause|resume|stop|clear|status>  示范学习录制（v0.4）");
+    println!("  /proactive <status|observe|decide>  主动建议（v0.4）");
     println!("  /init               生成 AGENTS.md");
     println!("  /abort              中止当前回合");
     println!("  /clear              清屏");

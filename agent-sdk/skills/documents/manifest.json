@@ -1,0 +1,9 @@
+{
+  "id": "com.owo.skills.documents",
+  "name": "documents",
+  "version": "1.0.0",
+  "description": "创建/编辑/批注 Word 文档并渲染校验",
+  "permissions": ["files:read", "files:write"],
+  "min_app_version": "0.4.0",
+  "tools": ["read_file", "write_file", "run_command"]
+}

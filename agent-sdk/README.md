@@ -11,6 +11,16 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - CLI（`owo-agent-cli`）：交互式 `turn` 与 `serve`。
 
 技术基线见 `../builGoal/技术文档-AI智能体输入法.md`（v0.3，输入法路线不实施）。
+迭代依据见 `../builGoal/技术文档-AI智能体输入法-v0.4续写计划.md`（桌面端 + 全域情景感知 + 操作学习）。
+
+## v0.4 已落地（SDK 侧）
+
+- 应用白名单（`whitelist.rs`）：生产力/聊天/游戏/其他分级，敏感类默认禁止操作与学习。
+- 全域情景感知（`perception.rs`）：L0-L3 分层、情景快照、消息掩码、L2 截图环形缓冲（不落盘、用后即毁）、SSE 订阅。
+- 操作学习（`learn.rs`）：示范录制（暂停/清空/敏感面熔断）、动作图、流程技能包（SKILL.md + graph.json + manifest.json，可校验/存取/删除）、主动建议（阈值/频控/静默）。
+- 内置技能包（`skills/`）：documents / spreadsheets / pdf / browser，遵循 SKILL.md + manifest.json + tests/ 契约，启动时自动安装到数据目录。
+- HTTP 新接口：`GET /context/snapshot`、`GET /perception/events`（SSE）、`POST /learn/record|pause|resume|clear`、`GET /learn/status`、`POST /skill/verify`、`POST /proactive/observe|decide`、`GET /whitelist`、`POST /whitelist/manage`。
+- 设置组：`stt` / `explore` / `proactive` / `skills` / `whitelist`（参考 `settings.example.json`）。
 
 ## 环境变量
 

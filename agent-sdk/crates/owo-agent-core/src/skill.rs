@@ -83,7 +83,7 @@ impl SkillRegistry {
     }
 }
 
-fn parse_frontmatter(content: &str) -> (Option<String>, String, String) {
+pub(crate) fn parse_frontmatter(content: &str) -> (Option<String>, String, String) {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
         return (None, String::new(), content.to_string());
