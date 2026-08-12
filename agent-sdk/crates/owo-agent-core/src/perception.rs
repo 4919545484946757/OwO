@@ -120,9 +120,16 @@ pub struct SituationStore {
     hypothesis: Option<TaskHypothesis>,
     recent_actions: VecDeque<String>,
     /// L2 截图环形缓冲：仅内存，不落盘，用后即毁。
-    capture_ring: VecDeque<CaptureMeta>,
+    capture_ring: VecDeque<CaptureFrame>,
+    last_clipboard_sequence: u32,
     subscribers: Vec<UnboundedSender<PerceptionEvent>>,
     max_ring: usize,
+}
+
+struct CaptureFrame {
+    meta: CaptureMeta,
+    #[allow(dead_code)]
+    bytes: Vec<u8>,
 }
 
 impl Default for SituationStore {
@@ -141,6 +148,7 @@ impl SituationStore {
             hypothesis: None,
             recent_actions: VecDeque::new(),
             capture_ring: VecDeque::new(),
+            last_clipboard_sequence: 0,
             subscribers: Vec::new(),
             max_ring: 5,
         }
@@ -178,7 +186,10 @@ impl SituationStore {
                 if self.capture_ring.len() >= self.max_ring {
                     self.capture_ring.pop_front();
                 }
-                self.capture_ring.push_back(frame.clone());
+                self.capture_ring.push_back(CaptureFrame {
+                    meta: frame.clone(),
+                    bytes: Vec::new(),
+                });
             }
             PerceptionEvent::Hypothesis { hypothesis } => {
                 self.hypothesis = Some(hypothesis.clone())
@@ -216,6 +227,53 @@ impl SituationStore {
             frame: frame.clone(),
         })?;
         Ok(frame)
+    }
+
+    /// L2 按需采集：抓取真实屏幕到内存环形缓冲（不落盘、用后即毁）。
+    pub fn begin_capture_from_screen(&mut self) -> Result<CaptureMeta, String> {
+        if !self.is_enabled(PerceptionLayer::L2Visual) {
+            return Err("L2 视觉层未授权".to_string());
+        }
+        let bytes = crate::platform::capture_screen().ok_or("屏幕截图失败")?;
+        let frame = CaptureMeta {
+            id: uuid::Uuid::new_v4().to_string(),
+            captured_at: Some(chrono::Utc::now().to_rfc3339()),
+            summary: Some(format!("内存截图 {} bytes", bytes.len())),
+        };
+        if self.capture_ring.len() >= self.max_ring {
+            self.capture_ring.pop_front();
+        }
+        self.capture_ring.push_back(CaptureFrame {
+            meta: frame.clone(),
+            bytes,
+        });
+        self.recent_actions.push_back("capture".to_string());
+        if self.recent_actions.len() > 20 {
+            self.recent_actions.pop_front();
+        }
+        self.notify(PerceptionEvent::Capture {
+            frame: frame.clone(),
+        });
+        Ok(frame)
+    }
+
+    /// L0 剪贴板事件源：只记录“内容已变化”（掩码），不读取内容。
+    pub fn refresh_clipboard(&mut self, sequence: u32) {
+        if sequence == 0 || self.last_clipboard_sequence == sequence {
+            return;
+        }
+        self.last_clipboard_sequence = sequence;
+        let app_id = self
+            .foreground
+            .as_ref()
+            .map(|app| app.id.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let _ = self.record_event(PerceptionEvent::ClipboardMasked { app_id });
+    }
+
+    fn notify(&mut self, event: PerceptionEvent) {
+        self.subscribers
+            .retain(|sender| sender.send(event.clone()).is_ok());
     }
 
     /// 任务结束立即销毁截图缓冲。
@@ -287,8 +345,8 @@ impl SituationStore {
             capture: self
                 .capture_ring
                 .back()
-                .filter(|_| self.is_enabled(PerceptionLayer::L2Visual))
-                .cloned(),
+                .map(|frame| frame.meta.clone())
+                .filter(|_| self.is_enabled(PerceptionLayer::L2Visual)),
         }
     }
 }
@@ -382,5 +440,39 @@ mod tests {
         let mut store = SituationStore::new();
         let _ = store.refresh_from_platform();
         assert!(store.snapshot().permission_level == "l0_l1");
+    }
+
+    #[test]
+    fn clipboard_change_records_masked_event_once() {
+        let mut store = SituationStore::new();
+        store.refresh_clipboard(1);
+        store.refresh_clipboard(1); // 未变化不重复
+        store.refresh_clipboard(2);
+        let snapshot = store.snapshot();
+        assert_eq!(
+            snapshot
+                .recent_actions
+                .iter()
+                .filter(|action| action.as_str() == "copy_masked")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn screen_capture_enters_ring_and_is_discarded() {
+        let mut store = SituationStore::new();
+        store.set_layer_enabled(PerceptionLayer::L2Visual, true);
+        match store.begin_capture_from_screen() {
+            Ok(meta) => {
+                assert!(meta.summary.unwrap().contains("内存截图"));
+                assert_eq!(store.capture_ring_len(), 1);
+                store.discard_captures();
+                assert_eq!(store.capture_ring_len(), 0);
+            }
+            Err(_) => {
+                // 无窗口会话允许截图失败（隐私优先：不强制采集）。
+            }
+        }
     }
 }

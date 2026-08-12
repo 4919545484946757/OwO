@@ -20,7 +20,13 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_DataExchange",
+    "Win32_Graphics_Gdi",
+] }
 
 [[bin]]
 name = "owo-mcp-test-server"

@@ -539,6 +539,8 @@ async fn context_snapshot(
 ) -> Result<Json<SituationSnapshot>, (StatusCode, String)> {
     let mut perception = state.perception.lock().map_err(poison)?;
     let _ = perception.refresh_from_platform();
+    let sequence = owo_agent_core::clipboard_sequence();
+    perception.refresh_clipboard(sequence);
     Ok(Json(perception.snapshot()))
 }
 

@@ -43,7 +43,7 @@ pub use perception::{
     SituationStore, TaskHypothesis, UiContext,
 };
 pub use permissions::{Approver, Decision, Level, PermissionRequest, Policy};
-pub use platform::poll_foreground_app;
+pub use platform::{capture_screen, clipboard_sequence, poll_foreground_app};
 pub use plugin::{discover_plugins, PluginManifest};
 pub use session::{JsonSessionStore, Session, SessionStore};
 pub use settings::Settings;

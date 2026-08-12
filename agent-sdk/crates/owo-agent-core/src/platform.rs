@@ -64,6 +64,139 @@ pub fn poll_foreground_app() -> Option<(String, String)> {
     None
 }
 
+/// 当前剪贴板序列号（L0 事件源，只做“是否变化”检测，不读取内容）。
+#[cfg(target_os = "windows")]
+pub fn clipboard_sequence() -> u32 {
+    unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn clipboard_sequence() -> u32 {
+    0
+}
+
+/// 按需截图（L2）：返回内存中的 BMP 字节，不落盘。
+#[cfg(target_os = "windows")]
+pub fn capture_screen() -> Option<Vec<u8>> {
+    let (width, height) = screen_size()?;
+    capture_screen_region(width, height)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn capture_screen() -> Option<Vec<u8>> {
+    None
+}
+
+/// 截取屏幕指定区域（测试与按需采集用），返回内存 BMP。
+#[cfg(target_os = "windows")]
+pub fn capture_screen_region(width: i32, height: i32) -> Option<Vec<u8>> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        HGDIOBJ, SRCCOPY,
+    };
+
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    unsafe {
+        let screen = GetDC(std::ptr::null_mut());
+        if screen.is_null() {
+            return None;
+        }
+        let memory = CreateCompatibleDC(screen);
+        if memory.is_null() {
+            ReleaseDC(std::ptr::null_mut(), screen);
+            return None;
+        }
+        let bitmap = CreateCompatibleBitmap(screen, width, height);
+        if bitmap.is_null() {
+            DeleteDC(memory);
+            ReleaseDC(std::ptr::null_mut(), screen);
+            return None;
+        }
+        SelectObject(memory, bitmap as HGDIOBJ);
+        let copied = BitBlt(memory, 0, 0, width, height, screen, 0, 0, SRCCOPY);
+
+        let mut info: BITMAPINFO = std::mem::zeroed();
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height; // top-down
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+        let got = if copied != 0 {
+            GetDIBits(
+                memory,
+                bitmap,
+                0,
+                height as u32,
+                pixels.as_mut_ptr() as *mut core::ffi::c_void,
+                &mut info,
+                DIB_RGB_COLORS,
+            )
+        } else {
+            0
+        };
+        DeleteObject(bitmap as HGDIOBJ);
+        DeleteDC(memory);
+        ReleaseDC(std::ptr::null_mut(), screen);
+        if got == 0 {
+            return None;
+        }
+        Some(encode_bmp(width, height, &pixels))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn capture_screen_region(_width: i32, _height: i32) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn screen_size() -> Option<(i32, i32)> {
+    use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, HORZRES, VERTRES};
+    unsafe {
+        let screen = GetDC(std::ptr::null_mut());
+        if screen.is_null() {
+            return None;
+        }
+        let width = GetDeviceCaps(screen, HORZRES as i32);
+        let height = GetDeviceCaps(screen, VERTRES as i32);
+        ReleaseDC(std::ptr::null_mut(), screen);
+        if width <= 0 || height <= 0 {
+            None
+        } else {
+            Some((width, height))
+        }
+    }
+}
+
+/// 内存 BMP 封装（14 字节文件头 + 40 字节 DIB 头 + BGRA 像素）。
+fn encode_bmp(width: i32, height: i32, bgra: &[u8]) -> Vec<u8> {
+    let pixel_bytes = bgra.len();
+    let file_size = 54 + pixel_bytes;
+    let mut out = Vec::with_capacity(file_size);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(file_size as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&32u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    out.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(bgra);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +205,19 @@ mod tests {
     fn foreground_poll_is_callable() {
         // Windows 交互会话返回真实前台窗口；无窗口时不返回数据。
         let _ = poll_foreground_app();
+    }
+
+    #[test]
+    fn clipboard_sequence_is_callable() {
+        let _ = clipboard_sequence();
+    }
+
+    #[test]
+    fn screen_capture_region_produces_bmp() {
+        // 4x4 采样验证 GDI 链路；无窗口会话可能返回 None（不做强断言）。
+        if let Some(bmp) = capture_screen_region(4, 4) {
+            assert_eq!(&bmp[..2], b"BM");
+            assert!(bmp.len() > 54);
+        }
     }
 }
