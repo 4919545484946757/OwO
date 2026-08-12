@@ -84,6 +84,8 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 真实桌面输入注意（v0.4.11）：沙箱/提权子进程没有交互输入桌面（SetCursorPos 0x800700CB），
   真实 QQ 等应用的鼠标键盘注入需要用户在交互会话启动核心服务；`scripts/owo-session-probe.ps1`
   可验证桌面可达性。
+- 窗口元素注册表（v0.4.12，10.1）：`/perception/elements` 融合 UIA+OCR 为稳定元素列表
+  （`SceneElement`：稳定 ID/多源/置信度/stale 淘汰）；实测 QQ 窗口连续两帧 34/34 稳定 ID。
 
 ### STT WER/CER 评估
 

@@ -264,6 +264,18 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 建议：真实桌面测试请由用户侧终端/桌面应用启动核心服务（如 `owo-agent serve --port 4096`），
 本沙箱服务（4097）继续用于模型/OCR/模拟面能力。
 
+## 十八、v0.4.12 窗口元素注册表（设计文档 10.1，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| element_registry.rs | ✅ | `SceneElement`（多源/置信度/stale）、`ElementRegistry`（稳定 ID 匹配：名称+角色+位置邻近，>3 帧淘汰）、`fuse_sources`（UIA+OCR 同名重合合并，UIA 优先几何）；4 个单测 |
+| `/perception/elements` 接口 | ✅ | `{hwnd, app_id}`：UIA 树 + 窗口 OCR（转屏幕坐标）融合 → 注册表更新 → 返回稳定元素列表 |
+| 后台实测（QQ 窗口 198064） | ✅ | 连续两帧各 34 个融合元素（paddle-v6），**稳定 ID 34/34**；不切前台、后台只读 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 106） |
+
+下一步：视觉 grounding 结果并入注册表（source=vision），并用稳定元素 ID 驱动“点击/验证”动作，
+减少对每次 OCR 重新定位的依赖。
+
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
 

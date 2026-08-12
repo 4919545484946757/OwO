@@ -55,6 +55,7 @@ pub struct AppState {
     pub audit_flushed: Arc<Mutex<usize>>,
     pub workspace: PathBuf,
     pub data_root: PathBuf,
+    pub elements: Arc<Mutex<owo_agent_core::ElementRegistry>>,
 }
 
 impl AppState {
@@ -94,6 +95,7 @@ impl AppState {
             audit_flushed: Arc::new(Mutex::new(0)),
             workspace,
             data_root,
+            elements: Arc::new(Mutex::new(owo_agent_core::ElementRegistry::new())),
         }
     }
 }
@@ -149,6 +151,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/perception/template/detect-ocr",
             post(perception_template_detect_ocr),
         )
+        .route("/perception/elements", post(perception_elements))
         .route(
             "/perception/template/{app_id}",
             get(perception_template_get),
@@ -1288,6 +1291,40 @@ async fn perception_template_detect_ocr(
     Ok(Json(owo_agent_core::detect_template_ocr(
         &template, &summary,
     )))
+}
+
+#[derive(serde::Deserialize)]
+struct ElementsRequest {
+    hwnd: i64,
+    app_id: String,
+}
+
+/// 窗口元素注册表：UIA 树 + 窗口 OCR（转屏幕坐标）融合 → 注册表更新 → 返回稳定元素列表。
+async fn perception_elements(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ElementsRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let tree =
+        owo_agent_core::ui_tree_for_hwnd(request.hwnd as isize, 14, 10000).unwrap_or_default();
+    let (bmp, rect) = owo_agent_core::platform::capture_window_bmp_deep(request.hwnd as isize)
+        .ok_or((StatusCode::BAD_REQUEST, "窗口截图失败".to_string()))?;
+    let summary = owo_agent_core::ocr_preferred(&bmp)
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    let mut lines = owo_agent_core::group_ocr_lines(&summary.boxes);
+    for line in &mut lines {
+        line.x += rect.0;
+        line.y += rect.1;
+    }
+    let fused = owo_agent_core::fuse_sources(&tree, &lines);
+    let mut registry = state.elements.lock().map_err(poison)?;
+    let elements = registry.update(&request.app_id, fused);
+    Ok(Json(json!({
+        "app_id": request.app_id,
+        "provider": summary.provider,
+        "count": elements.len(),
+        "elements": elements,
+    })))
 }
 
 /// 全屏 OCR（含文本框坐标），供 OCR+坐标点击（自绘面板，如 QQ 红包/表情）。
