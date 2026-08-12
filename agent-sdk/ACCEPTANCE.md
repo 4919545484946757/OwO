@@ -321,6 +321,16 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 实机复测 | ⚠️ 网络仍不稳 | 视觉 Agent 多轮任务在本地代理下仍出现后续调用挂起（4 分钟无数据，超时看门狗应触发但未见退出，指向代理连接级问题）；单轮模型冒烟正常（6.4s） |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
 
+## 二十三、v0.4.17 本地模型通道与回归门禁（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 回归门禁脚本 | ✅ | `sim-regression.py`：确定性套件（qq-learn、qq-observe）顺序执行并聚合结果；`--with-llm` 追加 QQ 单轮/浏览器模拟 |
+| 确定性回归实测 | ✅ 2/2 | qq-learn PASS、qq-observe PASS（“回归复用验证-001/回归观察验证-001”均发送成功） |
+| Ollama VL 工具调用限制 | ⚠️ 已确认 | `qwen2.5vl:3b` 的 OpenAI 兼容端点对含 tools 的请求返回 400（“does not support tools”）；已改拉文本版 `qwen2.5:3b`（支持工具调用，后台下载中） |
+| 本地模型多轮通道 | ⏳ 进行中 | qwen2.5:3b 下载完成后，Agent 多轮闭环可完全本地化，绕开 DeepSeek 网络不稳定 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
 

@@ -94,6 +94,9 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
   加载与追加时自动清理；`scripts/model-smoke.py` 可快速验证模型通道。
 - 模型网关韧性（v0.4.16）：请求失败自动代理→直连降级，流式每块 60s 空闲看门狗；
   缓解多轮流式挂起（代理网络恢复后即受益）。
+- 本地回归门禁（v0.4.17）：`scripts/sim-regression.py` 顺序跑学习/观察等确定性闭环，
+  `--with-llm` 追加 LLM 套件；Ollama VL 模型不支持工具调用，文本版 `qwen2.5:3b` 拉取后
+  可全本地跑多轮 Agent。
 
 ### STT WER/CER 评估
 
