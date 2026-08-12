@@ -24,6 +24,10 @@ fn core_server_path() -> PathBuf {
     // 便携发布：核心服务与桌面壳同级。
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            let bundled = dir.join("owo-agent-x64.exe");
+            if bundled.exists() {
+                return bundled;
+            }
             let sibling = dir.join("owo-agent.exe");
             if sibling.exists() {
                 return sibling;
@@ -47,9 +51,13 @@ fn spawn_core_server() -> Option<Child> {
         return None;
     }
     let portable = exe
-        .parent()
-        .map(|dir| dir.join("owo-agent-desktop.exe").exists())
-        .unwrap_or(false);
+        .file_name()
+        .map(|name| name.to_string_lossy().contains("-x64"))
+        .unwrap_or(false)
+        || exe
+            .parent()
+            .map(|dir| dir.join("owo-agent-desktop.exe").exists())
+            .unwrap_or(false);
     let workspace = if portable {
         exe.parent()?.to_path_buf() // 便携发布：应用目录
     } else {

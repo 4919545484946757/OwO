@@ -46,6 +46,15 @@ powershell -ExecutionPolicy Bypass -File scripts\package-desktop.ps1 -Configurat
 
 便携包内桌面壳自动定位同目录核心服务与 `skills/`（也可用 `OWO_SKILLS_DIR` / `OWO_AGENT_DATA` 覆盖）。
 
+### NSIS 安装程序
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
+# 产物：desktop\tauri\src-tauri\target\release\bundle\nsis\OwO Agent_0.1.0_x64-setup.exe
+```
+
+安装包通过 Tauri externalBin 内置核心服务（`owo-agent-x64.exe`），桌面壳自动定位同目录核心服务；支持简体中文/英文安装界面、当前用户安装。
+
 ### 内置技能门禁
 
 四个内置技能包都带可执行端到端契约测试（`skills/<name>/tests/run_tests.*`），
