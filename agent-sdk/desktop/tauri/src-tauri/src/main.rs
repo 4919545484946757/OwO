@@ -13,6 +13,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, RunEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_updater::UpdaterExt;
 
 const CORE_PORT: u16 = 4096;
 
@@ -144,8 +145,9 @@ fn main() {
                 "开机自启：关"
             };
             let autostart = MenuItem::with_id(app, "autostart", autostart_label, true, None::<&str>)?;
+            let check_update = MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &autostart, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &autostart, &check_update, &quit])?;
             let icon = app
                 .default_window_icon()
                 .cloned()
@@ -178,6 +180,42 @@ fn main() {
                                 }
                             }
                         }
+                    }
+                    "check-update" => {
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let result = match handle.updater() {
+                                Ok(updater) => updater.check().await,
+                                Err(error) => Err(error),
+                            };
+                            match result {
+                                Ok(Some(update)) => {
+                                    eprintln!(
+                                        "[owo-desktop] 发现新版本 {}：{}",
+                                        update.version, update.body.unwrap_or_default()
+                                    );
+                                    if let Some(menu) = handle.menu() {
+                                        if let Some(item) = menu.get("check-update") {
+                                            if let Some(menuitem) = item.as_menuitem() {
+                                                let _ = menuitem.set_text("检查更新（有新版本）");
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(None) => {
+                                    if let Some(menu) = handle.menu() {
+                                        if let Some(item) = menu.get("check-update") {
+                                            if let Some(menuitem) = item.as_menuitem() {
+                                                let _ = menuitem.set_text("检查更新（已是最新）");
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("[owo-desktop] 检查更新失败：{error}");
+                                }
+                            }
+                        });
                     }
                     "quit" => app.exit(0),
                     _ => {}

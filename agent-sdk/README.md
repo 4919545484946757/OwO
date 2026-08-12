@@ -55,6 +55,16 @@ powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
 
 安装包通过 Tauri externalBin 内置核心服务（`owo-agent-x64.exe`），桌面壳自动定位同目录核心服务；支持简体中文/英文安装界面、当前用户安装。
 
+### 自动更新（updater）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\generate-update-manifest.ps1 `
+  -SetupExe dist\OwO-Agent-0.1.0-setup.exe -Version 0.1.0 -BaseUrl https://example.com/owo/updates
+# 产物：dist\updates\latest.json（version/notes/pub_date/platforms.windows-x86_64.url+signature）
+```
+
+桌面托盘“检查更新”调用 tauri-plugin-updater；签名公钥已内置，私钥在 `desktop/tauri/src-tauri/.secrets/`（gitignore，请妥善保管）。把安装包与 `latest.json` 托管到任意静态服务器并替换 `tauri.conf.json` 的 `plugins.updater.endpoints` 即可启用更新。
+
 ### 内置技能门禁
 
 四个内置技能包都带可执行端到端契约测试（`skills/<name>/tests/run_tests.*`），

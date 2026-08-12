@@ -22,6 +22,17 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://example.com/owo/updates/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQyNDJBODZCOUQ5RDA4MDAKUldRQUNKMmRhNmhDMHR5VVhDcDA1YUdlMzhpS2xPRnVGbHA2UHBqR1NZVloxUkx3VENGUE5QSGEK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
