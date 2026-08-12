@@ -7,6 +7,7 @@ pub mod audit;
 pub mod context;
 pub mod error;
 pub mod eval;
+pub mod executor;
 pub mod gateway;
 pub mod learn;
 pub mod mcp;
@@ -31,6 +32,7 @@ pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
 pub use audit::{AuditEntry, AuditLog};
 pub use error::AgentError;
 pub use eval::{builtin_suite, eval_suite_path, run_suite, EvalCase, EvalReport, EvalSuite};
+pub use executor::{execute_graph, ExecReport, ExecStep, UiActionSource, WindowsUiaSource};
 pub use gateway::{
     ChatMessage, ModelOutput, ModelProvider, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     ToolCall,

@@ -27,6 +27,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - L2 按需截图：GDI `BitBlt` + `GetDIBits` 抓屏为内存 BMP，进环形缓冲（最多 5 帧、不落盘），任务结束 `discard_captures` 即毁；快照只暴露元数据（大小/时间），不暴露像素。
 - L1 无障碍 UI 树（Windows UI Automation）：`accessibility.rs` 抓取前台窗口语义锚点（角色/名称/类名，按深度与节点数截断），写入情景快照 `ui_context.ui_tree`，内容未变化不重复记事件。
 - L2 本地摘要（Windows OCR）：`ocr.rs` 用系统自带 Media.Ocr 对内存截图离线识别文字，摘要进环形缓冲帧元数据（不落盘）；`POST /perception/capture` 按需采集（可传 width/height 采样），`POST /perception/layers` 逐层授权/热撤（L2 默认关闭，拒绝时 400）。
+- P3 动作图执行引擎（`executor.rs`）：按流程技能包动作图执行——语义锚点定位（UI Automation）→ 点击/输入/快捷键（SendInput）→ 状态验证；敏感面（密码/支付/验证码）熔断、成环检测、步数上限；`POST /learn/execute` 提交 `{graph, variables, max_steps}` 返回分步执行报告。
 
 ### 内置技能门禁
 

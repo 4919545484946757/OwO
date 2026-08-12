@@ -93,6 +93,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/learn/resume", post(learn_resume))
         .route("/learn/clear", post(learn_clear))
         .route("/learn/status", get(learn_status))
+        .route("/learn/execute", post(learn_execute))
         .route("/skill/verify", post(skill_verify))
         .route("/proactive/observe", post(proactive_observe))
         .route("/proactive/decide", post(proactive_decide))
@@ -150,6 +151,7 @@ async fn openapi_spec() -> Json<Value> {
             "/learn/pause": { "post": { "operationId": "learnPause", "responses": { "200": { "description": "learn state" } } } },
             "/learn/resume": { "post": { "operationId": "learnResume", "responses": { "200": { "description": "learn state" } } } },
             "/learn/clear": { "post": { "operationId": "learnClear", "responses": { "200": { "description": "ok" } } } },
+            "/learn/execute": { "post": { "operationId": "learnExecute", "responses": { "200": { "description": "execution report" } } } },
             "/skill/verify": { "post": { "operationId": "skillVerify", "responses": { "200": { "description": "validation result" } } } },
             "/proactive/observe": { "post": { "operationId": "proactiveObserve", "responses": { "200": { "description": "optional suggestion" } } } },
             "/proactive/decide": { "post": { "operationId": "proactiveDecide", "responses": { "200": { "description": "ok" } } } },
@@ -677,6 +679,30 @@ async fn learn_status(
         "samples": learn.samples(),
         "sensitive_break": learn.sensitive_break(),
     })))
+}
+
+#[derive(serde::Deserialize)]
+struct ExecuteRequest {
+    graph: owo_agent_core::ActionGraph,
+    #[serde(default)]
+    variables: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    max_steps: Option<usize>,
+}
+
+/// 执行流程技能包动作图（Windows：UI Automation + SendInput，敏感面熔断）。
+async fn learn_execute(
+    Json(request): Json<ExecuteRequest>,
+) -> Result<Json<owo_agent_core::ExecReport>, (StatusCode, String)> {
+    let source = owo_agent_core::WindowsUiaSource::new()
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let report = owo_agent_core::execute_graph(
+        &source,
+        &request.graph,
+        &request.variables,
+        request.max_steps.unwrap_or(20),
+    );
+    Ok(Json(report))
 }
 
 #[derive(serde::Deserialize)]

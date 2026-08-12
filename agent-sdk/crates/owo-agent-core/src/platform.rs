@@ -64,6 +64,36 @@ pub fn poll_foreground_app() -> Option<(String, String)> {
     None
 }
 
+/// 当前前台窗口标题（执行引擎验证用）。
+#[cfg(target_os = "windows")]
+pub fn foreground_title() -> Option<String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
+    };
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return None;
+        }
+        let length = GetWindowTextLengthW(hwnd);
+        if length <= 0 {
+            return None;
+        }
+        let mut buffer = vec![0u16; (length + 1) as usize];
+        let written = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
+        Some(
+            String::from_utf16_lossy(&buffer[..written.max(0) as usize])
+                .trim()
+                .to_string(),
+        )
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn foreground_title() -> Option<String> {
+    None
+}
+
 /// 当前剪贴板序列号（L0 事件源，只做“是否变化”检测，不读取内容）。
 #[cfg(target_os = "windows")]
 pub fn clipboard_sequence() -> u32 {
