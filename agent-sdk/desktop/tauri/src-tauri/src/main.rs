@@ -20,6 +20,16 @@ struct CoreServer(Mutex<Option<Child>>);
 
 /// 开发环境定位核心服务：`<repo>/agent-sdk/target/debug/owo-agent.exe`。
 fn core_server_path() -> PathBuf {
+    // 便携发布：核心服务与桌面壳同级。
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("owo-agent.exe");
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+    // 开发环境：<repo>/agent-sdk/target/debug/owo-agent.exe。
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // desktop/tauri/src-tauri
     manifest
         .parent() // desktop/tauri
@@ -35,11 +45,15 @@ fn spawn_core_server() -> Option<Child> {
         eprintln!("[owo-desktop] 核心服务不存在：{}", exe.display());
         return None;
     }
-    let workspace = exe
-        .parent()?
-        .parent()?
-        .parent()?
-        .to_path_buf(); // agent-sdk
+    let portable = exe
+        .parent()
+        .map(|dir| dir.join("owo-agent-desktop.exe").exists())
+        .unwrap_or(false);
+    let workspace = if portable {
+        exe.parent()?.to_path_buf() // 便携发布：应用目录
+    } else {
+        exe.parent()?.parent()?.parent()?.to_path_buf() // 开发：agent-sdk
+    };
     let port = CORE_PORT.to_string();
     Command::new(exe)
         .args(["serve", "--port"])

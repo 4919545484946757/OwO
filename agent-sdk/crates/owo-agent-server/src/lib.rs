@@ -692,6 +692,7 @@ struct ExecuteRequest {
 
 /// 执行流程技能包动作图（Windows：UI Automation + SendInput，敏感面熔断）。
 async fn learn_execute(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<ExecuteRequest>,
 ) -> Result<Json<owo_agent_core::ExecReport>, (StatusCode, String)> {
     let source = owo_agent_core::WindowsUiaSource::new()
@@ -702,6 +703,17 @@ async fn learn_execute(
         &request.variables,
         request.max_steps.unwrap_or(20),
     );
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        for step in &report.steps {
+            audit.record(
+                "learn-execute",
+                "exec",
+                Some(step.node_id.clone()),
+                Some(step.status == "ok"),
+                step.detail.clone(),
+            );
+        }
+    }
     Ok(Json(report))
 }
 

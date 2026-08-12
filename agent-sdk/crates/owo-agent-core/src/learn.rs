@@ -415,6 +415,102 @@ impl LearnRecorder {
     }
 }
 
+/// 录制样本 → 动作图（泛化）：同一锚点的 Type 动作出现 ≥2 次，
+/// 推断为变量 `{value}`（消息内容不采样，只按锚点重复度推断）。
+pub fn generalize_to_graph(samples: &[RecordedAction]) -> Result<ActionGraph, String> {
+    if samples.is_empty() {
+        return Err("没有录制样本".to_string());
+    }
+    let mut graph = ActionGraph::new();
+    for (index, action) in samples.iter().enumerate() {
+        if action.sensitive || keyword_breaks(&action.anchor) {
+            return Err("样本含敏感面，已拒绝沉淀".to_string());
+        }
+        let id = format!("step-{}", index + 1);
+        let value_template = if action.action_type == ActionType::Type {
+            let repeated = samples
+                .iter()
+                .filter(|other| {
+                    other.action_type == ActionType::Type
+                        && other.anchor.name == action.anchor.name
+                        && other.anchor.role == action.anchor.role
+                })
+                .count();
+            if repeated >= 2 {
+                Some("{value}".to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        graph.add_node(
+            id,
+            action.action_type,
+            action.anchor.clone(),
+            value_template,
+            None,
+        );
+    }
+    for index in 0..samples.len().saturating_sub(1) {
+        graph.add_edge(
+            format!("step-{}", index + 1),
+            format!("step-{}", index + 2),
+            None,
+            None,
+        );
+    }
+    graph.validate()?;
+    Ok(graph)
+}
+
+/// 示范学习流水线：录制 → 泛化 → 沉淀流程技能包。
+pub struct LearnPipeline {
+    pub recorder: LearnRecorder,
+    pub store: FlowSkillStore,
+}
+
+impl LearnPipeline {
+    pub fn new(store_root: PathBuf) -> Self {
+        Self {
+            recorder: LearnRecorder::new(),
+            store: FlowSkillStore::new(store_root),
+        }
+    }
+
+    /// 结束录制并沉淀为流程技能包（SKILL.md + graph.json + manifest.json）。
+    pub fn sink_skill(
+        &mut self,
+        name: &str,
+        target_apps: Vec<String>,
+        sensitivity: Sensitivity,
+        description: &str,
+    ) -> Result<FlowSkillPackage, String> {
+        let samples = self.recorder.stop();
+        let graph = generalize_to_graph(&samples)?;
+        let variables = graph.variables();
+        let package = FlowSkillPackage {
+            manifest: FlowSkillManifest {
+                id: format!("com.owo.learned.{name}"),
+                name: name.to_string(),
+                version: "1.0.0".to_string(),
+                min_app_version: "0.4.0".to_string(),
+                target_apps,
+                permissions: vec!["ui:operate".to_string(), "text:inject".to_string()],
+                variables,
+                sensitivity,
+            },
+            graph,
+            skill_md: format!(
+                "---\nname: {name}\ndescription: {description}\n---\n由示范学习自动生成，可编辑。"
+            ),
+        };
+        package.validate()?;
+        self.store.save(&package)?;
+        Ok(package)
+    }
+}
+
 // ---------- 主动建议 ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -834,5 +930,80 @@ mod tests {
             engine.muted_until.get("app:a|b").map(String::as_str),
             Some("9999-12-31")
         );
+    }
+
+    fn typed(anchor_name: &str, at: &str) -> RecordedAction {
+        RecordedAction {
+            app_id: "qq".to_string(),
+            anchor: SemanticAnchor {
+                app_id: Some("qq".to_string()),
+                role: Some("edit".to_string()),
+                name: anchor_name.to_string(),
+            },
+            action_type: ActionType::Type,
+            value_masked: true,
+            sensitive: false,
+            at: at.to_string(),
+        }
+    }
+
+    #[test]
+    fn generalizes_repeated_typed_anchor_to_variable() {
+        let samples = vec![
+            typed("搜索输入", "t1"),
+            typed("搜索输入", "t2"),
+            RecordedAction {
+                app_id: "qq".to_string(),
+                anchor: SemanticAnchor {
+                    app_id: Some("qq".to_string()),
+                    role: Some("button".to_string()),
+                    name: "发送按钮".to_string(),
+                },
+                action_type: ActionType::Click,
+                value_masked: true,
+                sensitive: false,
+                at: "t3".to_string(),
+            },
+        ];
+        let graph = generalize_to_graph(&samples).unwrap();
+        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.variables(), vec!["value"]);
+        assert!(graph.validate().is_ok());
+    }
+
+    #[test]
+    fn pipeline_sinks_skill_package() {
+        let root =
+            std::env::temp_dir().join(format!("owo-learn-pipeline-{}", uuid::Uuid::new_v4()));
+        let mut pipeline = LearnPipeline::new(root.join("skills").join("user"));
+        pipeline.recorder.start();
+        pipeline.recorder.record(typed("搜索输入", "t1")).unwrap();
+        pipeline
+            .recorder
+            .record(RecordedAction {
+                app_id: "qq".to_string(),
+                anchor: SemanticAnchor {
+                    app_id: Some("qq".to_string()),
+                    role: Some("button".to_string()),
+                    name: "发送按钮".to_string(),
+                },
+                action_type: ActionType::Click,
+                value_masked: true,
+                sensitive: false,
+                at: "t2".to_string(),
+            })
+            .unwrap();
+        let package = pipeline
+            .sink_skill(
+                "send-file",
+                vec!["qq".to_string()],
+                Sensitivity::Low,
+                "在 QQ 发送文件",
+            )
+            .unwrap();
+        assert!(package.validate().is_ok());
+        assert_eq!(package.manifest.name, "send-file");
+        assert_eq!(pipeline.store.list().unwrap(), vec!["send-file"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

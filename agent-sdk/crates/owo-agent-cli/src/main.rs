@@ -40,6 +40,17 @@ const AGENTS_TEMPLATE: &str = r#"# AGENTS.md
 
 /// 开发环境下的内置技能包根目录：`<repo>/agent-sdk/skills`。
 fn builtin_skills_root() -> PathBuf {
+    if let Ok(dir) = std::env::var("OWO_SKILLS_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("skills");
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|parent| parent.parent())

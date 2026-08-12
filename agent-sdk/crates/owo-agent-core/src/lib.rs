@@ -38,9 +38,9 @@ pub use gateway::{
     ToolCall,
 };
 pub use learn::{
-    ActionGraph, ActionNode, ActionType, FlowSkillManifest, FlowSkillPackage, FlowSkillStore,
-    LearnRecorder, LearnState, ProactiveEngine, ProactiveSuggestion, RecordedAction,
-    SemanticAnchor, Sensitivity, SuggestionAction,
+    generalize_to_graph, ActionGraph, ActionNode, ActionType, FlowSkillManifest, FlowSkillPackage,
+    FlowSkillStore, LearnPipeline, LearnRecorder, LearnState, ProactiveEngine, ProactiveSuggestion,
+    RecordedAction, SemanticAnchor, Sensitivity, SuggestionAction,
 };
 pub use mcp::{McpClient, McpServerConfig, McpTool};
 pub use ocr::{ocr_bmp, OcrSummary};

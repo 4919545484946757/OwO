@@ -28,6 +28,16 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - L1 无障碍 UI 树（Windows UI Automation）：`accessibility.rs` 抓取前台窗口语义锚点（角色/名称/类名，按深度与节点数截断），写入情景快照 `ui_context.ui_tree`，内容未变化不重复记事件。
 - L2 本地摘要（Windows OCR）：`ocr.rs` 用系统自带 Media.Ocr 对内存截图离线识别文字，摘要进环形缓冲帧元数据（不落盘）；`POST /perception/capture` 按需采集（可传 width/height 采样），`POST /perception/layers` 逐层授权/热撤（L2 默认关闭，拒绝时 400）。
 - P3 动作图执行引擎（`executor.rs`）：按流程技能包动作图执行——语义锚点定位（UI Automation）→ 点击/输入/快捷键（SendInput）→ 状态验证；敏感面（密码/支付/验证码）熔断、成环检测、步数上限；`POST /learn/execute` 提交 `{graph, variables, max_steps}` 返回分步执行报告。
+- P3 示范学习流水线（`learn.rs`）：录制样本 → 泛化为动作图（同锚点重复 Type 推断 `{value}` 变量）→ 沉淀流程技能包（SKILL.md + graph.json + manifest.json）；`/learn/execute` 每步写入审计。
+
+### 便携打包
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package-desktop.ps1 -Configuration release
+# 产物：dist\OwO-Agent-release.zip（owo-agent.exe + owo-agent-desktop.exe + skills/ + README）
+```
+
+便携包内桌面壳自动定位同目录核心服务与 `skills/`（也可用 `OWO_SKILLS_DIR` / `OWO_AGENT_DATA` 覆盖）。
 
 ### 内置技能门禁
 
