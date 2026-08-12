@@ -24,6 +24,19 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 桌面工作台 Web 壳（P1 骨架）：`desktop/web/`（任务列表/对话 SSE 流式/审批条/diff 审阅/技能中心/感知状态区/白名单管理），由 HTTP 服务在 `/` 静态托管，后续用 Tauri 2 封装为桌面主客户端。
 - L0 前台窗口事件源（Windows）：`platform.rs` 用 Win32 轮询前台应用（app_id + 标题），`/context/snapshot` 自动刷新并去重写入情景快照。
 
+### 内置技能门禁
+
+四个内置技能包都带可执行端到端契约测试（`skills/<name>/tests/run_tests.*`），
+使用 python-docx / openpyxl / reportlab / pypdf / Poppler / Playwright + 本机 Edge：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\skill-gate.ps1
+# 或在 eval 门禁后追加技能门禁
+powershell -ExecutionPolicy Bypass -File scripts\run-eval-gate.ps1 -Threshold 0.8 -SkillGate
+```
+
+工具链可用环境变量覆盖：`OWO_SKILL_PYTHON` / `OWO_SKILL_NODE` / `OWO_SKILL_PDFTOPPM` / `OWO_SKILL_RUNTIME`。
+
 ### 打开桌面工作台
 
 ```powershell

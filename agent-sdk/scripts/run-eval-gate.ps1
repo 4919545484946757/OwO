@@ -1,7 +1,8 @@
-param(
+﻿param(
     [string]$Suite = "",
     [double]$Threshold = 0.8,
-    [string]$Binary = ""
+    [string]$Binary = "",
+    [switch]$SkillGate
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +24,14 @@ $rate = [double]$report.pass_rate
 Write-Host ("Eval: {0}/{1} passed, rate {2:P1} (threshold {3:P1})" -f $report.passed, $report.total, $rate, $Threshold)
 
 if ($rate -ge $Threshold) {
+    if ($SkillGate) {
+        Write-Host "Running builtin skill gate..."
+        & (Join-Path $PSScriptRoot "skill-gate.ps1")
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Skill gate failed"
+            exit 1
+        }
+    }
     exit 0
 } else {
     Write-Host "Eval gate failed (pass rate below threshold)"

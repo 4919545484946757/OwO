@@ -53,6 +53,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets   # 0 警告
 cargo test --workspace                    # 全绿（core/cli/server）
 scripts\run-eval-gate.ps1 -Threshold 0.8  # 评估门禁
+scripts\skill-gate.ps1                    # 内置技能端到端门禁
 ```
 
 ## 四、真实模型实测记录
@@ -85,6 +86,7 @@ scripts\run-eval-gate.ps1 -Threshold 0.8  # 评估门禁
 | CLI 接入 | ✅ | `/whitelist`、`/perception`、`/learn`、`/proactive` |
 | 桌面工作台 Web 壳（P1 骨架） | ✅ | `desktop/web/`：任务列表、对话 SSE 流式、审批条、diff 审阅、技能中心、感知状态区、白名单管理；`owo-agent serve` 在 `/` 静态托管；GET /、/app.js、/style.css、/sessions、/skills 冒烟通过 |
 | L0 前台窗口事件源（P2） | ✅ Windows | platform.rs（Win32 GetForegroundWindow/QueryFullProcessImageNameW）；`/context/snapshot` 自动刷新并去重；冒烟实测捕获 Obsidian 前台窗口且不重复记录 focus |
+| 内置技能真实执行链路（P1） | ✅ | `skills/*/tests/run_tests.py|js` 可执行契约测试：docx 生成/修改/结构校验、xlsx 生成/公式/CSV 往返、PDF 生成/AcroForm 填写/渲染校验、浏览器导航/表单/截图+DOM；`scripts/skill-gate.ps1` 全绿；可并入 `run-eval-gate.ps1 -SkillGate` |
 
 ### 下一迭代（P1 剩余 / P2）
 
