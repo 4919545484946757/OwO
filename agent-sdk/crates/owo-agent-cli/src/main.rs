@@ -224,6 +224,10 @@ async fn run_bench(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
         root.join("traces"),
         root.join("skills").join("user"),
     ));
+    let observer_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        owo_agent_server::start_observer(observer_state).await;
+    });
     let app = owo_agent_server::build_router(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     let addr = listener.local_addr()?;

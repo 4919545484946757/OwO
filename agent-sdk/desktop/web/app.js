@@ -132,10 +132,11 @@ async function executePackage(package) {
       return;
     }
   }
+  if (!confirm(`确认执行技能包 ${package.name}？首次执行需要审批。`)) return;
   try {
     const report = await api("/learn/execute-package", {
       method: "POST",
-      body: JSON.stringify({ name: package.name, variables }),
+      body: JSON.stringify({ name: package.name, variables, confirm: true }),
     });
     if (report.ok) {
       addMessage("system", `技能包 ${package.name} 执行成功（${report.steps.length} 步）`);

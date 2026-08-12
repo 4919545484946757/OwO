@@ -30,6 +30,7 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - P3 动作图执行引擎（`executor.rs`）：按流程技能包动作图执行——语义锚点定位（UI Automation）→ 点击/输入/快捷键（SendInput）→ 状态验证；敏感面（密码/支付/验证码）熔断、成环检测、步数上限；`POST /learn/execute` 提交 `{graph, variables, max_steps}` 返回分步执行报告。
 - P3 示范学习流水线（`learn.rs`）：录制样本 → 泛化为动作图（同锚点重复 Type 推断 `{value}` 变量）→ 沉淀流程技能包（SKILL.md + graph.json + manifest.json）；`/learn/execute` 每步写入审计。
 - P3 桌面闭环 UI（`desktop/web`）：操作学习面板（开始/暂停/恢复/结束/清空录制、沉淀技能包、流程技能包列表与一键执行）+ 主动建议区（学习/执行一次/忽略/静默 四选）；接口 `/learn/start|stop|packages|sink|execute-package`、`/proactive/suggestions`。
+- P3 执行审批：`/learn/execute` 与 `/learn/execute-package` 服务端强制 `confirm: true`（首次执行必须确认），确认与分步结果写入审计；录制自动观察（`start_observer`）在录制中每 2s 采样前台/剪贴板掩码事件（前台变化去重、剪贴板按序列号去重）。
 
 ### 便携打包
 

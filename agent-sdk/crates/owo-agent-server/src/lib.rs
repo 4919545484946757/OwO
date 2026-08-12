@@ -11,8 +11,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use owo_agent_core::learn::{
-    LearnPipeline, LearnState, ProactiveEngine, ProactiveSuggestion, RecordedAction, Sensitivity,
-    SuggestionAction,
+    ActionType, LearnPipeline, LearnState, ProactiveEngine, ProactiveSuggestion, RecordedAction,
+    SemanticAnchor, Sensitivity, SuggestionAction,
 };
 use owo_agent_core::perception::{SituationSnapshot, SituationStore};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
@@ -30,6 +30,7 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::CorsLayer;
@@ -727,6 +728,9 @@ struct ExecuteRequest {
     variables: std::collections::HashMap<String, String>,
     #[serde(default)]
     max_steps: Option<usize>,
+    /// 首次执行必须显式确认（服务端强制审批）。
+    #[serde(default)]
+    confirm: bool,
 }
 
 /// 执行流程技能包动作图（Windows：UI Automation + SendInput，敏感面熔断）。
@@ -734,6 +738,12 @@ async fn learn_execute(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ExecuteRequest>,
 ) -> Result<Json<owo_agent_core::ExecReport>, (StatusCode, String)> {
+    if !request.confirm {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "首次执行必须确认（confirm: true）".to_string(),
+        ));
+    }
     let source = owo_agent_core::WindowsUiaSource::new()
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     let report = owo_agent_core::execute_graph(
@@ -828,6 +838,9 @@ struct ExecutePackageRequest {
     variables: HashMap<String, String>,
     #[serde(default)]
     max_steps: Option<usize>,
+    /// 首次执行必须显式确认（服务端强制审批）。
+    #[serde(default)]
+    confirm: bool,
 }
 
 /// 从流程技能包加载动作图并执行（首次执行需在 UI 确认，步审计入库）。
@@ -835,6 +848,12 @@ async fn learn_execute_package(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ExecutePackageRequest>,
 ) -> Result<Json<owo_agent_core::ExecReport>, (StatusCode, String)> {
+    if !request.confirm {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "首次执行必须确认（confirm: true）".to_string(),
+        ));
+    }
     let package = {
         let pipeline = state.pipeline.lock().map_err(poison)?;
         pipeline
@@ -851,6 +870,13 @@ async fn learn_execute_package(
         request.max_steps.unwrap_or(20),
     );
     if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "learn-execute-package",
+            "approval",
+            Some(request.name.clone()),
+            Some(true),
+            "首次执行已确认",
+        );
         for step in &report.steps {
             audit.record(
                 "learn-execute-package",
@@ -1042,6 +1068,72 @@ fn to_sse(event: &owo_agent_core::TurnEvent) -> Option<SseEvent> {
 
 fn poison<T>(_error: std::sync::PoisonError<T>) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, "状态锁中毒".to_string())
+}
+
+/// P3 录制自动观察：录制中每 2s 采样前台应用/剪贴板事件（掩码）进入样本。
+/// 前台应用变化只记一次，剪贴板变化按序列号去重。
+pub async fn start_observer(state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    let mut last_app: Option<(String, String)> = None;
+    let mut last_clipboard: u32 = 0;
+    loop {
+        interval.tick().await;
+        let (foreground, clipboard_changed) = {
+            let mut perception = state
+                .perception
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _ = perception.refresh_from_platform();
+            let sequence = owo_agent_core::clipboard_sequence();
+            let changed = sequence != 0 && sequence != last_clipboard;
+            perception.refresh_clipboard(sequence);
+            let _ = perception.refresh_from_uia(2, 32);
+            let snapshot = perception.snapshot();
+            (snapshot.foreground_app.clone(), changed)
+        };
+        let mut pipeline = state
+            .pipeline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pipeline.recorder.state() != LearnState::Recording {
+            continue;
+        }
+        if let Some(app) = &foreground {
+            let key = (app.id.clone(), app.title.clone());
+            if last_app.as_ref() != Some(&key) {
+                last_app = Some(key);
+                let _ = pipeline.recorder.record(RecordedAction {
+                    app_id: app.id.clone(),
+                    anchor: SemanticAnchor {
+                        app_id: Some(app.id.clone()),
+                        role: None,
+                        name: app.title.clone(),
+                    },
+                    action_type: ActionType::Shortcut,
+                    value_masked: true,
+                    sensitive: false,
+                    at: chrono::Utc::now().to_rfc3339(),
+                });
+            }
+        }
+        if clipboard_changed {
+            last_clipboard = owo_agent_core::clipboard_sequence();
+            if let Some(app) = &foreground {
+                let _ = pipeline.recorder.record(RecordedAction {
+                    app_id: app.id.clone(),
+                    anchor: SemanticAnchor {
+                        app_id: Some(app.id.clone()),
+                        role: None,
+                        name: "剪贴板".to_string(),
+                    },
+                    action_type: ActionType::Inject,
+                    value_masked: true,
+                    sensitive: false,
+                    at: chrono::Utc::now().to_rfc3339(),
+                });
+            }
+        }
+    }
 }
 
 fn to_event(sse: SseEvent) -> Result<Event, Infallible> {
