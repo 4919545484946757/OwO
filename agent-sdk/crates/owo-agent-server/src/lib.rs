@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 pub struct AppState {
@@ -96,6 +97,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/whitelist", get(whitelist_list))
         .route("/whitelist/manage", post(whitelist_manage))
         .fallback_service(ServeDir::new(desktop_web_dir()))
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 

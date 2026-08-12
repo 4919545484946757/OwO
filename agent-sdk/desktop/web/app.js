@@ -8,9 +8,11 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+// 由 Tauri 壳注入核心服务地址；经核心服务同源托管时为空字符串。
+const API_BASE = window.OWO_API_BASE || "";
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(API_BASE + path, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
@@ -136,7 +138,7 @@ async function sendPrompt() {
 
   state.reading = true;
   try {
-    const response = await fetch(`/session/${state.sessionId}/turn`, {
+    const response = await fetch(`${API_BASE}/session/${state.sessionId}/turn`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt }),

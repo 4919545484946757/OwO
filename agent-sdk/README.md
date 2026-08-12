@@ -45,6 +45,19 @@ owo-agent serve --port 4096 --workspace .
 # 浏览器打开 http://127.0.0.1:4096/
 ```
 
+### 桌面主客户端（Tauri 2 壳）
+
+```powershell
+cargo build -p owo-agent-cli                    # 先编译核心服务
+cd desktop\tauri\src-tauri
+cargo build
+.\target\debug\owo-agent-desktop.exe            # 自动拉起核心服务，Ctrl+Alt+Shift+O 唤起
+```
+
+Tauri 壳为无状态窗口：加载 `desktop/web/` 工作台，启动时自动拉起
+`owo-agent serve`（127.0.0.1:4096），退出时回收子进程；含系统托盘（显示/退出）。
+核心服务已开启 CORS（本机回环），供 WebView 跨源访问。
+
 ## 环境变量
 
 ```text

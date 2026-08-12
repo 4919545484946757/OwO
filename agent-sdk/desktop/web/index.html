@@ -65,6 +65,10 @@
     </section>
   </aside>
 
+  <script>
+    // Tauri 壳内加载时指向常驻核心服务；经核心服务同源托管时保持同源。
+    window.OWO_API_BASE = window.OWO_API_BASE || (window.__TAURI_INTERNALS__ ? "http://127.0.0.1:4096" : "");
+  </script>
   <script src="app.js"></script>
 </body>
 </html>
