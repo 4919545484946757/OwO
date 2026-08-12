@@ -75,6 +75,9 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - 真实环境迭代工具（v0.4.8）：`scripts/browser-driver-direct-test.py` 不经 Agent 直连真实网页
   验证驱动（360 搜索→文章→下载 141KB JPEG）；`scripts/real-qq-group-send.py` 群聊受控发送
   （带“校验聊天头防发错”保护）；SendInput 注入失败自动重试。
+- 窗口级截取（v0.4.9，M-A）：`POST /perception/window {hwnd}` 与 `desktop_window_ocr` 工具
+  用 PrintWindow 后台只读抓指定窗口并用 PP-OCRv6 识别（返回屏幕坐标）；实测后台抓 QQ 窗口
+  339 字符/33 行，不切前台。
 
 ### STT WER/CER 评估
 

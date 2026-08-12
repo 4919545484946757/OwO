@@ -128,6 +128,9 @@ pub struct WindowInfo {
     pub visible: bool,
 }
 
+/// 窗口截图结果：BMP 字节 + 窗口屏幕矩形 `(left, top, right, bottom)`。
+pub type WindowBmp = (Vec<u8>, (i32, i32, i32, i32));
+
 /// 枚举顶层窗口（进程名 + 标题 + 屏幕矩形），供“找到 QQ/浏览器窗口并激活”使用。
 #[cfg(target_os = "windows")]
 pub fn window_list() -> Vec<WindowInfo> {
@@ -172,6 +175,85 @@ pub fn window_list() -> Vec<WindowInfo> {
         EnumWindows(Some(callback), &mut out as *mut Vec<WindowInfo> as isize);
     }
     out
+}
+
+/// 后台只读抓取指定窗口内容（PrintWindow，可抓被遮挡窗口），返回 BMP 与屏幕矩形。
+#[cfg(target_os = "windows")]
+pub fn capture_window_bmp(hwnd: isize) -> Option<WindowBmp> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        HGDIOBJ, SRCCOPY,
+    };
+    use windows_sys::Win32::Storage::Xps::PrintWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, PW_RENDERFULLCONTENT};
+    unsafe {
+        let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+        let mut rect: RECT = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut rect) == 0 {
+            return None;
+        }
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let window_dc = GetDC(hwnd);
+        if window_dc.is_null() {
+            return None;
+        }
+        let memory = CreateCompatibleDC(window_dc);
+        let bitmap = CreateCompatibleBitmap(window_dc, width, height);
+        if memory.is_null() || bitmap.is_null() {
+            let _ = ReleaseDC(hwnd, window_dc);
+            if !memory.is_null() {
+                DeleteDC(memory);
+            }
+            if !bitmap.is_null() {
+                DeleteObject(bitmap as HGDIOBJ);
+            }
+            return None;
+        }
+        let old = SelectObject(memory, bitmap as HGDIOBJ);
+        let printed = PrintWindow(hwnd, memory, PW_RENDERFULLCONTENT);
+        if printed == 0 {
+            BitBlt(memory, 0, 0, width, height, window_dc, 0, 0, SRCCOPY);
+        }
+        SelectObject(memory, old);
+        let mut info: BITMAPINFO = std::mem::zeroed();
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+        let got = GetDIBits(
+            memory,
+            bitmap,
+            0,
+            height as u32,
+            pixels.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        let _ = DeleteObject(bitmap as HGDIOBJ);
+        let _ = DeleteDC(memory);
+        let _ = ReleaseDC(hwnd, window_dc);
+        if got == 0 {
+            return None;
+        }
+        Some((
+            encode_bmp(width, height, &pixels),
+            (rect.left, rect.top, rect.right, rect.bottom),
+        ))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn capture_window_bmp(_hwnd: isize) -> Option<WindowBmp> {
+    None
 }
 
 #[cfg(not(target_os = "windows"))]

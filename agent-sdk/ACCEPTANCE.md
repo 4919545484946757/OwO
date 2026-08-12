@@ -229,6 +229,17 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 | 滚轮支持 | ✅ | `desktop_scroll`（tool + HTTP + executor），权限 Inject；滚动会话/聊天列表 |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 99） |
 
+## 十五、v0.4.9 窗口级截取（M-A 第一优先，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| PrintWindow 窗口抓取 | ✅ | `platform::capture_window_bmp`（PW_RENDERFULLCONTENT，失败回退 BitBlt），后台只读、可抓被遮挡窗口；返回 BMP+屏幕矩形 |
+| 窗口级 OCR 接口 | ✅ | `POST /perception/window {hwnd}`：窗口 BMP → PP-OCRv6/Media → 文本+整行坐标（窗口矩形附带） |
+| Agent 工具 | ✅ | `desktop_window_ocr`（hwnd 或 process/title），输出转屏幕坐标，权限 Read |
+| 实测（QQ 窗口 198064） | ✅ | 后台只读抓取 QQ（846,179-1856,951）→ paddle-v6，339 字符/33 行，“张子豪/发送”可读；全程不切前台、不干扰桌面 |
+
+下一步：窗口模板（ROI 集合）与“窗口元素注册表”，把窗口级 OCR 稳定用于真实 QQ 会话定位。
+
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
 

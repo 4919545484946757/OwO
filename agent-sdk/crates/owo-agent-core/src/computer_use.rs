@@ -343,6 +343,86 @@ impl Tool for OcrRegionTool {
     }
 }
 
+pub struct DesktopWindowOcrTool;
+
+#[async_trait]
+impl Tool for DesktopWindowOcrTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "desktop_window_ocr".into(),
+            description: "后台只读抓取指定窗口内容并 OCR（PrintWindow，可抓被遮挡窗口；传 hwnd，或 process/title 模糊匹配），返回窗口屏幕矩形和整行文本（屏幕坐标），用于窗口级情景理解".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "hwnd": { "type": "integer" },
+                    "process": { "type": "string" },
+                    "title": { "type": "string" }
+                }
+            }),
+        }
+    }
+
+    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        let hwnd: isize = if let Some(value) = args.get("hwnd").and_then(Value::as_i64) {
+            value as isize
+        } else {
+            let process = args
+                .get("process")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let title = args
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if process.is_empty() && title.is_empty() {
+                return Err("desktop_window_ocr 需要 hwnd 或 process/title".to_string());
+            }
+            let windows = crate::platform::window_list();
+            windows
+                .iter()
+                .find(|window| {
+                    window.visible
+                        && ((!process.is_empty() && window.process.contains(process))
+                            || (!title.is_empty() && window.title.contains(title)))
+                })
+                .map(|window| window.hwnd)
+                .ok_or_else(|| format!("未找到窗口（process={process}, title={title}）"))?
+        };
+        let (bmp, rect) = crate::platform::capture_window_bmp(hwnd)
+            .ok_or_else(|| format!("窗口截图失败（hwnd={hwnd}）"))?;
+        let summary = crate::paddle_ocr::ocr_preferred(&bmp).await?;
+        let mut result = ocr_summary_json(&summary, 200);
+        if let Value::Object(map) = &mut result {
+            if let Some(lines) = map.get_mut("lines").and_then(Value::as_array_mut) {
+                for line in lines {
+                    if let Some(x) = line.get("x").and_then(Value::as_i64) {
+                        line["x"] = json!(x + rect.0 as i64);
+                    }
+                    if let Some(y) = line.get("y").and_then(Value::as_i64) {
+                        line["y"] = json!(y + rect.1 as i64);
+                    }
+                }
+            }
+            if let Some(boxes) = map.get_mut("boxes").and_then(Value::as_array_mut) {
+                for b in boxes {
+                    if let Some(x) = b.get("x").and_then(Value::as_i64) {
+                        b["x"] = json!(x + rect.0 as i64);
+                    }
+                    if let Some(y) = b.get("y").and_then(Value::as_i64) {
+                        b["y"] = json!(y + rect.1 as i64);
+                    }
+                }
+            }
+            map.insert("surface".into(), json!("window"));
+            map.insert(
+                "window".into(),
+                json!({ "hwnd": hwnd, "rect": [rect.0, rect.1, rect.2, rect.3] }),
+            );
+        }
+        Ok(result)
+    }
+}
+
 pub struct DesktopForegroundTool;
 
 #[async_trait]

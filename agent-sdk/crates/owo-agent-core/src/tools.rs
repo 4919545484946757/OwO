@@ -50,6 +50,7 @@ impl ToolRegistry {
         registry.register(UseSkillTool);
         registry.register(crate::computer_use::ScreenOcrTool);
         registry.register(crate::computer_use::OcrRegionTool);
+        registry.register(crate::computer_use::DesktopWindowOcrTool);
         registry.register(crate::computer_use::DesktopForegroundTool);
         registry.register(crate::computer_use::DesktopWindowListTool);
         registry.register(crate::computer_use::DesktopActivateTool);

@@ -135,6 +135,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/perception/ocr/bytes", post(perception_ocr_bytes))
         .route("/perception/ocr/status", get(ocr_status))
         .route("/perception/ocr/region", post(perception_ocr_region))
+        .route("/perception/window", post(perception_window))
         .route("/desktop/foreground", get(desktop_foreground))
         .route("/desktop/windows", get(desktop_windows))
         .route("/desktop/activate", post(desktop_activate))
@@ -1250,6 +1251,42 @@ async fn perception_ocr_region(
         .await
         .map(Json)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))
+}
+
+#[derive(serde::Deserialize)]
+struct WindowOcrRequest {
+    hwnd: i64,
+}
+
+/// 窗口级 OCR：PrintWindow 后台只读抓取指定窗口 → PP-OCRv6/Media 识别，返回窗口矩形与文本行。
+async fn perception_window(
+    Json(request): Json<WindowOcrRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let (bmp, rect) = owo_agent_core::platform::capture_window_bmp(request.hwnd as isize)
+        .ok_or((StatusCode::BAD_REQUEST, "窗口截图失败".to_string()))?;
+    let summary = owo_agent_core::ocr_preferred(&bmp)
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    let lines: Vec<Value> = owo_agent_core::group_ocr_lines(&summary.boxes)
+        .into_iter()
+        .map(|line| {
+            json!({
+                "text": line.text,
+                "x": line.x,
+                "y": line.y,
+                "width": line.width,
+                "height": line.height,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "window_rect": [rect.0, rect.1, rect.2, rect.3],
+        "provider": summary.provider,
+        "chars": summary.chars,
+        "text": summary.text,
+        "lines": lines,
+        "boxes": summary.boxes,
+    })))
 }
 
 #[derive(serde::Deserialize)]

@@ -121,6 +121,7 @@ impl Policy {
             "run_command" => Level::Execute,
             "text.inject" | "clipboard" => Level::Inject,
             "screen_ocr"
+            | "desktop_window_ocr"
             | "ocr_region"
             | "desktop_foreground"
             | "desktop_window_list"
