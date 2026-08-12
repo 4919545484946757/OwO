@@ -18,12 +18,12 @@ if ((Test-Path (Join-Path $targetDir "model.int8.onnx")) -and (Test-Path (Join-P
     exit 0
 }
 
-$url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17-int8.tar.bz2"
+$url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
 $tmp = Join-Path $env:TEMP "sherpa-onnx-sense-voice-int8.tar.bz2"
 $extract = Join-Path $env:TEMP "sherpa-onnx-sense-voice-int8"
 
 Write-Host "[stt] 下载 SenseVoice-Small（约 240MB，可设置 HTTPS_PROXY 加速）..."
-curl.exe -L -o $tmp $url
+curl.exe -fL -o $tmp $url
 if ($LASTEXITCODE -ne 0) { throw "下载失败" }
 
 if (Test-Path $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
