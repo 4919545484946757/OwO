@@ -453,3 +453,16 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 
 说明：D24 主动建议的“学习/执行一次/忽略/静默”四选在 HTTP+Web 端全部可解析；
 “执行一次”仍走执行审批（技能包执行需 confirm），默认只提示不执行的安全边界保持不变。
+
+## 三十三、v0.4.27 vision_ground 置信度解析（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 边界框+置信度解析 | ✅ | `parse_vision_box_with_confidence`：支持 `BOX x,y,w,h 0.85`、`BOX x,y,w,h（置信度 80%）`、裸四元组；无置信度时为 None；`VisionBox` 类型别名收敛签名 |
+| 置信度提取复用 | ✅ | `extract_confidence` 供 parse_verification 与 grounding 共用；百分比兜底仅在文本含 `%` 时启用（修复裸整数被误判为 0.x 的缺陷） |
+| grounding 提示词与响应 | ✅ | 提示词要求“BOX x,y,w,h + 0-1 置信度”；matched/未交叉验证响应均带 `confidence` 字段（未给出时 null） |
+| 注册表置信度透传 | ✅ | `vision_grounding_from_value` 已读取 confidence（缺省 0.7），单测覆盖 0.88 透传与缺省值 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 123） |
+
+说明：置信度进入元素注册表后，可支撑后续“低置信度元素不直接点击/需二次确认”的策略
+（当前交叉验证仍以 OCR 重合为准，安全边界不变）。

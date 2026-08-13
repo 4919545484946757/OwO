@@ -1685,6 +1685,7 @@ mod tests {
             "matched": true,
             "description": "发送按钮",
             "box": [815, 624, 170, 36],
+            "confidence": 0.88,
             "cross_validated": true,
             "surface": "desktop"
         });
@@ -1694,9 +1695,13 @@ mod tests {
         assert_eq!(grounding.width, 170);
         assert_eq!(grounding.height, 36);
         assert!(grounding.cross_validated);
-        assert!((grounding.confidence - 0.7).abs() < 1e-9);
+        assert!((grounding.confidence - 0.88).abs() < 1e-9);
 
         let bad = json!({ "matched": true, "box": [1, 2, 3] });
         assert!(vision_grounding_from_value(&bad, "x").is_err());
+
+        let no_confidence = json!({ "matched": true, "box": [1, 2, 3, 4] });
+        let grounding = vision_grounding_from_value(&no_confidence, "x").expect("默认置信度");
+        assert!((grounding.confidence - 0.7).abs() < 1e-9);
     }
 }

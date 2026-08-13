@@ -276,11 +276,18 @@ pub fn parse_verification(text: &str) -> (String, Option<f64>) {
     } else {
         "unknown"
     };
-    let confidence = text
-        .split(|c: char| !c.is_ascii_digit() && c != '.')
+    (answer.to_string(), extract_confidence(text))
+}
+
+/// 从模型输出中提取 0-1 置信度：优先小数（如 0.85），其次百分比（如 85%）。
+fn extract_confidence(text: &str) -> Option<f64> {
+    text.split(|c: char| !c.is_ascii_digit() && c != '.')
         .filter_map(|part| part.parse::<f64>().ok())
         .find(|value| (0.0..=1.0).contains(value))
         .or_else(|| {
+            if !text.contains('%') {
+                return None;
+            }
             text.split('%')
                 .next()
                 .and_then(|head| {
@@ -290,8 +297,7 @@ pub fn parse_verification(text: &str) -> (String, Option<f64>) {
                 .and_then(|part| part.trim().parse::<f64>().ok())
                 .map(|value| value / 100.0)
                 .filter(|value| (0.0..=1.0).contains(value))
-        });
-    (answer.to_string(), confidence)
+        })
 }
 
 /// 构造视觉验证提示词。
@@ -312,7 +318,16 @@ pub fn verification_prompt(question: &str, ignore_placeholder: bool) -> String {
 }
 
 /// 解析视觉模型返回的边界框：`BOX x,y,w,h`、`x,y,w,h` 或 JSON `{"box":[x,y,w,h]}`。
-pub fn parse_vision_box(text: &str) -> Option<(i32, i32, i32, i32)> {
+pub type VisionBox = (i32, i32, i32, i32);
+
+pub fn parse_vision_box(text: &str) -> Option<VisionBox> {
+    parse_vision_box_with_confidence(text).map(|(r#box, _)| r#box)
+}
+
+/// 解析边界框 + 可选置信度：`BOX x,y,w,h [confidence]`、裸四元组或 JSON box。
+///
+/// 置信度从原始文本提取（0-1 小数或百分比），未给出时为 None。
+pub fn parse_vision_box_with_confidence(text: &str) -> Option<(VisionBox, Option<f64>)> {
     let normalized = text.replace(['(', ')', '[', ']', '“', '”', '"'], " ");
     if let Some(start) = normalized.find("BOX") {
         let rest = &normalized[start + 3..];
@@ -321,7 +336,10 @@ pub fn parse_vision_box(text: &str) -> Option<(i32, i32, i32, i32)> {
             .filter_map(|part| part.parse::<i32>().ok())
             .collect();
         if numbers.len() >= 4 {
-            return Some((numbers[0], numbers[1], numbers[2], numbers[3]));
+            return Some((
+                (numbers[0], numbers[1], numbers[2], numbers[3]),
+                extract_confidence(text),
+            ));
         }
     }
     if let Some(start) = normalized.find("box") {
@@ -331,7 +349,10 @@ pub fn parse_vision_box(text: &str) -> Option<(i32, i32, i32, i32)> {
             .filter_map(|part| part.parse::<i32>().ok())
             .collect();
         if numbers.len() >= 4 {
-            return Some((numbers[0], numbers[1], numbers[2], numbers[3]));
+            return Some((
+                (numbers[0], numbers[1], numbers[2], numbers[3]),
+                extract_confidence(text),
+            ));
         }
     }
     // 裸四元组（前面没有 BOX 关键字）
@@ -340,14 +361,17 @@ pub fn parse_vision_box(text: &str) -> Option<(i32, i32, i32, i32)> {
         .filter_map(|part| part.parse::<i32>().ok())
         .collect();
     if numbers.len() == 4 {
-        return Some((numbers[0], numbers[1], numbers[2], numbers[3]));
+        return Some((
+            (numbers[0], numbers[1], numbers[2], numbers[3]),
+            extract_confidence(text),
+        ));
     }
     None
 }
 
 /// 交叉验证：OCR 行中心是否落在视觉框内（grounding 必须与 OCR 文本重合才允许点击）。
 pub fn cross_validate_box(
-    r#box: &(i32, i32, i32, i32),
+    r#box: &VisionBox,
     lines: &[crate::ocr::OcrLine],
 ) -> Option<serde_json::Value> {
     let (bx, by, bw, bh) = *r#box;
@@ -373,10 +397,11 @@ pub async fn ground_element(description: &str) -> Result<serde_json::Value, Stri
     let png = bmp_to_png(&bmp)?;
     let prompt = format!(
         "截图中有没有满足以下描述的元素：{description}。如果有，只输出 BOX x,y,w,h \
-         （四个整数：左上角 x、y，宽度 w、高度 h）；如果没有，只输出 NONE。"
+         （四个整数：左上角 x、y，宽度 w、高度 h）和 0-1 置信度（例如 BOX 815,624,170,36 0.85）；\
+         如果没有，只输出 NONE。"
     );
     let raw = describe_image(&png, &prompt).await?;
-    let Some(r#box) = parse_vision_box(&raw) else {
+    let Some((r#box, confidence)) = parse_vision_box_with_confidence(&raw) else {
         return Ok(serde_json::json!({
             "matched": false,
             "description": description,
@@ -392,6 +417,7 @@ pub async fn ground_element(description: &str) -> Result<serde_json::Value, Stri
             "description": description,
             "box": r#box,
             "line": line,
+            "confidence": confidence,
             "cross_validated": true,
             "surface": surface,
         }))
@@ -400,6 +426,7 @@ pub async fn ground_element(description: &str) -> Result<serde_json::Value, Stri
             "matched": false,
             "description": description,
             "box": r#box,
+            "confidence": confidence,
             "reason": "视觉框与 OCR 文本未重合，不允许点击",
             "surface": surface,
         }))
@@ -486,6 +513,17 @@ mod tests {
             parse_vision_box("BOX 815,624,170,36"),
             Some((815, 624, 170, 36))
         );
+        let (r#box, confidence) =
+            parse_vision_box_with_confidence("BOX 815,624,170,36 0.85").expect("带置信度");
+        assert_eq!(r#box, (815, 624, 170, 36));
+        assert!((confidence.unwrap_or(0.0) - 0.85).abs() < 1e-9);
+        let (r#box, confidence) =
+            parse_vision_box_with_confidence("BOX 815,624,170,36（置信度 80%）").expect("百分比");
+        assert_eq!(r#box, (815, 624, 170, 36));
+        assert!((confidence.unwrap_or(0.0) - 0.8).abs() < 1e-9);
+        let (_, confidence) =
+            parse_vision_box_with_confidence("BOX 100 200 50 30").expect("无置信度");
+        assert!(confidence.is_none());
         assert_eq!(
             parse_vision_box("结果是 BOX 100 200 50 30"),
             Some((100, 200, 50, 30))
