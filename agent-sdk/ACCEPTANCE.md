@@ -491,5 +491,16 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 可观测落点 | ✅ | TraceRecord 记录 usage（旧 trace 反序列化兼容）；服务端回合结束写 `model/usage` 审计（prompt/completion/total/cost_usd，价格经 `OWO_MODEL_INPUT/OUTPUT_PRICE_PER_MTOK` 配置） |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 127） |
 
-说明：P0“用量统计/预算上限”的统计部分补齐；预算上限（超过阈值熔断）留作下一轮，
-成本估算默认 0（未配置单价时不产生误导性数字）。
+说明：P0“用量统计/预算上限”统计部分已补齐；预算上限见下一节。
+
+## 三十六、v0.4.30 模型用量预算上限（P0 补齐，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 预算熔断纯函数 | ✅ | `budget_violation(usage, total_cap, cost_cap, in_price, out_price)`：累计 token 或成本任一超限返回明确原因；未配置预算返回 None；单测覆盖未超/超限/成本三档 |
+| Provider 预算检查 | ✅ | `OpenAiCompatibleProvider::usage_budget_check` 每次 complete/complete_stream 发请求前检查（在数据出境开关之后、联网之前），超限直接 Err，不产生新开销 |
+| 配置入口 | ✅ | `OWO_USAGE_TOKEN_BUDGET`（累计 token 上限）、`OWO_USAGE_COST_BUDGET_USD`（成本上限，配合 `OWO_MODEL_INPUT/OUTPUT_PRICE_PER_MTOK` 单价）；未配置默认不熔断 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 128） |
+
+说明：至此 P0 模型网关“统一 Provider 接口/流式/工具调用/用量统计/预算上限/BYOK”全部落地；
+预算为累计口径（跨会话进程内累计），进程重启后归零，云端持久化预算留作 v2。

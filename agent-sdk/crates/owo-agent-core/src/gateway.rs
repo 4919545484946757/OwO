@@ -104,6 +104,36 @@ impl TokenUsage {
     }
 }
 
+/// 用量预算熔断：返回超限原因；未配置预算时返回 None。
+///
+/// 累计 token 上限（`OWO_USAGE_TOKEN_BUDGET`）与累计成本上限（美元，
+/// `OWO_USAGE_COST_BUDGET_USD`，需配合单价环境变量）任一超限即熔断。
+pub fn budget_violation(
+    usage: &TokenUsage,
+    total_tokens_cap: Option<u64>,
+    cost_cap_usd: Option<f64>,
+    input_price_per_mtok: f64,
+    output_price_per_mtok: f64,
+) -> Option<String> {
+    if let Some(cap) = total_tokens_cap {
+        if usage.total_tokens >= cap {
+            return Some(format!(
+                "模型用量预算已超限：累计 {} tokens ≥ 上限 {}",
+                usage.total_tokens, cap
+            ));
+        }
+    }
+    if let Some(cap) = cost_cap_usd {
+        let cost = usage.cost_estimate_usd(input_price_per_mtok, output_price_per_mtok);
+        if cost >= cap {
+            return Some(format!(
+                "模型成本预算已超限：累计 ${cost:.6} ≥ 上限 ${cap:.6}"
+            ));
+        }
+    }
+    None
+}
+
 /// 从模型响应 usage 字段提取 token 用量（兼容 OpenAI/DeepSeek 与 Ollama 字段）。
 pub fn parse_usage_value(usage: &Value) -> TokenUsage {
     if !usage.is_object() {
@@ -257,6 +287,29 @@ impl OpenAiCompatibleProvider {
         if let Ok(mut current) = self.usage.lock() {
             current.add(&parsed);
         }
+    }
+
+    /// 读取环境变量预算并检查当前累计用量是否超限。
+    fn usage_budget_check(&self) -> Option<String> {
+        let total_cap = std::env::var("OWO_USAGE_TOKEN_BUDGET")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+        let cost_cap = std::env::var("OWO_USAGE_COST_BUDGET_USD")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok());
+        if total_cap.is_none() && cost_cap.is_none() {
+            return None;
+        }
+        let input_price = std::env::var("OWO_MODEL_INPUT_PRICE_PER_MTOK")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let output_price = std::env::var("OWO_MODEL_OUTPUT_PRICE_PER_MTOK")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let usage = self.usage.lock().map(|usage| *usage).unwrap_or_default();
+        budget_violation(&usage, total_cap, cost_cap, input_price, output_price)
     }
 
     /// 发送请求：优先代理客户端，失败自动切直连重试一次（多轮流式挂起时稳定）。
@@ -482,6 +535,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
         if !self.cloud_enabled() {
             return Err("云端模型已禁用（数据出境开关关闭）".to_string());
         }
+        if let Some(reason) = self.usage_budget_check() {
+            return Err(reason);
+        }
         let body = self.request_body(messages, tools, false);
         let url = format!(
             "{}/chat/completions",
@@ -542,6 +598,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
     ) -> Result<ModelOutput, String> {
         if !self.cloud_enabled() {
             return Err("云端模型已禁用（数据出境开关关闭）".to_string());
+        }
+        if let Some(reason) = self.usage_budget_check() {
+            return Err(reason);
         }
         let body = self.request_body(messages, tools, true);
         let url = format!(
@@ -701,6 +760,27 @@ mod tests {
         let delta = before.saturating_sub(&TokenUsage::default());
         assert_eq!(delta.prompt_tokens, 300);
         assert!((delta.cost_estimate_usd(2.0, 8.0) - 0.00124).abs() < 1e-9);
+    }
+
+    #[test]
+    fn budget_violation_blocks_when_caps_exceeded() {
+        let usage = TokenUsage {
+            prompt_tokens: 900,
+            completion_tokens: 200,
+            total_tokens: 1100,
+        };
+        assert!(budget_violation(&usage, None, None, 0.0, 0.0).is_none());
+        assert!(budget_violation(&usage, Some(2000), None, 0.0, 0.0).is_none());
+        let violation =
+            budget_violation(&usage, Some(1000), None, 0.0, 0.0).expect("token 超限应熔断");
+        assert!(violation.contains("用量预算"));
+        assert!(violation.contains("1100"));
+
+        let cost = budget_violation(&usage, None, Some(0.001), 2.0, 8.0).expect("成本超限应熔断");
+        assert!(cost.contains("成本预算"));
+
+        // 未到成本上限不熔断：0.0006+0.0016=0.0022 < 0.01。
+        assert!(budget_violation(&usage, None, Some(0.01), 0.5, 2.0).is_none());
     }
 
     #[test]
