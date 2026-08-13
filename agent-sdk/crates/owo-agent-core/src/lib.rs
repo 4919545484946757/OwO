@@ -48,8 +48,8 @@ pub use error::AgentError;
 pub use eval::{builtin_suite, eval_suite_path, run_suite, EvalCase, EvalReport, EvalSuite};
 pub use executor::{execute_graph, ExecReport, ExecStep, UiActionSource, WindowsUiaSource};
 pub use gateway::{
-    ChatMessage, ModelOutput, ModelProvider, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    ToolCall,
+    parse_usage_value, ChatMessage, ModelOutput, ModelProvider, OpenAiCompatibleConfig,
+    OpenAiCompatibleProvider, TokenUsage, ToolCall,
 };
 pub use learn::{
     generalize_to_graph, recorded_actions_from_sequence, ActionGraph, ActionNode, ActionType,

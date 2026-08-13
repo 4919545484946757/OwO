@@ -36,7 +36,7 @@
 |---|---|
 | Agent SDK 核心（loop/工具/上下文/会话/审计） | ✅ |
 | 权限与审批（deny/ask/allow、独立审批接口） | ✅ |
-| 模型网关（OpenAI-compatible/Anthropic 预留、流式、用量） | ✅（流式/工具；用量统计待补） |
+| 模型网关（OpenAI-compatible/Anthropic 预留、流式、用量） | ✅（流式/工具/用量统计） |
 | 执行环境（本地沙箱 workspace 校验） | ✅（OS 级沙箱为后续） |
 | AGENTS.md + Skills + 子代理 | ✅ |
 | MCP 工具生态（stdio/HTTP） | ✅ |
@@ -479,3 +479,17 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 
 说明：该策略解决 QQ 图片表情面板等“OCR 无文字、纯图像渲染”元素的定位问题，
 为后续视觉-only 点击闭环提供受控入口（仍建议首次执行走审批）。
+
+## 三十五、v0.4.29 模型网关用量统计（P0 补齐，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| TokenUsage 结构 | ✅ | prompt/completion/total + `add`/`saturating_sub`/`cost_estimate_usd`（$/M token 单价可配，默认 0）；单测覆盖算术与成本 |
+| usage 解析 | ✅ | `parse_usage_value` 兼容 OpenAI/DeepSeek（prompt_tokens 等）与 Ollama 原生字段（prompt_eval_count/eval_count）；流式末尾 usage 块经 `parse_sse_payload` 提取 |
+| Provider 累计快照 | ✅ | `OpenAiCompatibleProvider.usage` 互斥累计，非流式与流式均记录；`ModelProvider::usage_snapshot` 默认零（未实现 Provider 兼容） |
+| 回合增量 | ✅ | `TurnOutcome.usage`（serde default 兼容旧序列化）：回合开始/结束取快照差值，跨多次模型调用累计 |
+| 可观测落点 | ✅ | TraceRecord 记录 usage（旧 trace 反序列化兼容）；服务端回合结束写 `model/usage` 审计（prompt/completion/total/cost_usd，价格经 `OWO_MODEL_INPUT/OUTPUT_PRICE_PER_MTOK` 配置） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 127） |
+
+说明：P0“用量统计/预算上限”的统计部分补齐；预算上限（超过阈值熔断）留作下一轮，
+成本估算默认 0（未配置单价时不产生误导性数字）。

@@ -1,4 +1,4 @@
-﻿#![recursion_limit = "256"]
+#![recursion_limit = "256"]
 
 //! OwO Agent SDK HTTP 服务（M1 + v0.4）：session/turn/permission/diff/revert/abort + SSE，
 //! 以及 v0.4 接口：context.snapshot / perception.subscribe / learn.* / skill.verify /
@@ -703,6 +703,32 @@ async fn turn(
             Ok(outcome) => {
                 let trace = owo_agent_core::TraceRecord::from_outcome(&current, &outcome);
                 let _ = owo_agent_core::save_trace(&traces_dir, &trace);
+                if outcome.usage.total_tokens > 0 {
+                    let input_price = std::env::var("OWO_MODEL_INPUT_PRICE_PER_MTOK")
+                        .ok()
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let output_price = std::env::var("OWO_MODEL_OUTPUT_PRICE_PER_MTOK")
+                        .ok()
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let cost = outcome.usage.cost_estimate_usd(input_price, output_price);
+                    if let Ok(mut audit) = state_for_audit.agent.audit_log().lock() {
+                        audit.record(
+                            "model",
+                            "usage",
+                            Some(current.id.clone()),
+                            Some(true),
+                            format!(
+                                "prompt={} completion={} total={} cost_usd≈{:.6}",
+                                outcome.usage.prompt_tokens,
+                                outcome.usage.completion_tokens,
+                                outcome.usage.total_tokens,
+                                cost
+                            ),
+                        );
+                    }
+                }
             }
             Err(error) => {
                 let _ = tx.try_send(to_event(SseEvent::Progress {

@@ -2,6 +2,7 @@
 
 use crate::agent::{TurnEvent, TurnOutcome};
 use crate::error::AgentError;
+use crate::gateway::TokenUsage;
 use crate::session::Session;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,8 @@ pub struct TraceRecord {
     pub steps: usize,
     pub final_text: Option<String>,
     pub events: Vec<TurnEvent>,
+    #[serde(default)]
+    pub usage: TokenUsage,
 }
 
 impl TraceRecord {
@@ -37,6 +40,7 @@ impl TraceRecord {
             steps: outcome.steps,
             final_text: outcome.final_text.clone(),
             events: outcome.events.clone(),
+            usage: outcome.usage,
         }
     }
 }
@@ -91,6 +95,11 @@ mod tests {
             prompt: "你好".to_string(),
             started_at: "2026-08-11T00:00:00Z".to_string(),
             duration_ms: 42,
+            usage: TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+            },
         };
         let record = TraceRecord::from_outcome(&session, &outcome);
         let dir = std::env::temp_dir().join(format!("owo-trace-test-{}", uuid::Uuid::new_v4()));
@@ -98,6 +107,7 @@ mod tests {
         let loaded = load_trace(&path).unwrap();
         assert_eq!(loaded.final_text.as_deref(), Some("收到"));
         assert_eq!(loaded.events.len(), 2);
+        assert_eq!(loaded.usage.total_tokens, 150);
         assert_eq!(list_traces(&dir).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1,7 +1,7 @@
 use crate::audit::AuditLog;
 use crate::context::{build_system_prompt, load_project_rules};
 use crate::error::AgentError;
-use crate::gateway::{ChatMessage, ModelOutput, ModelProvider};
+use crate::gateway::{ChatMessage, ModelOutput, ModelProvider, TokenUsage};
 use crate::permissions::{Approver, Decision, PermissionRequest, Policy};
 use crate::session::Session;
 use crate::skill::SkillRegistry;
@@ -69,6 +69,9 @@ pub struct TurnOutcome {
     pub prompt: String,
     pub started_at: String,
     pub duration_ms: u64,
+    /// 本回合模型 token 用量增量（provider 累计快照差值）。
+    #[serde(default)]
+    pub usage: TokenUsage,
 }
 
 /// Agent 核心：执行循环 + 工具注册表 + 权限策略 + 审计。
@@ -168,6 +171,7 @@ impl Agent {
     ) -> Result<TurnOutcome, AgentError> {
         let started_at = Utc::now().to_rfc3339();
         let started = std::time::Instant::now();
+        let usage_before = self.provider.usage_snapshot();
         let rules = load_project_rules(&session.workspace);
         let mut system = build_system_prompt(session.system_prompt.as_deref(), &rules);
         if !self.skills.list_enabled().is_empty() {
@@ -325,6 +329,7 @@ impl Agent {
 
         session.messages = messages.into_iter().skip(1).collect();
         session.updated_at = Utc::now().to_rfc3339();
+        let usage = self.provider.usage_snapshot().saturating_sub(&usage_before);
         Ok(TurnOutcome {
             final_text,
             steps,
@@ -332,6 +337,7 @@ impl Agent {
             prompt: prompt.to_string(),
             started_at,
             duration_ms: started.elapsed().as_millis() as u64,
+            usage,
         })
     }
 

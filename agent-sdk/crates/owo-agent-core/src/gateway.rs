@@ -70,6 +70,66 @@ impl ChatMessage {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn add(&mut self, other: &TokenUsage) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(other.completion_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+    }
+
+    /// 回合增量 = 当前快照 − 回合前快照（saturating）。
+    pub fn saturating_sub(&self, other: &TokenUsage) -> TokenUsage {
+        TokenUsage {
+            prompt_tokens: self.prompt_tokens.saturating_sub(other.prompt_tokens),
+            completion_tokens: self
+                .completion_tokens
+                .saturating_sub(other.completion_tokens),
+            total_tokens: self.total_tokens.saturating_sub(other.total_tokens),
+        }
+    }
+
+    /// 成本估算（美元）：价格按每百万 token 计，默认 0（未知价格不估算）。
+    pub fn cost_estimate_usd(&self, input_per_mtok: f64, output_per_mtok: f64) -> f64 {
+        self.prompt_tokens as f64 / 1_000_000.0 * input_per_mtok
+            + self.completion_tokens as f64 / 1_000_000.0 * output_per_mtok
+    }
+}
+
+/// 从模型响应 usage 字段提取 token 用量（兼容 OpenAI/DeepSeek 与 Ollama 字段）。
+pub fn parse_usage_value(usage: &Value) -> TokenUsage {
+    if !usage.is_object() {
+        return TokenUsage::default();
+    }
+    let prompt = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("prompt_eval_count").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let completion = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("eval_count").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let total = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(prompt.saturating_add(completion));
+    TokenUsage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelOutput {
     Text(String),
@@ -97,6 +157,11 @@ pub trait ModelProvider: Send + Sync {
             on_delta(text.clone());
         }
         Ok(output)
+    }
+
+    /// 累计 token 用量快照（供回合增量统计；未实现的 Provider 返回零）。
+    fn usage_snapshot(&self) -> TokenUsage {
+        TokenUsage::default()
     }
 }
 
@@ -136,6 +201,7 @@ pub struct OpenAiCompatibleProvider {
     client: reqwest::Client,
     direct_client: Option<reqwest::Client>,
     config: OpenAiCompatibleConfig,
+    usage: std::sync::Mutex<TokenUsage>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -179,7 +245,18 @@ impl OpenAiCompatibleProvider {
             client,
             direct_client,
             config,
+            usage: std::sync::Mutex::new(TokenUsage::default()),
         })
+    }
+
+    fn record_usage(&self, usage: &Value) {
+        let parsed = parse_usage_value(usage);
+        if parsed.total_tokens == 0 && parsed.prompt_tokens == 0 && parsed.completion_tokens == 0 {
+            return;
+        }
+        if let Ok(mut current) = self.usage.lock() {
+            current.add(&parsed);
+        }
     }
 
     /// 发送请求：优先代理客户端，失败自动切直连重试一次（多轮流式挂起时稳定）。
@@ -300,6 +377,8 @@ pub struct StreamDelta {
     pub content: Option<String>,
     /// 原始 tool_calls 增量片段（JSON 值）。
     pub tool_call_fragments: Vec<Value>,
+    /// 末尾 usage 块（OpenAI-compatible 流式响应在最后一条 data 中给出）。
+    pub usage: Option<TokenUsage>,
 }
 
 /// 解析一条 `data:` 负载。空负载/心跳返回 None。
@@ -320,12 +399,17 @@ pub fn parse_sse_payload(payload: &str) -> Option<StreamDelta> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if content.is_none() && tool_call_fragments.is_empty() {
+    let usage = value
+        .get("usage")
+        .map(parse_usage_value)
+        .filter(|usage| usage.total_tokens > 0 || usage.prompt_tokens > 0);
+    if content.is_none() && tool_call_fragments.is_empty() && usage.is_none() {
         return None;
     }
     Some(StreamDelta {
         content,
         tool_call_fragments,
+        usage,
     })
 }
 
@@ -409,6 +493,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .json()
             .await
             .map_err(|e| format!("模型响应解析失败：{e}"))?;
+        self.record_usage(payload.get("usage").unwrap_or(&Value::Null));
         let message = payload
             .pointer("/choices/0/message")
             .ok_or_else(|| "响应缺少 choices[0].message".to_string())?;
@@ -488,6 +573,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
                                 break;
                             }
                             if let Some(delta) = parse_sse_payload(payload) {
+                                if let Some(usage) = delta.usage {
+                                    self.record_usage(&json!({
+                                        "prompt_tokens": usage.prompt_tokens,
+                                        "completion_tokens": usage.completion_tokens,
+                                        "total_tokens": usage.total_tokens,
+                                    }));
+                                }
                                 if let Some(delta_content) = delta.content {
                                     content.push_str(&delta_content);
                                     on_delta(delta_content);
@@ -509,6 +601,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
         } else {
             Ok(ModelOutput::Text(content))
         }
+    }
+
+    fn usage_snapshot(&self) -> TokenUsage {
+        self.usage.lock().map(|usage| *usage).unwrap_or_default()
     }
 }
 
@@ -555,6 +651,70 @@ mod tests {
         assert!(parse_sse_payload("").is_none());
         assert!(parse_sse_payload("[DONE]").is_none());
         assert!(parse_sse_payload(": keep-alive").is_none());
+    }
+
+    #[test]
+    fn parses_usage_value_for_openai_and_ollama_fields() {
+        let openai = parse_usage_value(&json!({
+            "prompt_tokens": 120,
+            "completion_tokens": 30,
+            "total_tokens": 150,
+        }));
+        assert_eq!(openai.prompt_tokens, 120);
+        assert_eq!(openai.completion_tokens, 30);
+        assert_eq!(openai.total_tokens, 150);
+
+        // Ollama 原生字段名兼容。
+        let ollama = parse_usage_value(&json!({
+            "prompt_eval_count": 40,
+            "eval_count": 12,
+        }));
+        assert_eq!(ollama.prompt_tokens, 40);
+        assert_eq!(ollama.completion_tokens, 12);
+        assert_eq!(ollama.total_tokens, 52);
+
+        assert_eq!(parse_usage_value(&Value::Null), TokenUsage::default());
+    }
+
+    #[test]
+    fn token_usage_arithmetic_and_cost_estimate() {
+        let mut usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+        usage.add(&TokenUsage {
+            prompt_tokens: 200,
+            completion_tokens: 30,
+            total_tokens: 230,
+        });
+        assert_eq!(usage.total_tokens, 380);
+
+        let before = TokenUsage {
+            prompt_tokens: 300,
+            completion_tokens: 80,
+            total_tokens: 380,
+        };
+        let delta = usage.saturating_sub(&before);
+        assert_eq!(delta.total_tokens, 0);
+
+        let delta = before.saturating_sub(&TokenUsage::default());
+        assert_eq!(delta.prompt_tokens, 300);
+        assert!((delta.cost_estimate_usd(2.0, 8.0) - 0.00124).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_sse_payload_extracts_trailing_usage_block() {
+        let payload = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+        let delta = parse_sse_payload(payload).expect("usage 块应返回 Some");
+        assert_eq!(delta.content, None);
+        let usage = delta.usage.expect("usage 应被解析");
+        assert_eq!(usage.total_tokens, 15);
+
+        // 无 usage 的空 delta 仍按心跳忽略。
+        assert!(
+            parse_sse_payload(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#).is_none()
+        );
     }
 
     #[tokio::test]
