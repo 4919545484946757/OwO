@@ -410,4 +410,18 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 114） |
 
 说明：本轮打通“视觉定位 → 注册表稳定 ID → 点击/验证”的 Agent 工具闭环，减少对每次 OCR
-重新定位的依赖；动作图执行器（learn/execute）暂未接入 element_id，留作下一轮。
+重新定位的依赖。
+
+## 三十、v0.4.24 动作图执行器接入 element_id 锚点（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `SemanticAnchor.element_id` 字段 | ✅ | 可选字段（serde default 兼容旧技能包 JSON）；`semantic_anchor_element_id_round_trip_and_backward_compat` 单测覆盖新旧格式 |
+| `WindowsUiaSource.new_with_registry` | ✅ | 执行器源可携带窗口元素注册表；`new()` 保持无注册表兼容 |
+| `find` element_id 优先定位 | ✅ | 锚点带 element_id 时按注册表取元素中心坐标（Point 通道点击/注入），未命中返回“稳定元素 ID 未命中（可能已失效），请先刷新 /perception/elements”明确错误；敏感面熔断仍在 execute_graph 层生效 |
+| 服务端接线 | ✅ | `ui_action_source(state.elements.clone())`：`/learn/execute` 与 `/learn/execute-package` 均共享 HTTP 感知层同一注册表；HTTP 冒烟：confirm=true + element_id 锚点返回“稳定元素 ID 未命中（可能已失效）”，confirm=false 仍 400 强制审批 |
+| 纯函数 | ✅ | `registry_element_point`（按稳定 ID 取中心）+ 单测（命中/未命中） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 117） |
+
+说明：至此“视觉定位 → 注册表稳定 ID → 点击/验证”在 Agent 工具与动作图执行器两条路径均闭环；
+旧流程技能包（无 element_id）仍按语义锚点（UIA/OCR）原有逻辑执行，不受影响。

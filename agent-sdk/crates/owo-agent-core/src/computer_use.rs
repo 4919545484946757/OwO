@@ -1,4 +1,4 @@
-//! 桌面操作与浏览器自动化工具（v0.4.1 计算机使用）。
+﻿//! 桌面操作与浏览器自动化工具（v0.4.1 计算机使用）。
 //!
 //! 桌面工具走“OCR 定位 → SendInput 点击/输入 → OCR 验证”的确定性控制链路；
 //! 浏览器工具走 Playwright（本机 Edge + 持久化 profile），文件类能力优先后端完成。
@@ -1634,6 +1634,7 @@ mod tests {
                 role: Some("edit".into()),
                 name: "输入消息".into(),
                 parent: None,
+                element_id: None,
             }
         ));
         assert!(sim_anchor_matches(
@@ -1643,6 +1644,7 @@ mod tests {
                 role: Some("button".into()),
                 name: "发送".into(),
                 parent: None,
+                element_id: None,
             }
         ));
         assert!(!sim_anchor_matches(
@@ -1652,6 +1654,7 @@ mod tests {
                 role: Some("input".into()),
                 name: "发送".into(),
                 parent: None,
+                element_id: None,
             }
         ));
         assert!(sim_anchor_matches(
@@ -1661,6 +1664,7 @@ mod tests {
                 role: Some("text".into()),
                 name: "吃什么".into(),
                 parent: None,
+                element_id: None,
             }
         ));
         assert!(!sim_anchor_matches(
@@ -1670,6 +1674,7 @@ mod tests {
                 role: None,
                 name: String::new(),
                 parent: None,
+                element_id: None,
             }
         ));
     }

@@ -35,6 +35,10 @@ pub struct SemanticAnchor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     pub name: String,
+    /// 稳定元素 ID（窗口元素注册表）：存在时优先按注册表坐标定位，
+    /// 避免每次动作都重新做 UIA/OCR 定位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
     /// 父容器名称（如“会话列表”），用于消除同名节点歧义。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
@@ -747,6 +751,7 @@ mod tests {
                 role: Some("search_box".to_string()),
                 name: "联系人搜索框".to_string(),
                 parent: None,
+                element_id: None,
             },
             None,
             Some("窗口标题变化".to_string()),
@@ -759,6 +764,7 @@ mod tests {
                 role: Some("input".to_string()),
                 name: "搜索输入".to_string(),
                 parent: None,
+                element_id: None,
             },
             Some("{contact}".to_string()),
             None,
@@ -780,6 +786,27 @@ mod tests {
             verify: None,
         });
         assert!(broken.validate().is_err());
+    }
+
+    #[test]
+    fn semantic_anchor_element_id_round_trip_and_backward_compat() {
+        let anchor = SemanticAnchor {
+            app_id: Some("qq".into()),
+            role: Some("button".into()),
+            name: "发送".into(),
+            element_id: Some("qq:button:3".into()),
+            parent: Some("会话列表".into()),
+        };
+        let json = serde_json::to_string(&anchor).expect("序列化");
+        assert!(json.contains("qq:button:3"));
+        let restored: SemanticAnchor = serde_json::from_str(&json).expect("反序列化");
+        assert_eq!(restored.element_id.as_deref(), Some("qq:button:3"));
+
+        // 旧格式（无 element_id 字段）必须仍可解析，且默认 None。
+        let legacy = r#"{"app_id":"qq","role":"button","name":"发送","parent":"会话列表"}"#;
+        let legacy_anchor: SemanticAnchor = serde_json::from_str(legacy).expect("旧格式兼容");
+        assert!(legacy_anchor.element_id.is_none());
+        assert_eq!(legacy_anchor.name, "发送");
     }
 
     #[test]
@@ -852,6 +879,7 @@ mod tests {
                     role: None,
                     name: "发送按钮".to_string(),
                     parent: None,
+                    element_id: None,
                 },
                 action_type: ActionType::Click,
                 value_masked: true,
@@ -868,6 +896,7 @@ mod tests {
                     role: None,
                     name: "发送按钮".to_string(),
                     parent: None,
+                    element_id: None,
                 },
                 action_type: ActionType::Click,
                 value_masked: true,
@@ -884,6 +913,7 @@ mod tests {
                     role: None,
                     name: "密码输入框".to_string(),
                     parent: None,
+                    element_id: None,
                 },
                 action_type: ActionType::Type,
                 value_masked: true,
@@ -996,6 +1026,7 @@ mod tests {
                 role: Some("edit".to_string()),
                 name: anchor_name.to_string(),
                 parent: None,
+                element_id: None,
             },
             action_type: ActionType::Type,
             value_masked: true,
@@ -1016,6 +1047,7 @@ mod tests {
                     role: Some("button".to_string()),
                     name: "发送按钮".to_string(),
                     parent: None,
+                    element_id: None,
                 },
                 action_type: ActionType::Click,
                 value_masked: true,
@@ -1045,6 +1077,7 @@ mod tests {
                     role: Some("button".to_string()),
                     name: "发送按钮".to_string(),
                     parent: None,
+                    element_id: None,
                 },
                 action_type: ActionType::Click,
                 value_masked: true,

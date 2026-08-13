@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+﻿#![recursion_limit = "256"]
 
 //! OwO Agent SDK HTTP 服务（M1 + v0.4）：session/turn/permission/diff/revert/abort + SSE，
 //! 以及 v0.4 接口：context.snapshot / perception.subscribe / learn.* / skill.verify /
@@ -1964,7 +1964,7 @@ async fn learn_execute(
             "首次执行必须确认（confirm: true）".to_string(),
         ));
     }
-    let source = ui_action_source()?;
+    let source = ui_action_source(state.elements.clone())?;
     let report = owo_agent_core::execute_graph(
         source.as_ref(),
         &request.graph,
@@ -2130,7 +2130,7 @@ async fn learn_execute_package(
             "高敏感技能包需二次确认（high_risk_ack: true）".to_string(),
         ));
     }
-    let source = ui_action_source()?;
+    let source = ui_action_source(state.elements.clone())?;
     let report = owo_agent_core::execute_graph(
         source.as_ref(),
         &package.graph,
@@ -2169,7 +2169,9 @@ async fn learn_execute_package(
 
 /// 根据运行环境选择执行器源：模拟面用 SimUiActionSource（虚拟窗口），
 /// 真实桌面用 WindowsUiaSource。
-fn ui_action_source() -> Result<Box<dyn owo_agent_core::UiActionSource>, (StatusCode, String)> {
+fn ui_action_source(
+    elements: std::sync::Arc<std::sync::Mutex<owo_agent_core::ElementRegistry>>,
+) -> Result<Box<dyn owo_agent_core::UiActionSource>, (StatusCode, String)> {
     if std::env::var("OWO_SIM_QQ_URL")
         .map(|value| !value.is_empty())
         .unwrap_or(false)
@@ -2178,7 +2180,7 @@ fn ui_action_source() -> Result<Box<dyn owo_agent_core::UiActionSource>, (Status
             .map(|source| Box::new(source) as Box<dyn owo_agent_core::UiActionSource>)
             .map_err(|error| (StatusCode::BAD_REQUEST, error))
     } else {
-        owo_agent_core::WindowsUiaSource::new()
+        owo_agent_core::WindowsUiaSource::new_with_registry(Some(elements))
             .map(|source| Box::new(source) as Box<dyn owo_agent_core::UiActionSource>)
             .map_err(|error| (StatusCode::BAD_REQUEST, error))
     }
@@ -2794,6 +2796,7 @@ pub async fn start_observer(state: Arc<AppState>) {
                         role: None,
                         name: app.title.clone(),
                         parent: None,
+                        element_id: None,
                     },
                     action_type: ActionType::Shortcut,
                     value_masked: true,
@@ -2812,6 +2815,7 @@ pub async fn start_observer(state: Arc<AppState>) {
                         role: None,
                         name: "剪贴板".to_string(),
                         parent: None,
+                        element_id: None,
                     },
                     action_type: ActionType::Inject,
                     value_masked: true,

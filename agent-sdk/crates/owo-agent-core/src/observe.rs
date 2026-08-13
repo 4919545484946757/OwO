@@ -1,4 +1,4 @@
-//! 静默观察与情景记忆（v0.4.5，设计文档 M-D 起步）。
+﻿//! 静默观察与情景记忆（v0.4.5，设计文档 M-D 起步）。
 //!
 //! Observer 后台轮询应用状态流（模拟面取模拟窗口日志，真实面后续接 UIA/窗口快照），
 //! 把动作摘要（内容掩码）与结果写入本地情景记忆（JSONL，可换成 SQLite）。
@@ -202,6 +202,7 @@ pub fn map_sim_events_to_actions(observations: &[Observation]) -> Vec<RecordedAc
                         role: Some("list".to_string()),
                         name: contact.to_string(),
                         parent: None,
+                        element_id: None,
                     },
                     action_type: crate::learn::ActionType::Click,
                     value_masked: true,
@@ -219,6 +220,7 @@ pub fn map_sim_events_to_actions(observations: &[Observation]) -> Vec<RecordedAc
                 role: Some(role.to_string()),
                 name: name.to_string(),
                 parent: None,
+                element_id: None,
             },
             action_type,
             value_masked: true,

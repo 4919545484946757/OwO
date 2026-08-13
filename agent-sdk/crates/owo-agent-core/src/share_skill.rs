@@ -1,4 +1,4 @@
-//! 流程技能包分享（v0.4 D26）：单文件 `.owskill`（ZIP），解包即 Agent Skills 标准技能包目录。
+﻿//! 流程技能包分享（v0.4 D26）：单文件 `.owskill`（ZIP），解包即 Agent Skills 标准技能包目录。
 //!
 //! 导入校验顺序：schema → 权限白名单（默认 deny，未知权限拒绝）→ 敏感度必填 →
 //! 目标应用非空 → 变量声明 → 动作图合法；zip-slip（`..`/绝对路径）一律拒绝。
@@ -150,6 +150,7 @@ mod tests {
                 role: Some("button".to_string()),
                 name: "发送".to_string(),
                 parent: None,
+                element_id: None,
             },
             None,
             Some("发送成功".to_string()),

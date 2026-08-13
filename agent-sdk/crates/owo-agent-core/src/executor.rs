@@ -4,8 +4,10 @@
 //! Windows 实现走 UI Automation + SendInput；测试用脚本化假源覆盖全部逻辑。
 
 use crate::learn::{ActionGraph, ActionType, SemanticAnchor};
+use crate::ElementRegistry;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecStep {
@@ -184,6 +186,9 @@ pub struct WindowsUiaSource {
     automation: windows::Win32::UI::Accessibility::IUIAutomation,
     root: windows::Win32::UI::Accessibility::IUIAutomationElement,
     keep: std::sync::Mutex<Vec<AnchorTarget>>,
+    /// 窗口元素注册表：支持 `SemanticAnchor.element_id` 按稳定 ID 定位，
+    /// 减少对每次 UIA/OCR 重新定位的依赖。
+    registry: Option<Arc<Mutex<ElementRegistry>>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -201,6 +206,13 @@ unsafe impl Sync for WindowsUiaSource {}
 #[cfg(target_os = "windows")]
 impl WindowsUiaSource {
     pub fn new() -> Result<Self, String> {
+        Self::new_with_registry(None)
+    }
+
+    /// 带窗口元素注册表创建执行器源。
+    pub fn new_with_registry(
+        registry: Option<Arc<Mutex<ElementRegistry>>>,
+    ) -> Result<Self, String> {
         use windows::Win32::System::Com::{
             CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
             COINIT_DISABLE_OLE1DDE,
@@ -224,6 +236,7 @@ impl WindowsUiaSource {
                 automation,
                 root,
                 keep: std::sync::Mutex::new(Vec::new()),
+                registry,
             })
         }
     }
@@ -308,6 +321,19 @@ fn ocr_anchor_fallback(anchor: &SemanticAnchor) -> Option<(i32, i32)> {
     find_ocr_anchor_point(&lines, &anchor.name)
 }
 
+/// 从元素注册表按稳定 ID 取元素中心点（纯函数，供 element_id 锚点定位与单测）。
+pub(crate) fn registry_element_point(
+    registry: &ElementRegistry,
+    app_id: &str,
+    element_id: &str,
+) -> Option<(i32, i32)> {
+    let element = registry.get_by_id(app_id, element_id)?;
+    Some((
+        element.x + element.width / 2,
+        element.y + element.height / 2,
+    ))
+}
+
 /// 在 OCR 行中找包含目标文本的首行中心（纯函数，供 OCR 锚点兜底与单测使用）。
 pub(crate) fn find_ocr_anchor_point(
     lines: &[crate::ocr::OcrLine],
@@ -323,6 +349,23 @@ pub(crate) fn find_ocr_anchor_point(
 impl UiActionSource for WindowsUiaSource {
     fn find(&self, anchor: &SemanticAnchor) -> Result<u64, String> {
         let mut keep = self.keep.lock().map_err(|_| "锚点池锁中毒".to_string())?;
+        if let Some(element_id) = anchor.element_id.as_deref() {
+            let registry = self
+                .registry
+                .as_ref()
+                .ok_or("element_id 锚点需要窗口元素注册表（服务端已自动接入）")?;
+            let registry = registry
+                .lock()
+                .map_err(|_| "元素注册表锁中毒".to_string())?;
+            let app_id = anchor.app_id.as_deref().unwrap_or("desktop");
+            let point = registry_element_point(&registry, app_id, element_id).ok_or_else(|| {
+                format!(
+                    "稳定元素 ID 未命中（可能已失效）：{element_id}；请先刷新 /perception/elements"
+                )
+            })?;
+            keep.push(AnchorTarget::Point(point.0, point.1));
+            return Ok((keep.len() - 1) as u64);
+        }
         if let Some(element) = self.find_recursive(&self.root, anchor, 0, &[]) {
             keep.push(AnchorTarget::Element(element));
         } else {
@@ -810,11 +853,18 @@ impl WindowsUiaSource {
     pub fn new() -> Result<Self, String> {
         Err("仅支持 Windows".to_string())
     }
+
+    pub fn new_with_registry(
+        _registry: Option<Arc<Mutex<ElementRegistry>>>,
+    ) -> Result<Self, String> {
+        Err("仅支持 Windows".to_string())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element_registry::{ElementRegistry, SceneElement};
     use crate::learn::{ActionGraph, ActionType, SemanticAnchor};
 
     struct ScriptedSource {
@@ -883,6 +933,7 @@ mod tests {
                 role: Some("button".to_string()),
                 name: "发送按钮".to_string(),
                 parent: None,
+                element_id: None,
             },
             None,
             Some("发送成功".to_string()),
@@ -895,6 +946,7 @@ mod tests {
                 role: Some("edit".to_string()),
                 name: "输入框".to_string(),
                 parent: None,
+                element_id: None,
             },
             Some("你好 {contact}".to_string()),
             None,
@@ -931,6 +983,7 @@ mod tests {
                 role: None,
                 name: "打开浏览器".to_string(),
                 parent: None,
+                element_id: None,
             },
             Some("{url}".to_string()),
             None,
@@ -974,6 +1027,7 @@ mod tests {
                 role: None,
                 name: "OCR 定位按钮".to_string(),
                 parent: None,
+                element_id: None,
             },
             Some("{point}".to_string()),
             None,
@@ -1046,6 +1100,7 @@ mod tests {
                 role: None,
                 name: "密码输入框".to_string(),
                 parent: None,
+                element_id: None,
             },
             None,
             None,
@@ -1073,6 +1128,7 @@ mod tests {
                 role: None,
                 name: "A".to_string(),
                 parent: None,
+                element_id: None,
             },
             None,
             None,
@@ -1097,6 +1153,7 @@ mod tests {
             role: None,
             name: "发送".to_string(),
             parent: None,
+            element_id: None,
         };
         assert!(!anchor_matches(&anchor, "", 0));
         assert!(anchor_matches(&anchor, "发送按钮", 0));
@@ -1124,5 +1181,34 @@ mod tests {
         assert_eq!(find_ocr_anchor_point(&lines, "发送"), Some((900, 642)));
         assert_eq!(find_ocr_anchor_point(&lines, "输入"), Some((520, 642)));
         assert_eq!(find_ocr_anchor_point(&lines, "不存在"), None);
+    }
+
+    #[test]
+    fn registry_element_point_resolves_stable_id_center() {
+        let mut registry = ElementRegistry::new();
+        let element = SceneElement {
+            id: String::new(),
+            app_id: "qq".into(),
+            name: "发送".into(),
+            role_hint: "button".into(),
+            sources: vec!["uia".into(), "ocr".into(), "vision".into()],
+            x: 800,
+            y: 600,
+            width: 100,
+            height: 40,
+            confidence: 0.9,
+            stale_frames: 0,
+            updated_at: "2026-08-13T00:00:00Z".into(),
+        };
+        let registered = registry.update("qq", vec![element]);
+        let id = registered[0].id.clone();
+        assert_eq!(
+            registry_element_point(&registry, "qq", &id),
+            Some((850, 620))
+        );
+        assert_eq!(
+            registry_element_point(&registry, "qq", "qq:button:999"),
+            None
+        );
     }
 }
