@@ -511,6 +511,18 @@ impl LearnPipeline {
         } else {
             std::mem::take(&mut self.last_samples)
         };
+        self.sink_from_actions(name, target_apps, sensitivity, description, samples)
+    }
+
+    /// 直接由动作样本沉淀流程技能包（主动建议“学习”确认、静默观察挖掘共用）。
+    pub fn sink_from_actions(
+        &self,
+        name: &str,
+        target_apps: Vec<String>,
+        sensitivity: Sensitivity,
+        description: &str,
+        samples: Vec<RecordedAction>,
+    ) -> Result<FlowSkillPackage, String> {
         let graph = generalize_to_graph(&samples)?;
         let variables = graph.variables();
         let package = FlowSkillPackage {
@@ -535,6 +547,58 @@ impl LearnPipeline {
     }
 }
 
+/// 把主动建议的动作序列字符串解析为学习样本。
+///
+/// 支持 `动作:锚点名`（click/type），无前缀时按 click 处理；
+/// Type 样本一律 `value_masked=true`（不采样消息正文）。
+/// 其他动作前缀暂不映射（动作图泛化仅对 Click/Type 有稳定语义）。
+pub fn recorded_actions_from_sequence(app_id: &str, sequence: &[String]) -> Vec<RecordedAction> {
+    let now = Utc::now().to_rfc3339();
+    sequence
+        .iter()
+        .filter_map(|item| {
+            let item = item.trim();
+            if item.is_empty() {
+                return None;
+            }
+            let (prefix, anchor_name) = match item.split_once(':') {
+                Some((prefix, name)) => (prefix.trim().to_lowercase(), name.trim().to_string()),
+                None => ("click".to_string(), item.to_string()),
+            };
+            if anchor_name.is_empty() {
+                return None;
+            }
+            let action_type = if prefix == "type" {
+                ActionType::Type
+            } else {
+                ActionType::Click
+            };
+            let role = match (action_type, anchor_name.as_str()) {
+                (ActionType::Type, _) => Some("edit".to_string()),
+                (ActionType::Click, name) if name.contains("发送") || name.contains("搜索") => {
+                    Some("button".to_string())
+                }
+                (ActionType::Click, name) if name.contains("输入") => Some("edit".to_string()),
+                _ => None,
+            };
+            Some(RecordedAction {
+                app_id: app_id.to_string(),
+                anchor: SemanticAnchor {
+                    app_id: Some(app_id.to_string()),
+                    role,
+                    name: anchor_name,
+                    parent: None,
+                    element_id: None,
+                },
+                action_type,
+                value_masked: action_type == ActionType::Type,
+                sensitive: false,
+                at: now.clone(),
+            })
+        })
+        .collect()
+}
+
 // ---------- 主动建议 ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -553,8 +617,10 @@ pub struct ProactiveSuggestion {
 #[serde(rename_all = "snake_case")]
 pub enum SuggestionAction {
     Learn,
+    #[serde(alias = "execute")]
     ExecuteOnce,
     Ignore,
+    #[serde(alias = "mute")]
     MuteForever,
 }
 
@@ -723,6 +789,11 @@ impl ProactiveEngine {
             SuggestionAction::Learn | SuggestionAction::ExecuteOnce => {
                 // 学习交给 LearnRecorder/流程技能包流程；执行仍需审批。
                 self.last_shown.remove(&key);
+                if action == SuggestionAction::Learn {
+                    // 已确认沉淀：从建议列表移除，避免重复学习。
+                    self.suggestions
+                        .retain(|suggestion| suggestion.id != suggestion_id);
+                }
             }
         }
         Ok(())
@@ -1098,5 +1169,79 @@ mod tests {
         assert_eq!(package.manifest.name, "send-file");
         assert_eq!(pipeline.store.list().unwrap(), vec!["send-file"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recorded_actions_from_sequence_parses_click_and_type() {
+        let sequence = vec![
+            "click:发送".to_string(),
+            "type:输入消息".to_string(),
+            "搜索".to_string(),
+        ];
+        let actions = recorded_actions_from_sequence("qq", &sequence);
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].action_type, ActionType::Click);
+        assert_eq!(actions[0].anchor.name, "发送");
+        assert_eq!(actions[0].anchor.role.as_deref(), Some("button"));
+        assert_eq!(actions[1].action_type, ActionType::Type);
+        assert!(actions[1].value_masked);
+        assert_eq!(actions[2].action_type, ActionType::Click);
+        assert_eq!(actions[2].anchor.name, "搜索");
+
+        // 空项与未知前缀按 click 处理/跳过空锚点。
+        let actions = recorded_actions_from_sequence(
+            "qq",
+            &["click:".to_string(), "shortcut:ctrl+a".to_string()],
+        );
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].anchor.name, "ctrl+a");
+        assert_eq!(actions[0].action_type, ActionType::Click);
+    }
+
+    #[test]
+    fn sink_from_actions_confirms_suggestion_into_active_package() {
+        let root = std::env::temp_dir().join(format!("owo-learn-suggest-{}", uuid::Uuid::new_v4()));
+        let pipeline = LearnPipeline::new(root.join("skills").join("user"));
+        let sequence = vec![
+            "click:搜索".to_string(),
+            "type:输入消息".to_string(),
+            "click:发送".to_string(),
+        ];
+        let samples = recorded_actions_from_sequence("qq", &sequence);
+        let package = pipeline
+            .sink_from_actions(
+                "proactive-reply",
+                vec!["qq".to_string()],
+                Sensitivity::Low,
+                "重复回复流程，用户确认沉淀",
+                samples,
+            )
+            .expect("沉淀成功");
+        assert!(package.validate().is_ok());
+        assert_eq!(package.manifest.name, "proactive-reply");
+        assert_eq!(pipeline.store.list().unwrap(), vec!["proactive-reply"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn decide_learn_removes_suggestion_from_list() {
+        let mut engine = ProactiveEngine::new(ProactiveSettings {
+            enabled: true,
+            weekly_threshold: 5,
+            daily_threshold: 1,
+            similarity: 1.0,
+            cooldown_hours: 0,
+            daily_cap: 10,
+            auto_silence_days: 30,
+        });
+        let actions = vec!["click:发送".to_string()];
+        let suggestion = engine
+            .observe("qq", actions)
+            .expect("daily threshold 1 应产生建议");
+        assert_eq!(engine.suggestions().len(), 1);
+        engine
+            .decide(&suggestion.id, SuggestionAction::Learn)
+            .expect("确认学习");
+        assert!(engine.suggestions().is_empty());
     }
 }

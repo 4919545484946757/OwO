@@ -439,3 +439,17 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 说明：真实面观察源落地后，情景记忆可覆盖“用户正在什么应用、切了哪个窗口、剪贴板是否变化”
 的掩码轨迹；技能挖掘（/memory/mine-skill）仍以模拟面/示范录制的动作序列为准，
 真实面动作级学习走 UIA 锚点录制链路。
+
+## 三十二、v0.4.26 主动建议“学习”确认转 active 技能包（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 建议动作序列 → 学习样本 | ✅ | `recorded_actions_from_sequence`：`click:发送`/`type:输入消息` 解析为动作图样本，Type 一律内容掩码；空锚点/未知前缀安全处理；单测覆盖 |
+| 直接沉淀接口 | ✅ | `LearnPipeline::sink_from_actions`（sink_skill 重构复用）：建议确认后无需先录制，直接泛化 → 流程技能包 → 入 FlowSkillStore（active）；单测验证包合法且可列出 |
+| `/proactive/decide` learn 闭环 | ✅ | HTTP 层先取建议，decide 后把序列沉淀为 `proactive-<uuid>` 技能包（target_apps=建议应用、sensitivity=low），返回 package 信息并写 learn-confirm 审计；Learn 后建议从列表移除避免重复学习 |
+| UI/API 动作枚举不一致修复 | ✅ | Web 端按钮改发 `execute_once`/`mute_forever`；服务端 `SuggestionAction` 增加 `execute`/`mute` serde 别名兼容旧调用 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 123） |
+| HTTP e2e | ✅ 1/1 | 3 次 observe → 建议；`execute` 别名 200；再 observe → `learn` 200 返回 `proactive-3f942068`；`/learn/packages` 可见；建议列表移除；`mute` 别名解析正常（404=JSON 已解析） |
+
+说明：D24 主动建议的“学习/执行一次/忽略/静默”四选在 HTTP+Web 端全部可解析；
+“执行一次”仍走执行审批（技能包执行需 confirm），默认只提示不执行的安全边界保持不变。

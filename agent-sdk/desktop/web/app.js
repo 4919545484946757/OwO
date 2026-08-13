@@ -423,7 +423,7 @@ async function refreshSuggestions() {
     for (const suggestion of suggestions) {
       const li = document.createElement("li");
       li.innerHTML = `<strong>${esc(suggestion.app_id)}</strong><span class="sub">${esc(suggestion.summary)}</span><span class="sub">${esc(suggestion.sequence.join(" → "))}</span>`;
-      const actions = ["learn", "execute", "ignore", "mute"];
+      const actions = ["learn", "execute_once", "ignore", "mute_forever"];
       const labels = { learn: "学习", execute: "执行一次", ignore: "忽略", mute: "静默" };
       for (const action of actions) {
         const button = document.createElement("button");

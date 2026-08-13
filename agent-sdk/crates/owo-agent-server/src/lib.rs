@@ -2276,10 +2276,54 @@ async fn proactive_decide(
     Json(request): Json<ProactiveDecideRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let mut proactive = state.proactive.lock().map_err(poison)?;
+    let suggestion = proactive
+        .suggestions()
+        .iter()
+        .find(|suggestion| suggestion.id == request.suggestion_id)
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("建议不存在：{}", request.suggestion_id),
+            )
+        })?;
     proactive
         .decide(&request.suggestion_id, request.action)
         .map_err(|error| (StatusCode::NOT_FOUND, error))?;
-    Ok(Json(json!({ "ok": true })))
+    drop(proactive);
+    let mut response = json!({ "ok": true });
+    if request.action == owo_agent_core::SuggestionAction::Learn {
+        // 用户确认“学习”：把建议动作序列沉淀为 active 流程技能包（D24 一键学习）。
+        let name = format!("proactive-{}", &suggestion.id[..8.min(suggestion.id.len())]);
+        let samples = owo_agent_core::recorded_actions_from_sequence(
+            &suggestion.app_id,
+            &suggestion.sequence,
+        );
+        let pipeline = state.pipeline.lock().map_err(poison)?;
+        let package = pipeline
+            .sink_from_actions(
+                &name,
+                vec![suggestion.app_id.clone()],
+                owo_agent_core::Sensitivity::Low,
+                &suggestion.summary,
+                samples,
+            )
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        if let Ok(mut audit) = state.agent.audit_log().lock() {
+            audit.record(
+                "proactive",
+                "learn-confirm",
+                Some(package.manifest.name.clone()),
+                Some(true),
+                format!("主动建议确认沉淀技能包：{}", package.manifest.name),
+            );
+        }
+        response["package"] = json!({
+            "name": package.manifest.name,
+            "variables": package.manifest.variables,
+        });
+    }
+    Ok(Json(response))
 }
 
 /// 主动建议列表（桌面端“学习/执行一次/忽略/静默”四选）。
