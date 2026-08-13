@@ -379,6 +379,24 @@ async function refreshSettings() {
   }
 }
 
+async function refreshUsage() {
+  try {
+    const data = await api("/usage");
+    const usage = data.usage || {};
+    const budget = data.budget || {};
+    const status = budget.violation ? "⚠️ 已超限" : "正常";
+    $("usagePanel").textContent =
+      `累计 tokens：${usage.total_tokens || 0}` +
+      `（输入 ${usage.prompt_tokens || 0} / 输出 ${usage.completion_tokens || 0}）` +
+      ` ｜ 成本 ≈ $${(data.cost_usd || 0).toFixed(6)}` +
+      ` ｜ token 预算：${budget.token_cap ?? "未配置"}` +
+      ` ｜ 成本预算：${budget.cost_cap_usd != null ? "$" + budget.cost_cap_usd : "未配置"}` +
+      ` ｜ 状态：${status}`;
+  } catch (_) {
+    $("usagePanel").textContent = "用量读取失败";
+  }
+}
+
 async function executePackage(pkg) {
   let variables = {};
   if (pkg.variables && pkg.variables.length) {
@@ -1064,6 +1082,7 @@ async function boot() {
     refreshAutomations(),
     refreshReminders(),
     refreshSettings(),
+    refreshUsage(),
     refreshAudit(),
     refreshWhitelist(),
     refreshPerception(),
@@ -1077,6 +1096,7 @@ async function boot() {
   setInterval(refreshAutomations, 10000);
   setInterval(refreshReminders, 5000);
   setInterval(refreshSettings, 15000);
+  setInterval(refreshUsage, 10000);
   setInterval(refreshHealth, 15000);
 }
 

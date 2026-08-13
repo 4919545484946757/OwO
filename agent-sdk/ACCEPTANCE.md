@@ -504,3 +504,16 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 
 说明：至此 P0 模型网关“统一 Provider 接口/流式/工具调用/用量统计/预算上限/BYOK”全部落地；
 预算为累计口径（跨会话进程内累计），进程重启后归零，云端持久化预算留作 v2。
+
+## 三十七、v0.4.31 桌面端用量面板与 /usage 接口（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `GET /usage` | ✅ | 返回累计 token（输入/输出/总）、成本估算、预算配置（token/cost 上限、单价）与是否超限（violation）；OpenAPI 已登记 |
+| 桌面端用量面板 | ✅ | 设置与诊断区新增“模型用量与预算”：累计 tokens/成本/预算/状态，10s 自动刷新，预算未配置显示“未配置”，超限显示 ⚠️ |
+| 前端语法 | ✅ | `node --check` 通过 |
+| HTTP 冒烟 | ✅ | 带预算环境变量启动：/usage 返回 total=0、cost=0.0、token_cap=100000、cost_cap=5.0、violation=null；openapi.json 含 /usage |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 128） |
+
+说明：预算配置当前经环境变量生效（运行时改动即时被 provider 读取），
+设置页 JSON 持久化预算字段留作后续（settings.json 扩展）。

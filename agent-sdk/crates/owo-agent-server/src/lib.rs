@@ -106,6 +106,7 @@ impl AppState {
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/usage", get(usage_summary))
         .route("/audit", get(audit_list))
         .route("/openapi.json", get(openapi_spec))
         .route("/session", post(create_session))
@@ -241,6 +242,7 @@ async fn openapi_spec() -> Json<Value> {
         "servers": [{ "url": "http://127.0.0.1:4096" }],
         "paths": {
             "/health": { "get": { "operationId": "health", "responses": { "200": { "description": "ok" } } } },
+            "/usage": { "get": { "operationId": "usageSummary", "responses": { "200": { "description": "model token usage snapshot and budget config" } } } },
             "/audit": { "get": { "operationId": "auditList", "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "recent audit entries" } } } },
             "/session": { "post": {
                 "operationId": "createSession",
@@ -391,6 +393,39 @@ async fn health() -> Json<HealthResponse> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         auto_approve: auto_approve_enabled(),
     })
+}
+
+/// 当前模型用量快照 + 预算配置（供桌面端“设置与诊断”用量面板展示）。
+async fn usage_summary(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let usage = state.agent.provider().usage_snapshot();
+    let input_price = std::env::var("OWO_MODEL_INPUT_PRICE_PER_MTOK")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let output_price = std::env::var("OWO_MODEL_OUTPUT_PRICE_PER_MTOK")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let token_cap = std::env::var("OWO_USAGE_TOKEN_BUDGET")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    let cost_cap = std::env::var("OWO_USAGE_COST_BUDGET_USD")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok());
+    let cost = usage.cost_estimate_usd(input_price, output_price);
+    let violation =
+        owo_agent_core::budget_violation(&usage, token_cap, cost_cap, input_price, output_price);
+    Json(json!({
+        "usage": usage,
+        "cost_usd": cost,
+        "budget": {
+            "token_cap": token_cap,
+            "cost_cap_usd": cost_cap,
+            "input_price_per_mtok": input_price,
+            "output_price_per_mtok": output_price,
+            "violation": violation,
+        },
+    }))
 }
 
 /// 把 Agent 内存审计日志中尚未落库的条目追加到存储，返回已 flush 数。
