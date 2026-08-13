@@ -71,6 +71,9 @@ impl AppState {
         for entry in settings.whitelist.clone() {
             whitelist.upsert(entry);
         }
+        let elements = Arc::new(Mutex::new(owo_agent_core::ElementRegistry::new()));
+        let mut agent = agent;
+        agent.set_elements(elements.clone());
         Self {
             agent: Arc::new(agent),
             store: Arc::new(store),
@@ -95,7 +98,7 @@ impl AppState {
             audit_flushed: Arc::new(Mutex::new(0)),
             workspace,
             data_root,
-            elements: Arc::new(Mutex::new(owo_agent_core::ElementRegistry::new())),
+            elements,
         }
     }
 }
@@ -386,6 +389,7 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         healthy: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        auto_approve: auto_approve_enabled(),
     })
 }
 
@@ -1297,6 +1301,9 @@ async fn perception_template_detect_ocr(
 struct ElementsRequest {
     hwnd: i64,
     app_id: String,
+    /// 可选视觉 grounding 结果（vision_ground 的 box + 描述），并入同一注册表。
+    #[serde(default)]
+    vision: Vec<owo_agent_core::VisionGrounding>,
 }
 
 /// 窗口元素注册表：UIA 树 + 窗口 OCR（转屏幕坐标）融合 → 注册表更新 → 返回稳定元素列表。
@@ -1316,7 +1323,7 @@ async fn perception_elements(
         line.x += rect.0;
         line.y += rect.1;
     }
-    let fused = owo_agent_core::fuse_sources(&tree, &lines);
+    let fused = owo_agent_core::fuse_sources_with_vision(&tree, &lines, &request.vision);
     let mut registry = state.elements.lock().map_err(poison)?;
     let elements = registry.update(&request.app_id, fused);
     Ok(Json(json!({
@@ -1382,6 +1389,10 @@ struct OcrRegionRequest {
 
 fn default_ocr_scale() -> u32 {
     2
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 区域 OCR：裁剪 + 放大后识别（小字验证窗口/自绘面板）。
@@ -1672,6 +1683,9 @@ async fn vision_describe(
 #[derive(serde::Deserialize)]
 struct VisionVerifyRequest {
     question: String,
+    /// 是否忽略输入框占位文字（默认 true）。
+    #[serde(default = "default_true")]
+    ignore_placeholder: bool,
     #[serde(default)]
     x: Option<i32>,
     #[serde(default)]
@@ -1702,10 +1716,7 @@ async fn vision_verify(
             .await
             .map_err(|error| (StatusCode::BAD_REQUEST, error))?,
     };
-    let prompt = format!(
-        "请只看这张截图回答问题。先回答 YES 或 NO，再给出 0-1 置信度。问题：{}",
-        request.question
-    );
+    let prompt = owo_agent_core::verification_prompt(&request.question, request.ignore_placeholder);
     let raw = owo_agent_core::describe_image(&png, &prompt)
         .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
@@ -1725,16 +1736,40 @@ async fn vision_verify(
 #[derive(serde::Deserialize)]
 struct VisionGroundRequest {
     description: String,
+    /// 可选：应用标识，提供时 grounding 结果写入窗口元素注册表并返回 element_id。
+    #[serde(default)]
+    app_id: Option<String>,
 }
 
 /// 视觉 grounding：视觉模型给框 → 与 OCR 文本交叉验证后才允许点击。
 async fn vision_ground(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<VisionGroundRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    owo_agent_core::ground_element(&request.description)
+    let mut result = owo_agent_core::ground_element(&request.description)
         .await
-        .map(Json)
-        .map_err(|error| (StatusCode::BAD_GATEWAY, error))
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    if let Some(app_id) = request.app_id {
+        if result
+            .get("matched")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            let grounding = owo_agent_core::computer_use::vision_grounding_from_value(
+                &result,
+                &request.description,
+            )
+            .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+            let mut registry = state.elements.lock().map_err(poison)?;
+            if let Some(element_id) =
+                owo_agent_core::register_vision_grounding(&mut registry, &app_id, grounding)
+            {
+                result["element_id"] = serde_json::json!(element_id);
+                result["app_id"] = serde_json::json!(app_id);
+            }
+        }
+    }
+    Ok(Json(result))
 }
 
 async fn memory_observations(
@@ -2352,7 +2387,10 @@ async fn automations_clear_reminders(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_attachment_name;
+    use super::{auto_approve_enabled, sanitize_attachment_name};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn sanitizes_attachment_names() {
@@ -2375,6 +2413,22 @@ mod tests {
         assert!(sanitize_attachment_name("").is_none());
         assert!(sanitize_attachment_name("   ").is_none());
         assert!(sanitize_attachment_name("x".repeat(201).as_str()).is_none());
+    }
+
+    #[test]
+    fn auto_approve_env_detection() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::remove_var("OWO_AUTO_APPROVE");
+        assert!(!auto_approve_enabled());
+        std::env::set_var("OWO_AUTO_APPROVE", "1");
+        assert!(auto_approve_enabled());
+        std::env::set_var("OWO_AUTO_APPROVE", "TRUE");
+        assert!(auto_approve_enabled());
+        std::env::set_var("OWO_AUTO_APPROVE", "0");
+        assert!(!auto_approve_enabled());
+        std::env::remove_var("OWO_AUTO_APPROVE");
     }
 }
 
@@ -2641,10 +2695,7 @@ impl ChannelApprover {
 #[async_trait::async_trait]
 impl Approver for ChannelApprover {
     async fn decide(&self, request: &PermissionRequest) -> Decision {
-        if std::env::var("OWO_AUTO_APPROVE")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        {
+        if auto_approve_enabled() {
             return Decision::Allow;
         }
         let rx = self.spawn_request(request);
@@ -2653,6 +2704,12 @@ impl Approver for ChannelApprover {
             _ => Decision::Deny,
         }
     }
+}
+
+fn auto_approve_enabled() -> bool {
+    std::env::var("OWO_AUTO_APPROVE")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn to_sse(event: &owo_agent_core::TurnEvent) -> Option<SseEvent> {

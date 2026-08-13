@@ -546,21 +546,53 @@ impl Tool for DesktopClickTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "desktop_click".into(),
-            description: "在屏幕坐标 (x, y) 处单击鼠标左键（坐标来自 screen_ocr 的词框中心）"
+            description: "单击鼠标左键：传入 (x, y) 屏幕坐标，或传入元素注册表的 element_id（需先经 vision_ground/screen_ocr 刷新）自动取元素中心"
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "x": { "type": "integer" },
-                    "y": { "type": "integer" }
-                },
-                "required": ["x", "y"]
+                    "x": { "type": "integer", "description": "屏幕坐标（与 y 同传时使用）" },
+                    "y": { "type": "integer" },
+                    "element_id": { "type": "string", "description": "窗口元素注册表的稳定元素 ID（与 app_id 同传时优先于坐标）" },
+                    "app_id": { "type": "string", "description": "element_id 所属应用标识（如 qq）" }
+                }
             }),
         }
     }
 
-    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
-        let x = args.get("x").and_then(Value::as_i64).ok_or("缺少 x")? as i32;
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+        if let Some(element_id) = args.get("element_id").and_then(Value::as_str) {
+            let app_id = args
+                .get("app_id")
+                .and_then(Value::as_str)
+                .ok_or("缺少 app_id（element_id 需要所属应用）")?;
+            let (x, y) = {
+                let registry = ctx
+                    .elements
+                    .lock()
+                    .map_err(|_| "窗口元素注册表锁中毒".to_string())?;
+                let element = registry.get_by_id(app_id, element_id).ok_or_else(|| {
+                    format!("稳定元素 ID 未命中（可能已失效）：{element_id}；请先刷新感知")
+                })?;
+                (
+                    element.x + element.width / 2,
+                    element.y + element.height / 2,
+                )
+            };
+            if on_sim_surface() {
+                return sim_post("click", json!({ "x": x, "y": y })).await;
+            }
+            executor::click_at_screen(x, y)?;
+            return Ok(json!({
+                "clicked": [x, y],
+                "element_id": element_id,
+                "app_id": app_id,
+            }));
+        }
+        let x = args
+            .get("x")
+            .and_then(Value::as_i64)
+            .ok_or("缺少 x 或 element_id")? as i32;
         let y = args.get("y").and_then(Value::as_i64).ok_or("缺少 y")? as i32;
         if on_sim_surface() {
             return sim_post("click", json!({ "x": x, "y": y })).await;
@@ -899,11 +931,12 @@ impl Tool for VisionVerifyTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "vision_verify".into(),
-            description: "让视觉模型针对当前截图回答 yes/no 问题（如“消息是否已上屏”“输入框是否已清空”），返回 answer/confidence，用于异步完成验证".into(),
+            description: "让视觉模型针对当前截图回答 yes/no 问题（如“消息是否已上屏”“输入框是否已清空”），返回 answer/confidence，用于异步完成验证；默认忽略输入框占位文字".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "question": { "type": "string" },
+                    "ignore_placeholder": { "type": "boolean", "description": "是否忽略输入框占位文字（默认 true，避免把“输入消息...”误判为实际内容）" },
                     "x": { "type": "integer", "description": "可选：只验证该区域（裁剪放大）" },
                     "y": { "type": "integer" },
                     "width": { "type": "integer" },
@@ -918,9 +951,11 @@ impl Tool for VisionVerifyTool {
     async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
         let question = required_string(&args, "question")?;
         let (png, surface) = capture_vision_png_with_region(&args).await?;
-        let prompt = format!(
-            "请只看这张截图回答问题。先回答 YES 或 NO，再给出 0-1 置信度。问题：{question}"
-        );
+        let ignore_placeholder = args
+            .get("ignore_placeholder")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let prompt = crate::vision::verification_prompt(&question, ignore_placeholder);
         let raw = crate::vision::describe_image(&png, &prompt).await?;
         let (answer, confidence) = crate::vision::parse_verification(&raw);
         let config = crate::vision::VisionConfig::from_env();
@@ -943,21 +978,79 @@ impl Tool for VisionGroundTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "vision_ground".into(),
-            description: "让视觉模型定位描述的元素（返回坐标框），并与 OCR 文本交叉验证；只有 matched=true 且 cross_validated=true 时才可点击返回的 line 中心；这是兜底定位，优先用 screen_ocr".into(),
+            description: "让视觉模型定位描述的元素（返回坐标框），并与 OCR 文本交叉验证；只有 matched=true 且 cross_validated=true 时才可点击返回的 line 中心；提供 app_id 时结果并入窗口元素注册表并返回稳定 element_id，后续 desktop_click 可直接用 element_id".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "description": { "type": "string", "description": "要定位的元素描述，例如“发送按钮”“输入框”" }
+                    "description": { "type": "string", "description": "要定位的元素描述，例如“发送按钮”“输入框”" },
+                    "app_id": { "type": "string", "description": "可选：应用标识（如 qq/weixin/notepad），提供时注册到窗口元素注册表" }
                 },
                 "required": ["description"]
             }),
         }
     }
 
-    async fn run(&self, _ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
+    async fn run(&self, ctx: &mut ToolContext<'_>, args: Value) -> Result<Value, String> {
         let description = required_string(&args, "description")?;
-        crate::vision::ground_element(&description).await
+        let app_id = args
+            .get("app_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let mut result = crate::vision::ground_element(&description).await?;
+        if let Some(app_id) = app_id {
+            if result
+                .get("matched")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                let grounding = vision_grounding_from_value(&result, &description)?;
+                let mut registry = ctx
+                    .elements
+                    .lock()
+                    .map_err(|_| "窗口元素注册表锁中毒".to_string())?;
+                let element_id =
+                    crate::register_vision_grounding(&mut registry, &app_id, grounding);
+                if let Some(element_id) = element_id {
+                    result["element_id"] = json!(element_id);
+                    result["app_id"] = json!(app_id);
+                }
+            }
+        }
+        Ok(result)
     }
+}
+
+/// 从 vision_ground 返回值构造注册表输入（box=[x,y,w,h]）。
+pub fn vision_grounding_from_value(
+    value: &serde_json::Value,
+    description: &str,
+) -> Result<crate::VisionGrounding, String> {
+    let r#box = value
+        .get("box")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "grounding 结果缺少 box".to_string())?;
+    let numbers: Vec<i32> = r#box
+        .iter()
+        .filter_map(|item| item.as_i64().map(|value| value as i32))
+        .collect();
+    if numbers.len() != 4 {
+        return Err("grounding 结果 box 格式错误".to_string());
+    }
+    Ok(crate::VisionGrounding {
+        description: description.to_string(),
+        x: numbers[0],
+        y: numbers[1],
+        width: numbers[2],
+        height: numbers[3],
+        confidence: value
+            .get("confidence")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.7),
+        cross_validated: value
+            .get("cross_validated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 /// 模拟面执行器源：把动作图执行（/learn/execute-package）落到 headless 虚拟窗口，
@@ -1579,5 +1672,26 @@ mod tests {
                 parent: None,
             }
         ));
+    }
+
+    #[test]
+    fn vision_grounding_from_value_parses_box_and_flags() {
+        let value = json!({
+            "matched": true,
+            "description": "发送按钮",
+            "box": [815, 624, 170, 36],
+            "cross_validated": true,
+            "surface": "desktop"
+        });
+        let grounding = vision_grounding_from_value(&value, "发送按钮").expect("解析成功");
+        assert_eq!(grounding.x, 815);
+        assert_eq!(grounding.y, 624);
+        assert_eq!(grounding.width, 170);
+        assert_eq!(grounding.height, 36);
+        assert!(grounding.cross_validated);
+        assert!((grounding.confidence - 0.7).abs() < 1e-9);
+
+        let bad = json!({ "matched": true, "box": [1, 2, 3] });
+        assert!(vision_grounding_from_value(&bad, "x").is_err());
     }
 }

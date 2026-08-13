@@ -5,7 +5,8 @@
 # 端口/工作区可覆盖：-Port 4096 -Workspace D:\...
 param(
     [int]$Port = 4096,
-    [string]$Workspace = (Split-Path $PSScriptRoot -Parent)
+    [string]$Workspace = (Split-Path $PSScriptRoot -Parent),
+    [switch]$AutoApprove
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,6 +30,7 @@ if (-not $env:OWO_BROWSER_NODE) {
 if (-not $env:OWO_BROWSER_NODE_PATH) {
     $env:OWO_BROWSER_NODE_PATH = "C:\Users\23843\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules"
 }
+if ($AutoApprove) { $env:OWO_AUTO_APPROVE = "1" }
 
 $exe = Join-Path (Split-Path $PSScriptRoot -Parent) "target\debug\owo-agent.exe"
 if (-not (Test-Path $exe)) {
@@ -38,4 +40,5 @@ if (-not (Test-Path $exe)) {
 
 Write-Host "启动核心服务：$exe serve --port $Port --workspace $Workspace" -ForegroundColor Cyan
 Write-Host "模型：$env:OPENAI_BASE_URL / $env:OPENAI_MODEL  端口：$Port" -ForegroundColor Cyan
+Write-Host "自动审批：$($AutoApprove -or $env:OWO_AUTO_APPROVE)" -ForegroundColor Cyan
 & $exe serve --port $Port --workspace $Workspace

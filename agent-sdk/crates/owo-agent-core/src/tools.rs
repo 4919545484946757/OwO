@@ -25,6 +25,8 @@ pub struct ToolContext<'a> {
     pub audit: &'a Arc<Mutex<AuditLog>>,
     pub subagent: Option<SubagentRunner<'a>>,
     pub skills: &'a SkillRegistry,
+    /// 窗口元素注册表（感知多源融合的稳定元素 ID 空间）。
+    pub elements: &'a Arc<Mutex<crate::ElementRegistry>>,
 }
 
 #[async_trait]

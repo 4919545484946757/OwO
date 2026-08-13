@@ -58,6 +58,7 @@ async fn mcp_tools_are_registered_and_callable() {
     let audit = Arc::new(std::sync::Mutex::new(AuditLog::default()));
     let policy = Policy::new(&workspace);
     let skills = SkillRegistry::default();
+    let elements = Arc::new(std::sync::Mutex::new(owo_agent_core::ElementRegistry::new()));
     let mut context = ToolContext {
         workspace: &workspace,
         policy: &policy,
@@ -65,6 +66,7 @@ async fn mcp_tools_are_registered_and_callable() {
         audit: &audit,
         subagent: None,
         skills: &skills,
+        elements: &elements,
     };
     let result = registry
         .execute("test_echo", &mut context, json!({ "text": "ok" }))

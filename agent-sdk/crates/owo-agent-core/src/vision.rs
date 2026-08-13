@@ -294,6 +294,23 @@ pub fn parse_verification(text: &str) -> (String, Option<f64>) {
     (answer.to_string(), confidence)
 }
 
+/// 构造视觉验证提示词。
+///
+/// `ignore_placeholder=true` 时显式要求模型忽略输入框内的占位文字
+/// （如“输入消息...”“搜索”），避免把占位符误判为用户实际输入
+/// （实测本地 VL 模型曾把清空后的输入框误判为非空）。
+pub fn verification_prompt(question: &str, ignore_placeholder: bool) -> String {
+    let placeholder_rule = if ignore_placeholder {
+        "注意：输入框内的灰色/浅色占位文字（例如“输入消息...”“搜索”）不算实际内容，\
+         判断时要忽略占位文字。"
+    } else {
+        ""
+    };
+    format!(
+        "请只看这张截图回答问题。先回答 YES 或 NO，再给出 0-1 置信度。{placeholder_rule}\n问题：{question}"
+    )
+}
+
 /// 解析视觉模型返回的边界框：`BOX x,y,w,h`、`x,y,w,h` 或 JSON `{"box":[x,y,w,h]}`。
 pub fn parse_vision_box(text: &str) -> Option<(i32, i32, i32, i32)> {
     let normalized = text.replace(['(', ')', '[', ']', '“', '”', '"'], " ");
@@ -451,6 +468,16 @@ mod tests {
         assert_eq!(confidence, Some(0.85));
         let (answer, _) = parse_verification("不确定");
         assert_eq!(answer, "unknown");
+    }
+
+    #[test]
+    fn verification_prompt_embeds_placeholder_rule_when_requested() {
+        let with_rule = verification_prompt("输入框是否已清空", true);
+        assert!(with_rule.contains("忽略占位文字"));
+        assert!(with_rule.contains("输入框是否已清空"));
+        let without_rule = verification_prompt("输入框是否已清空", false);
+        assert!(!without_rule.contains("忽略占位文字"));
+        assert!(without_rule.contains("输入框是否已清空"));
     }
 
     #[test]

@@ -30,6 +30,21 @@ def http_json(method, url, body=None, timeout=60):
         return json.loads(response.read().decode("utf-8"))
 
 
+def preflight(base):
+    try:
+        health = http_json("GET", base + "/health", None, timeout=10)
+    except Exception as exc:
+        print(f"[preflight] 无法连接服务 {base}: {exc}", flush=True)
+        sys.exit(2)
+    if not health.get("auto_approve"):
+        print(
+            f"[preflight] {base} 未开启 OWO_AUTO_APPROVE=1：多轮工具调用会在审批处挂起 300s。"
+            "模拟面请以 OWO_AUTO_APPROVE=1 重启服务。",
+            flush=True,
+        )
+        sys.exit(2)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://127.0.0.1:4096")
@@ -48,6 +63,8 @@ def main():
         help="UTF-8 文本文件，内容为逗号分隔的联系人名单",
     )
     args = parser.parse_args()
+
+    preflight(args.base)
 
     http_json("POST", args.sim + "/reset", {}, timeout=10)
     time.sleep(1.5)  # 等第一条 incoming 注入

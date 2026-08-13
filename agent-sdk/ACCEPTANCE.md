@@ -396,3 +396,18 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 真实 QQ 群聊受控发送脚本 | ✅ 就绪（待交互桌面） | `real-qq-group-send.py`：搜索群 → UIA 点击会话行 → 校验聊天头（防发错）→ 输入 → 发送 → UIA 验证；`qq-tree-dump.py` 调试工具；当次运行因桌面会话前台不可用（GetForegroundWindow 为空）中止，未发送任何消息 |
 | 本地 OCR 部署可行性 | ⚠️ 网络受阻 | PyPI TLS 连接被当前网络中断（SSLEOFError），rapidocr/onnxruntime 无法安装；云端 PP-OCRv6 继续作为当前 OCR 通道，本地 ONNX 待网络恢复后落地 |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 99） |
+
+## 二十九、v0.4.23 视觉验证占位符 + 视觉 grounding 并入元素注册表（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| vision_verify 忽略占位符 | ✅ | `verification_prompt(question, ignore_placeholder)` 纯函数：默认 true 时提示模型“输入框内的灰色/浅色占位文字（如‘输入消息...’）不算实际内容”；Agent 工具与 `POST /vision/verify` 均接入（`ignore_placeholder` 默认 true）；单测覆盖提示词开关 |
+| 视觉 grounding 并入注册表（source=vision） | ✅ | `VisionGrounding`（描述+坐标框+置信度+cross_validated）+ `fuse_sources_with_vision` 三源融合：视觉元素与重合 OCR 行合并（cross_validated 补 `ocr` 源），与 UIA/OCR 共享稳定 ID 空间；`register_vision_grounding` 复用原 ID；4 个新单测 |
+| `/perception/elements` 支持视觉输入 | ✅ | `ElementsRequest.vision`（Vec\<VisionGrounding>）→ UIA+OCR+vision 融合 → 注册表更新返回稳定元素列表 |
+| `/vision/ground` 注册返回 element_id | ✅ | 请求可选 `app_id`；grounding matched 时写入注册表并返回 `element_id`，Agent 后续可直接按 ID 点击 |
+| `vision_ground` 工具注册 | ✅ | Agent 工具新增可选 `app_id`：结果并入共享注册表（ToolContext/Agent 与 HTTP 层共用同一注册表，`AppState::new` 接线），返回 element_id；`vision_grounding_from_value` 单测 |
+| `desktop_click` 稳定 ID 点击 | ✅ | 工具新增 `element_id`+`app_id`：按注册表取元素中心点击（优先于坐标），未命中给出“请刷新感知”的明确错误；坐标模式兼容不变 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 114） |
+
+说明：本轮打通“视觉定位 → 注册表稳定 ID → 点击/验证”的 Agent 工具闭环，减少对每次 OCR
+重新定位的依赖；动作图执行器（learn/execute）暂未接入 element_id，留作下一轮。

@@ -75,6 +75,7 @@ pub struct FileDiff {
 pub struct HealthResponse {
     pub healthy: bool,
     pub version: String,
+    pub auto_approve: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

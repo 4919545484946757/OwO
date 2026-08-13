@@ -79,6 +79,7 @@ pub struct Agent {
     audit: Arc<Mutex<AuditLog>>,
     config: AgentConfig,
     skills: SkillRegistry,
+    elements: Arc<Mutex<crate::ElementRegistry>>,
 }
 
 impl Agent {
@@ -95,11 +96,21 @@ impl Agent {
             audit: Arc::new(Mutex::new(AuditLog::default())),
             config,
             skills: SkillRegistry::default(),
+            elements: Arc::new(Mutex::new(crate::ElementRegistry::new())),
         }
     }
 
     pub fn set_skills(&mut self, skills: SkillRegistry) {
         self.skills = skills;
+    }
+
+    /// 设置共享窗口元素注册表（与 HTTP 感知层共用同一 ID 空间）。
+    pub fn set_elements(&mut self, elements: Arc<Mutex<crate::ElementRegistry>>) {
+        self.elements = elements;
+    }
+
+    pub fn elements(&self) -> Arc<Mutex<crate::ElementRegistry>> {
+        Arc::clone(&self.elements)
     }
 
     pub fn skills(&self) -> &SkillRegistry {
@@ -270,6 +281,7 @@ impl Agent {
                                 audit: &self.audit,
                                 subagent: Some(subagent),
                                 skills: &self.skills,
+                                elements: &self.elements,
                             };
                             let outcome = self
                                 .registry

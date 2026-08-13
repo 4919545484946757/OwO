@@ -40,7 +40,10 @@ pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};
 pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
 pub use audit::{AuditEntry, AuditLog};
 pub use automation::{AutomationAction, AutomationStore, AutomationTask, Schedule};
-pub use element_registry::{fuse_sources, ElementRegistry, SceneElement};
+pub use element_registry::{
+    fuse_sources, fuse_sources_with_vision, register_vision_grounding, ElementRegistry,
+    SceneElement, VisionGrounding,
+};
 pub use error::AgentError;
 pub use eval::{builtin_suite, eval_suite_path, run_suite, EvalCase, EvalReport, EvalSuite};
 pub use executor::{execute_graph, ExecReport, ExecStep, UiActionSource, WindowsUiaSource};
@@ -85,7 +88,7 @@ pub use trace::{list_traces, load_trace, save_trace, TraceRecord};
 pub use vision::{
     bmp_to_png, capture_vision_bmp, capture_vision_png, capture_vision_png_region,
     cross_validate_box, describe_image, ground_element, ollama_models, parse_verification,
-    parse_vision_box, VisionConfig,
+    parse_vision_box, verification_prompt, VisionConfig,
 };
 pub use whitelist::{AppTier, Whitelist, WhitelistEntry};
 pub use window_template::{

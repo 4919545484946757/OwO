@@ -1,7 +1,8 @@
 //! 窗口元素注册表（设计文档 10.1）：UIA/OCR/视觉多源融合 → 稳定元素 ID → 跨帧跟踪与失效。
 //!
 //! 每帧把 UIA 节点与 OCR 行融合成 `SceneElement`，注册表按“名称+角色+位置邻近”匹配上一帧，
-//! 保持稳定 ID；连续多帧未出现则标记 stale 后淘汰。视觉源（vision）预留，接入后同样参与融合。
+//! 保持稳定 ID；连续多帧未出现则标记 stale 后淘汰。视觉 grounding（vision）结果同样参与融合，
+//! 使视觉定位出的元素与 UIA/OCR 共享同一稳定 ID 空间。
 
 use crate::accessibility::UiNode;
 use crate::ocr::OcrLine;
@@ -23,6 +24,25 @@ pub struct SceneElement {
     #[serde(default)]
     pub stale_frames: u32,
     pub updated_at: String,
+}
+
+/// 视觉 grounding 输入：视觉模型给出的元素描述 + 坐标框（vision_ground 的 BOX 结果）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisionGrounding {
+    pub description: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    #[serde(default = "default_vision_confidence")]
+    pub confidence: f64,
+    /// 是否已与 OCR 文本交叉验证通过（ground_element 返回 matched=true 时）。
+    #[serde(default)]
+    pub cross_validated: bool,
+}
+
+fn default_vision_confidence() -> f64 {
+    0.7
 }
 
 impl SceneElement {
@@ -107,6 +127,14 @@ impl ElementRegistry {
             .cloned()
     }
 
+    /// 按稳定元素 ID 精确取元素（供 element_id 锚点定位）。
+    pub fn get_by_id(&self, app_id: &str, element_id: &str) -> Option<SceneElement> {
+        self.apps
+            .get(app_id)
+            .and_then(|entries| entries.get(element_id))
+            .cloned()
+    }
+
     pub fn list(&self, app_id: &str) -> Vec<SceneElement> {
         self.apps
             .get(app_id)
@@ -115,8 +143,52 @@ impl ElementRegistry {
     }
 }
 
+/// 把一次视觉 grounding 结果写入注册表，返回稳定元素 ID（若已存在则复用原 ID）。
+pub fn register_vision_grounding(
+    registry: &mut ElementRegistry,
+    app_id: &str,
+    grounding: VisionGrounding,
+) -> Option<String> {
+    let element = SceneElement {
+        id: String::new(),
+        app_id: app_id.to_string(),
+        name: grounding.description.clone(),
+        role_hint: role_hint_from_vision_description(&grounding.description),
+        sources: if grounding.cross_validated {
+            vec!["vision".to_string(), "ocr".to_string()]
+        } else {
+            vec!["vision".to_string()]
+        },
+        x: grounding.x,
+        y: grounding.y,
+        width: grounding.width,
+        height: grounding.height,
+        confidence: grounding.confidence.clamp(0.0, 1.0),
+        stale_frames: 0,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    registry
+        .update(app_id, vec![element])
+        .into_iter()
+        .find(|registered| registered.name == grounding.description)
+        .map(|registered| registered.id)
+}
+
 /// 把 UIA 节点与 OCR 行融合为统一 SceneElement 列表（同名且矩形重合的合并，UIA 优先几何）。
 pub fn fuse_sources(uia: &[UiNode], lines: &[OcrLine]) -> Vec<SceneElement> {
+    fuse_sources_with_vision(uia, lines, &[])
+}
+
+/// 三源融合：UIA + OCR + 视觉 grounding（source=vision）。
+///
+/// 视觉元素以描述为名；若其坐标框与 OCR 行重合（grounding 交叉验证），
+/// 会把对应 OCR 文本合并进同一元素并补充 `ocr` 源，使视觉定位结果能复用
+/// 确定性 OCR 的几何信息。
+pub fn fuse_sources_with_vision(
+    uia: &[UiNode],
+    lines: &[OcrLine],
+    vision: &[VisionGrounding],
+) -> Vec<SceneElement> {
     let mut elements: Vec<SceneElement> = Vec::new();
     let now = chrono::Utc::now().to_rfc3339();
     for node in uia {
@@ -171,6 +243,64 @@ pub fn fuse_sources(uia: &[UiNode], lines: &[OcrLine]) -> Vec<SceneElement> {
             None => elements.push(ocr_element),
         }
     }
+    for grounding in vision {
+        if grounding.description.trim().is_empty() || grounding.width <= 0 || grounding.height <= 0
+        {
+            continue;
+        }
+        let mut sources = vec!["vision".to_string()];
+        let mut role_hint = role_hint_from_vision_description(&grounding.description);
+        if grounding.cross_validated {
+            let overlapping_ocr = lines.iter().find(|line| {
+                let cx = line.x + line.width / 2;
+                let cy = line.y + line.height / 2;
+                cx >= grounding.x
+                    && cx <= grounding.x + grounding.width
+                    && cy >= grounding.y
+                    && cy <= grounding.y + grounding.height
+            });
+            if let Some(line) = overlapping_ocr {
+                sources.push("ocr".to_string());
+                if role_hint == "element" {
+                    role_hint = role_hint_from_text(&line.text);
+                }
+            }
+        }
+        let vision_element = SceneElement {
+            id: String::new(),
+            app_id: String::new(),
+            name: grounding.description.clone(),
+            role_hint,
+            sources,
+            x: grounding.x,
+            y: grounding.y,
+            width: grounding.width,
+            height: grounding.height,
+            confidence: grounding.confidence.clamp(0.0, 1.0),
+            stale_frames: 0,
+            updated_at: now.clone(),
+        };
+        let merged = elements.iter_mut().find(|element| {
+            (element.name == vision_element.name
+                || element.sources.contains(&"ocr".to_string())
+                    && lines.iter().any(|line| {
+                        line.text == vision_element.name && element.rect_overlaps(&vision_element)
+                    }))
+                && element.role_hint == vision_element.role_hint
+                && element.rect_overlaps(&vision_element)
+        });
+        match merged {
+            Some(element) => {
+                for source in &vision_element.sources {
+                    if !element.sources.contains(source) {
+                        element.sources.push(source.clone());
+                    }
+                }
+                element.confidence = element.confidence.max(vision_element.confidence);
+            }
+            None => elements.push(vision_element),
+        }
+    }
     elements
 }
 
@@ -196,6 +326,26 @@ fn role_hint_from_text(text: &str) -> String {
         "button"
     } else {
         "text"
+    }
+    .to_string()
+}
+
+fn role_hint_from_vision_description(description: &str) -> String {
+    if description.contains("输入框")
+        || description.contains("输入")
+        || description.contains("编辑")
+    {
+        "input"
+    } else if description.contains("发送")
+        || description.contains("搜索")
+        || description.contains("按钮")
+        || description.contains("提交")
+    {
+        "button"
+    } else if description.contains("消息") || description.contains("列表") {
+        "list"
+    } else {
+        "element"
     }
     .to_string()
 }
@@ -275,5 +425,95 @@ mod tests {
         let fused = fuse_sources(&uia, &lines);
         assert_eq!(fused.len(), 1);
         assert_eq!(fused[0].sources, vec!["uia", "ocr"]);
+    }
+
+    #[test]
+    fn fuse_sources_with_vision_adds_vision_source() {
+        let fused = fuse_sources_with_vision(
+            &[],
+            &[],
+            &[VisionGrounding {
+                description: "发送按钮".into(),
+                x: 815,
+                y: 624,
+                width: 170,
+                height: 36,
+                confidence: 0.72,
+                cross_validated: false,
+            }],
+        );
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].name, "发送按钮");
+        assert_eq!(fused[0].role_hint, "button");
+        assert_eq!(fused[0].sources, vec!["vision"]);
+        assert!((fused[0].confidence - 0.72).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vision_grounding_cross_validated_merges_with_ocr() {
+        let lines = vec![OcrLine {
+            text: "发送".into(),
+            x: 815,
+            y: 624,
+            width: 170,
+            height: 36,
+        }];
+        let fused = fuse_sources_with_vision(
+            &[],
+            &lines,
+            &[VisionGrounding {
+                description: "发送".into(),
+                x: 815,
+                y: 624,
+                width: 170,
+                height: 36,
+                confidence: 0.8,
+                cross_validated: true,
+            }],
+        );
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].sources, vec!["ocr", "vision"]);
+        assert_eq!(fused[0].role_hint, "button");
+    }
+
+    #[test]
+    fn vision_element_keeps_stable_registry_id() {
+        let mut registry = ElementRegistry::new();
+        let vision = || {
+            vec![VisionGrounding {
+                description: "输入框".into(),
+                x: 240,
+                y: 620,
+                width: 560,
+                height: 44,
+                confidence: 0.75,
+                cross_validated: false,
+            }]
+        };
+        let frame1 = registry.update("qq", fuse_sources_with_vision(&[], &[], &vision()));
+        let frame2 = registry.update("qq", fuse_sources_with_vision(&[], &[], &vision()));
+        assert_eq!(frame1[0].id, frame2[0].id);
+        assert_eq!(frame1[0].sources, vec!["vision"]);
+    }
+
+    #[test]
+    fn register_vision_grounding_reuses_stable_id() {
+        let mut registry = ElementRegistry::new();
+        let grounding = || VisionGrounding {
+            description: "发送按钮".into(),
+            x: 815,
+            y: 624,
+            width: 170,
+            height: 36,
+            confidence: 0.72,
+            cross_validated: false,
+        };
+        let first = register_vision_grounding(&mut registry, "qq", grounding()).expect("id");
+        let second = register_vision_grounding(&mut registry, "qq", grounding()).expect("id");
+        assert_eq!(first, second);
+        assert_eq!(
+            registry.get_by_id("qq", &first).map(|e| e.sources),
+            Some(vec!["vision".into()])
+        );
     }
 }
