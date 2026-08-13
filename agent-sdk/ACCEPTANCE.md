@@ -425,3 +425,17 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 
 说明：至此“视觉定位 → 注册表稳定 ID → 点击/验证”在 Agent 工具与动作图执行器两条路径均闭环；
 旧流程技能包（无 element_id）仍按语义锚点（UIA/OCR）原有逻辑执行，不受影响。
+
+## 三十一、v0.4.25 真实面观察源（桌面状态采样，2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| DesktopSnapshot 采样 | ✅ | `sample_desktop()`：前台应用 + 窗口标题哈希（原始标题不落盘）+ 剪贴板序列号；无前台窗口时安全返回 None 字段 |
+| 变化检测观察 | ✅ | `desktop_observation(prev, next)`：仅前台应用/标题哈希/剪贴板序列变化时生成 `kind=desktop_event` 记录；摘要如“前台应用：qq”“窗口标题变化（内容掩码）”“剪贴板变化（内容掩码）” |
+| 隐私边界（D22） | ✅ | 观察 detail 只含 title_hash / clipboard_changed，不含标题原文与剪贴板内容；契约测试断言序列化结果不包含原始标题 |
+| 服务端接线 | ✅ | `start_memory_observer` 每 2s 采样桌面（受 L0Event 感知授权门控，可热撤），模拟面日志观察逻辑保持不变 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 120） |
+
+说明：真实面观察源落地后，情景记忆可覆盖“用户正在什么应用、切了哪个窗口、剪贴板是否变化”
+的掩码轨迹；技能挖掘（/memory/mine-skill）仍以模拟面/示范录制的动作序列为准，
+真实面动作级学习走 UIA 锚点录制链路。

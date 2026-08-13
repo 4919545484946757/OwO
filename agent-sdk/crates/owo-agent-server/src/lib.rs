@@ -2461,11 +2461,31 @@ pub async fn start_automation_loop(state: Arc<AppState>) {
     }
 }
 
-/// 静默观察器：模拟面下每 2s 拉取模拟窗口日志，把动作摘要（内容掩码）写入情景记忆。
+/// 静默观察器：每 2s 采样桌面状态（前台应用/标题哈希/剪贴板序列，受 L0 授权门控），
+/// 并在模拟面下额外拉取模拟窗口日志；动作摘要（内容掩码）写入情景记忆。
 pub async fn start_memory_observer(state: Arc<AppState>) {
-    let mut seen = 0usize;
+    let mut sim_seen = 0usize;
+    let mut desktop_prev: Option<owo_agent_core::DesktopSnapshot> = None;
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
+        let l0_enabled = state
+            .perception
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_enabled(owo_agent_core::PerceptionLayer::L0Event);
+        if l0_enabled {
+            let snapshot = owo_agent_core::sample_desktop();
+            if let Some(prev) = &desktop_prev {
+                if let Some(observation) = owo_agent_core::desktop_observation(prev, &snapshot) {
+                    let mut memory = state
+                        .memory
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let _ = memory.append(observation);
+                }
+            }
+            desktop_prev = Some(snapshot);
+        }
         let Some(base) = std::env::var("OWO_SIM_QQ_URL")
             .ok()
             .map(|value| value.trim().to_string())
@@ -2483,23 +2503,23 @@ pub async fn start_memory_observer(state: Arc<AppState>) {
         let Some(entries) = value.get("entries").and_then(Value::as_array) else {
             continue;
         };
-        if entries.len() < seen {
+        if entries.len() < sim_seen {
             // 模拟场景被 /reset 清空：从头重新计数。
-            seen = 0;
+            sim_seen = 0;
         }
-        if entries.len() <= seen {
+        if entries.len() <= sim_seen {
             continue;
         }
         let mut memory = state
             .memory
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for entry in &entries[seen..] {
+        for entry in &entries[sim_seen..] {
             if let Some(observation) = owo_agent_core::observation_from_sim_event(entry) {
                 let _ = memory.append(observation);
             }
         }
-        seen = entries.len();
+        sim_seen = entries.len();
     }
 }
 

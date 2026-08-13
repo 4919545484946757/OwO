@@ -1,6 +1,6 @@
-﻿//! 静默观察与情景记忆（v0.4.5，设计文档 M-D 起步）。
+//! 静默观察与情景记忆（v0.4.5，设计文档 M-D 起步）。
 //!
-//! Observer 后台轮询应用状态流（模拟面取模拟窗口日志，真实面后续接 UIA/窗口快照），
+//! Observer 后台轮询应用状态流（模拟面取模拟窗口日志；真实面采样前台应用/窗口标题哈希/剪贴板序列），
 //! 把动作摘要（内容掩码）与结果写入本地情景记忆（JSONL，可换成 SQLite）。
 //! `map_sim_events_to_actions` 把观察到的动作序列映射为录制样本，
 //! 供 `/memory/mine-skill` 聚合 → 泛化 → 沉淀流程技能包（候选 → 用户确认 → active）。
@@ -171,6 +171,73 @@ pub fn value_hash(value: &serde_json::Value) -> u64 {
     hasher.finish()
 }
 
+/// 真实面桌面状态快照（L0/L1 掩码采样）：不携带原始窗口标题。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopSnapshot {
+    pub app_id: Option<String>,
+    /// 窗口标题哈希（原始标题不落盘）。
+    pub title_hash: Option<u64>,
+    pub clipboard_seq: u32,
+}
+
+/// 采样当前桌面状态（无前台窗口时 app_id/title_hash 为 None）。
+pub fn sample_desktop() -> DesktopSnapshot {
+    let (app_id, title) = crate::platform::poll_foreground_app().unwrap_or_default();
+    DesktopSnapshot {
+        app_id: if app_id.is_empty() {
+            None
+        } else {
+            Some(app_id)
+        },
+        title_hash: if title.is_empty() {
+            None
+        } else {
+            Some(value_hash(&serde_json::json!(title)))
+        },
+        clipboard_seq: crate::platform::clipboard_sequence(),
+    }
+}
+
+/// 对比相邻两次桌面采样，仅在状态变化时生成掩码观察记录。
+///
+/// 隐私边界（D22）：记录应用标识、标题哈希与剪贴板是否变化，不记录窗口标题原文与剪贴板内容。
+pub fn desktop_observation(prev: &DesktopSnapshot, next: &DesktopSnapshot) -> Option<Observation> {
+    if prev == next {
+        return None;
+    }
+    let mut summary = Vec::new();
+    let mut detail = serde_json::Map::new();
+    if prev.app_id != next.app_id {
+        summary.push(format!(
+            "前台应用：{}",
+            next.app_id.as_deref().unwrap_or("unknown")
+        ));
+    }
+    if prev.title_hash != next.title_hash {
+        summary.push("窗口标题变化（内容掩码）".to_string());
+        if let Some(title_hash) = next.title_hash {
+            detail.insert("title_hash".to_string(), serde_json::json!(title_hash));
+        }
+    }
+    if prev.clipboard_seq != next.clipboard_seq {
+        summary.push("剪贴板变化（内容掩码）".to_string());
+        detail.insert("clipboard_changed".to_string(), serde_json::json!(true));
+    }
+    let snapshot_value = serde_json::json!({
+        "app_id": next.app_id,
+        "title_hash": next.title_hash,
+        "clipboard_seq": next.clipboard_seq,
+    });
+    Some(Observation {
+        ts: chrono::Utc::now().to_rfc3339(),
+        app_id: next.app_id.clone().unwrap_or_default(),
+        kind: "desktop_event".to_string(),
+        summary: summary.join("；"),
+        detail: serde_json::Value::Object(detail),
+        state_hash: value_hash(&snapshot_value),
+    })
+}
+
 /// 把观察记录中的模拟动作映射为学习样本（内容掩码：不保存消息正文）。
 pub fn map_sim_events_to_actions(observations: &[Observation]) -> Vec<RecordedAction> {
     let mut actions = Vec::new();
@@ -327,5 +394,70 @@ mod tests {
         assert!(!store.entries.iter().any(|entry| entry.state_hash == 1));
         std::env::remove_var("OWO_MEMORY_MAX");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn desktop_observation_records_only_changes_and_masks_title() {
+        let baseline = DesktopSnapshot {
+            app_id: Some("qq".into()),
+            title_hash: Some(100),
+            clipboard_seq: 5,
+        };
+        assert!(desktop_observation(&baseline, &baseline).is_none());
+
+        let next = DesktopSnapshot {
+            app_id: Some("qq".into()),
+            title_hash: Some(999),
+            clipboard_seq: 5,
+        };
+        let observation = desktop_observation(&baseline, &next).expect("标题变化应生成观察");
+        assert_eq!(observation.kind, "desktop_event");
+        assert!(observation.summary.contains("窗口标题变化（内容掩码）"));
+        assert_eq!(
+            observation.detail.get("title_hash"),
+            Some(&serde_json::json!(999))
+        );
+        assert!(observation.detail.get("clipboard_changed").is_none());
+        // 原始标题绝不落盘。
+        let serialized = serde_json::to_string(&observation).unwrap();
+        assert!(!serialized.contains("聊天记录"));
+
+        let clipboard_changed = DesktopSnapshot {
+            app_id: Some("qq".into()),
+            title_hash: Some(999),
+            clipboard_seq: 7,
+        };
+        let observation =
+            desktop_observation(&next, &clipboard_changed).expect("剪贴板变化应生成观察");
+        assert!(observation.summary.contains("剪贴板变化（内容掩码）"));
+        assert_eq!(
+            observation.detail.get("clipboard_changed"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    #[test]
+    fn desktop_observation_switches_app_and_masks_title() {
+        let baseline = DesktopSnapshot {
+            app_id: Some("notepad".into()),
+            title_hash: Some(1),
+            clipboard_seq: 0,
+        };
+        let next = DesktopSnapshot {
+            app_id: Some("weixin".into()),
+            title_hash: Some(2),
+            clipboard_seq: 0,
+        };
+        let observation = desktop_observation(&baseline, &next).expect("应用切换应生成观察");
+        assert!(observation.summary.contains("前台应用：weixin"));
+        assert_eq!(observation.app_id, "weixin");
+        assert!(observation.detail.get("title_hash").is_some());
+    }
+
+    #[test]
+    fn sample_desktop_is_callable_and_never_panics() {
+        let snapshot = sample_desktop();
+        // 无前台窗口（CI/沙箱）时 app_id 为 None，不应 panic。
+        let _ = snapshot;
     }
 }

@@ -58,7 +58,8 @@ pub use learn::{
 };
 pub use mcp::{McpClient, McpServerConfig, McpTool};
 pub use observe::{
-    map_sim_events_to_actions, observation_from_sim_event, value_hash, MemoryStore, Observation,
+    desktop_observation, map_sim_events_to_actions, observation_from_sim_event, sample_desktop,
+    value_hash, DesktopSnapshot, MemoryStore, Observation,
 };
 pub use ocr::{
     crop_scale_bmp, group_ocr_lines, ocr_bmp, ocr_bmp_detailed, ocr_bmp_region, ocr_engine_status,
