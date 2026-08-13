@@ -366,6 +366,7 @@ async function refreshSettings() {
         stt: settings.stt,
         proactive: settings.proactive,
         egress: settings.egress,
+        usage: settings.usage,
       },
       null,
       2

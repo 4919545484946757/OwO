@@ -67,6 +67,7 @@ impl AppState {
         workspace: PathBuf,
     ) -> Self {
         let settings = owo_agent_core::Settings::load(&workspace);
+        settings.apply_usage_env();
         let mut whitelist = Whitelist::default();
         for entry in settings.whitelist.clone() {
             whitelist.upsert(entry);
@@ -2685,6 +2686,7 @@ async fn settings_update(
     settings
         .save(&state.workspace)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    settings.apply_usage_env();
     if let Some(model) = &settings.model {
         if !model.trim().is_empty() {
             std::env::set_var("OPENAI_MODEL", model);

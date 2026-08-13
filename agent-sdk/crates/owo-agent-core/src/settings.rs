@@ -192,6 +192,24 @@ impl Default for EgressSettings {
     }
 }
 
+/// v0.4.30 模型用量预算配置（持久化到 settings.json，运行时写回环境变量）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageSettings {
+    /// 累计 token 上限（None = 不熔断）。
+    #[serde(default)]
+    pub token_budget: Option<u64>,
+    /// 累计成本上限（美元，None = 不熔断）。
+    #[serde(default)]
+    pub cost_budget_usd: Option<f64>,
+    /// 输入单价（美元/百万 token，0 = 不估算成本）。
+    #[serde(default)]
+    pub input_price_per_mtok: f64,
+    /// 输出单价（美元/百万 token）。
+    #[serde(default)]
+    pub output_price_per_mtok: f64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -231,6 +249,9 @@ pub struct Settings {
     /// 数据出境开关。
     #[serde(default)]
     pub egress: EgressSettings,
+    /// v0.4.30 模型用量预算。
+    #[serde(default)]
+    pub usage: UsageSettings,
 }
 
 impl Settings {
@@ -238,6 +259,8 @@ impl Settings {
         let path = workspace.join("settings.json");
         std::fs::read_to_string(path)
             .ok()
+            // Windows 编辑器常写 UTF-8 BOM，serde 不识别，先剥离。
+            .map(|content| content.trim_start_matches('\u{feff}').to_string())
             .and_then(|content| serde_json::from_str(&content).ok())
             .unwrap_or_default()
     }
@@ -249,6 +272,27 @@ impl Settings {
             serde_json::to_string_pretty(self).map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())
+    }
+
+    /// 把用量预算配置写回环境变量（provider 每次调用前读取，即时生效）。
+    /// None 字段清除对应环境变量，避免旧值残留。
+    pub fn apply_usage_env(&self) {
+        match self.usage.token_budget {
+            Some(value) => std::env::set_var("OWO_USAGE_TOKEN_BUDGET", value.to_string()),
+            None => std::env::remove_var("OWO_USAGE_TOKEN_BUDGET"),
+        }
+        match self.usage.cost_budget_usd {
+            Some(value) => std::env::set_var("OWO_USAGE_COST_BUDGET_USD", value.to_string()),
+            None => std::env::remove_var("OWO_USAGE_COST_BUDGET_USD"),
+        }
+        std::env::set_var(
+            "OWO_MODEL_INPUT_PRICE_PER_MTOK",
+            self.usage.input_price_per_mtok.to_string(),
+        );
+        std::env::set_var(
+            "OWO_MODEL_OUTPUT_PRICE_PER_MTOK",
+            self.usage.output_price_per_mtok.to_string(),
+        );
     }
 }
 
@@ -278,7 +322,8 @@ mod tests {
                 "skills": { "share_format": "owskill" },
                 "whitelist": [
                     { "app_id": "code", "name": "VSCode", "tier": "productivity", "learn_allowed": true, "auto_ops_allowed": true }
-                ]
+                ],
+                "usage": { "token_budget": 5000, "cost_budget_usd": 1.25, "input_price_per_mtok": 0.3, "output_price_per_mtok": 1.2 }
             }"#,
         )
         .unwrap();
@@ -302,6 +347,24 @@ mod tests {
         assert_eq!(settings.skills.share_format, "owskill");
         assert_eq!(settings.whitelist.len(), 1);
         assert_eq!(settings.whitelist[0].app_id, "code");
+        assert_eq!(settings.usage.token_budget, Some(5000));
+        assert_eq!(settings.usage.cost_budget_usd, Some(1.25));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn loads_settings_with_utf8_bom() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-settings-bom-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("settings.json"),
+            "\u{feff}{\"model\":\"bom-model\",\"usage\":{\"token_budget\":9000}}",
+        )
+        .unwrap();
+        let settings = Settings::load(&workspace);
+        assert_eq!(settings.model.as_deref(), Some("bom-model"));
+        assert_eq!(settings.usage.token_budget, Some(9000));
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
@@ -356,6 +419,12 @@ mod tests {
             egress: EgressSettings {
                 cloud_enabled: false,
             },
+            usage: UsageSettings {
+                token_budget: Some(100_000),
+                cost_budget_usd: Some(5.0),
+                input_price_per_mtok: 0.5,
+                output_price_per_mtok: 2.0,
+            },
             ..Settings::default()
         };
         settings.save(&workspace).unwrap();
@@ -368,6 +437,51 @@ mod tests {
         assert!(!loaded.proactive.enabled);
         assert_eq!(loaded.skills.disabled, vec!["demo"]);
         assert!(!loaded.egress.cloud_enabled);
+        assert_eq!(loaded.usage.token_budget, Some(100_000));
+        assert_eq!(loaded.usage.cost_budget_usd, Some(5.0));
+        assert!((loaded.usage.input_price_per_mtok - 0.5).abs() < 1e-9);
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn apply_usage_env_syncs_budget_and_prices() {
+        static ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let settings = Settings {
+            usage: UsageSettings {
+                token_budget: Some(42_000),
+                cost_budget_usd: Some(3.25),
+                input_price_per_mtok: 1.0,
+                output_price_per_mtok: 4.0,
+            },
+            ..Settings::default()
+        };
+        settings.apply_usage_env();
+        assert_eq!(
+            std::env::var("OWO_USAGE_TOKEN_BUDGET").as_deref(),
+            Ok("42000")
+        );
+        assert_eq!(
+            std::env::var("OWO_USAGE_COST_BUDGET_USD").as_deref(),
+            Ok("3.25")
+        );
+        assert_eq!(
+            std::env::var("OWO_MODEL_INPUT_PRICE_PER_MTOK").as_deref(),
+            Ok("1")
+        );
+        assert_eq!(
+            std::env::var("OWO_MODEL_OUTPUT_PRICE_PER_MTOK").as_deref(),
+            Ok("4")
+        );
+
+        // None 清除预算变量（价格始终写回）。
+        Settings::default().apply_usage_env();
+        assert!(std::env::var("OWO_USAGE_TOKEN_BUDGET").is_err());
+        assert!(std::env::var("OWO_USAGE_COST_BUDGET_USD").is_err());
+        std::env::remove_var("OWO_MODEL_INPUT_PRICE_PER_MTOK");
+        std::env::remove_var("OWO_MODEL_OUTPUT_PRICE_PER_MTOK");
     }
 }

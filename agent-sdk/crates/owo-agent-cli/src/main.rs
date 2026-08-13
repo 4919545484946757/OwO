@@ -425,6 +425,7 @@ async fn run_turn(args: TurnArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
     let settings = Settings::load(&workspace);
     apply_egress_setting(&settings);
+    settings.apply_usage_env();
     let model = resolve_model(args.model, settings.model.as_deref());
     let agent = build_agent(&workspace, &model, false)?;
     let mut session = Session::new(workspace.clone(), model, None);
@@ -492,6 +493,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = args.workspace.canonicalize()?;
     let settings = Settings::load(&workspace);
     apply_egress_setting(&settings);
+    settings.apply_usage_env();
     let model = resolve_model(None, settings.model.as_deref());
     let root = ensure_data_root(None, &workspace);
     let plugins = discover_plugins(&workspace, &root);
@@ -666,6 +668,7 @@ impl Repl {
         let workspace = args.workspace.canonicalize()?;
         let settings = Settings::load(&workspace);
         apply_egress_setting(&settings);
+        settings.apply_usage_env();
         let model = resolve_model(args.model, settings.model.as_deref());
         let read_only = args.agent == "plan" || settings.read_only;
         let root = ensure_data_root(args.data_dir, &workspace);

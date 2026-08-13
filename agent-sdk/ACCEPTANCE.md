@@ -517,3 +517,18 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 
 说明：预算配置当前经环境变量生效（运行时改动即时被 provider 读取），
 设置页 JSON 持久化预算字段留作后续（settings.json 扩展）。
+
+## 三十八、v0.4.32 用量预算持久化到 settings.json（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| UsageSettings 配置组 | ✅ | settings.json 新增 `usage`：token_budget/cost_budget_usd（None=不熔断）+ 单价（0=不估算）；serde default 兼容旧 settings.json |
+| 运行时应用 | ✅ | `Settings::apply_usage_env` 把预算/单价写回环境变量（None 清除，防旧值残留）；服务端启动（AppState::new）、`POST /settings`、CLI turn/repl/tui 均接入 |
+| settings.json 持久化 | ✅ | `POST /settings` 保存完整配置并即时生效；`/settings` 返回 usage 组；settings.example.json 同步示例 |
+| 桌面端预览 | ✅ | 设置与诊断 JSON 预览含 usage 组（用量面板保持一致） |
+| BOM 兼容修复 | ✅ | `Settings::load` 剥离 UTF-8 BOM（Windows 编辑器常见），避免配置静默失效；单测覆盖 BOM 场景 |
+| HTTP e2e | ✅ | 启动时 BOM settings.json（50000/2.5/0.4）→ /usage 启动即生效；POST /settings（777/0.5）→ /usage 即时更新且 settings.json 持久化 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 130） |
+
+说明：至此用量预算可从设置页 JSON 编辑并持久化，启动/运行时均生效；
+用量统计、预算熔断、展示、持久化四条链路全部闭环。

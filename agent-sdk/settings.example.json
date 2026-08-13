@@ -52,6 +52,12 @@
   "egress": {
     "cloud_enabled": true
   },
+  "usage": {
+    "token_budget": null,
+    "cost_budget_usd": null,
+    "input_price_per_mtok": 0.0,
+    "output_price_per_mtok": 0.0
+  },
   "mcp_servers": [
     {
       "name": "files",
