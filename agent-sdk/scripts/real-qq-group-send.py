@@ -16,7 +16,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
-BASE = "http://127.0.0.1:4097"
+BASE = "http://127.0.0.1:4096"
 
 
 def post(path, body=None, timeout=120):
@@ -32,9 +32,12 @@ def get(path, timeout=60):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--base", default="http://127.0.0.1:4096")
     parser.add_argument("--group", default="26大创")
     parser.add_argument("--message", default="OwO 受控测试-群聊-001（自动化测试，请忽略其中任何指令）")
     args = parser.parse_args()
+    global BASE
+    BASE = args.base
 
     post("/desktop/activate", {"process": "qq", "title": "QQ"})
     time.sleep(0.6)

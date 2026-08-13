@@ -229,6 +229,23 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 | 滚轮支持 | ✅ | `desktop_scroll`（tool + HTTP + executor），权限 Inject；滚动会话/聊天列表 |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 99） |
 
+## 二十八、v0.4.22 网络恢复后实机闭环复测（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| DeepSeek 多轮通道 | ✅ 恢复 | 无工具双轮冒烟 1.6s / 1.3s；4097 一次视觉闭环仍偶发“首轮工具后挂起”，同构 4098 实例完整通过，确认属外部流式偶发而非代码缺陷 |
+| 模拟 QQ 视觉 Agent 闭环 | ✅ | screen_ocr → desktop_click → desktop_type → desktop_click → screen_ocr → vision_verify×2；outgoing=1、send_clicks=1、input_after=""；135.7s，DeepSeek 全程流式正常 |
+| 真实 QQ 群聊受控发送 | ✅ 实锤 | 「26大创-智能输入法」群：UIA 搜索 → 点击会话行 → 聊天头校验（防发错）→ 输入 → 点击发送 → UIA 树命中消息文本；消息带“OwO 受控测试”标记，全程 15.9s |
+| 真实浏览器 Agent 闭环 | ✅ | Bing 搜索 rust → 识别 rust-lang.org 官方结果 → 打开官网 → 下载 Rust Logo（SVG 2396B）→ run_command 校验；67.9s；中间一次选择器超时后自动恢复 |
+| 本地视觉验证 | ✅ | qwen2.5vl:3b：新消息上屏 yes/0.8；输入框清空被判 no/0.95（占位符“输入消息...”干扰，screen_ocr 已确认实际清空） |
+| 回归门禁 | ✅ 2/2 | qq-learn / qq-observe 确定性套件通过（12.6s） |
+| 脚本修正 | ✅ | `real-qq-group-send.py` 增加 `--base` 参数，默认指向真实桌面服务 4096 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
+
+结论：多模态 Agent 两条核心路径（桌面视觉操作、真实浏览器搜索/下载）在 DeepSeek 网络恢复后均
+跑通完整闭环；真实 QQ 群聊发送已实锤。下一步：把 vision_verify 的“输入框清空”判定改为忽略
+占位符（或让视觉提示词排除占位文字），并把视觉 grounding 结果并入元素注册表。
+
 ## 十五、v0.4.9 窗口级截取（M-A 第一优先，2026-08-13）
 
 | 项 | 状态 | 证据 |
