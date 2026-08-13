@@ -1,8 +1,14 @@
 # 技术文档：Codex 式 Agent 智能体 SDK 与桌面工作台
 
-> 版本：v0.4（已合并《技术文档-AI智能体输入法-v0.4续写计划.md》，D17–D26 已确认）  
-> 日期：2026-08-12  
-> 状态：核心决策已锁定；P1 桌面端 / P2 全域感知 / P3 操作学习已进入实现并持续迭代  
+> 版本：v0.6（技术路线合并 + 面向生产力远期设计）  
+> 日期：2026-08-13  
+> 状态：核心决策已锁定；已合并以下技术路线为单一权威版本——  
+> 　《技术文档-AI智能体输入法-v0.4续写计划.md》（D17–D26、桌面/感知/学习/输入法前置）  
+> 　《鼠标模拟控制与操作记忆-技术路线-2026-08-12.md》（感知→定位→控制→验证→学习专项）  
+> 　《全域情境感知与操作辅助-全流程技术方案-2026-08-13.md》（统一场景图 + 七层漏斗方案）  
+> 　《技术路线完成度审计-2026-08-12.md》 + 《v0.4完成度与验收报告-2026-08-12.md》（完成度基线）  
+> 　《输入法融合-P4前置条件评审-2026-08-12.md》（输入法前置条件）  
+> 　新增 §12 面向生产力的远期设计（v2→v3+ 技术构想，2026-08-13）  
 > 读者：产品与工程团队、SDK 开发者、插件生态开发者
 
 > 📌 **v0.4 范围说明（2026-08-12）**：在 v0.3 Agent SDK 基础上新增三条主线——
@@ -529,24 +535,154 @@ flowchart TD
   - `<appdata>/models/`：本地模型缓存（可选）
 - 同步（v2 增值）：端到端加密，服务端仅中继密文；用户可完全关闭。
 
-### 5.8 全域情景感知（v0.4 D19/D22）
+### 5.8 全域情景感知与操作辅助（全流程实现方案，v0.5 合并）
 
-**分层感知模型**：
+> 本节合并了《鼠标模拟控制与操作记忆》专项与《全域情境感知与操作辅助-全流程技术方案》，把原分散在 `perception / ocr / element_registry / window_template / executor / vision / learn / observe` 的模块统一为一条会收敛、会回流的七层漏斗。目标：Agent 不只“知道用户打开了什么应用”，还能稳定看懂界面、可靠操作电脑、并从用户行为中学习复用。
 
-| 层 | 感知内容 | 实现 | 默认状态 |
-|---|---|---|---|
-| L0 事件层 | 前台应用、窗口标题、剪贴板变化（掩码） | OS API（Windows GetForegroundWindow / GetClipboardSequenceNumber） | 开（最小） |
-| L1 界面层 | UI 元素树（角色/名称/类名语义锚点） | Windows UI Automation | 开（白名单应用按授权） |
-| L2 视觉层 | 屏幕截图 + 本地 OCR 摘要 | GDI BitBlt + Media.Ocr | 仅任务时临时采集 |
-| L3 语义层 | "正在做什么"的任务假设 | 本地推理（小模型） | 本地，不进审计 |
+#### 5.8.1 现状与缺口
 
-**情景快照（Situation Model）**：结构化 JSON（前台应用、权限级别、UI 上下文、掩码内容引用、任务假设、最近动作、截图元数据），由核心统一组装；消息/文档内容默认掩码，只以最小片段存在；L2 截图仅内存环形缓冲（最多 5 帧），任务结束即毁。
+截至 v0.4.22，L0–L3 感知、UIA/OCR/视觉三源、窗口级截取、窗口模板、元素注册表、动作图执行、静默观察与情景记忆、PP-OCRv6、本地 VL 均已实现并实机验证。剩余缺口（本方案要补）：
 
-**感知管线**：事件源（OS/无障碍/IDE/浏览器/剪贴板/麦克风）→ 归一化去重 → 情景融合 → 情景模型 → 按任务最小上下文组装 → Agent loop；操作后回写状态验证。感知异步，不阻塞主流程。
+| # | 缺口 | 影响 |
+|---|---|---|
+| G1 | 元素注册表稳定 ID / 多源融合未进入执行主链路，`executor::find` 仍是“递归 UIA + 字符串匹配 + 同步 OCR 兜底” | 每次点击重新遍历/OCR，不稳定、慢 |
+| G2 | 视觉 grounding 只做旁路，未并入 `SceneElement.evidence` 参与打分 | 视觉不参与统一决策 |
+| G3 | 验证是散落的字符串谓词（`value:`/`ui:` + 另一套 OCR 断言），“输入框清空”被占位符误判 | “成功”判定脆弱 |
+| G4 | 动作图只能线性遍历，无分支/循环/等待/重试；`ActionType` 无 Scroll/Drag/Wait/Assert | 真实流程表达不了 |
+| G5 | 学习泛化只是“线性串 + Type 重复变 `{value}`”，无多轨迹对齐/变量边界推断 | 技能不能换参数、不能适应漂移 |
+| G6 | 无结果判定（成功/失败/未知）与成功率门槛；`ProactiveEngine` 只算相似度计数 | 文档“≥3 次且成功率 ≥80%”未落地 |
+| G7 | 静默观察只接模拟面日志，真实面 UIA 事件/窗口状态采样未做 | 真实用户行为学不进来 |
+| G8 | 语义记忆/向量检索缺失，无 `memory.recall` | 历史操作“想不起来” |
+| G9 | 窗口模板只 build/detect，未作为定位源接入执行器 | 固定布局应用拿不到稳定 ROI |
+| G10 | 本地 ONNX OCR 未落地（PP-OCRv6 走云 API） | 离线/隐私场景缺确定性 OCR |
 
-**隐私边界**：默认只开 L0/L1；L2/L3 逐项授权并热撤；截图不进审计/学习样本；聊天内容仅会话级授权且掩码；审计记录"用了什么上下文"而非全量内容；数据出境开关沿用 7.5。
+#### 5.8.2 目标架构：七层情景理解漏斗
 
-**实现状态（2026-08-12）**：L0 前台/剪贴板、L1 UIA 树、L2 截图 + OCR 摘要已实现并接入 `context.snapshot` / `perception.events` / `perception.capture` / `perception.layers`。
+```mermaid
+flowchart TD
+    RAW["原始信号：OS 事件 / UIA / OCR / 视觉 / 剪贴板 / 窗口几何 / 麦克风"] --> NORM["归一化 + 去重 + 隐私掩码"]
+    NORM --> GRAPH["L1 场景图 SceneGraph：稳定元素 + 关系 + 多源证据 + 置信度"]
+    GRAPH --> STATE["L2 状态机：输入框/会话/窗口状态 + 跨帧 diff"]
+    STATE --> HYP["L3 任务假设：界面级 + 概率分布"]
+    HYP --> PLAN["L4 规划：任务 → 带条件/循环/等待的动作程序"]
+    PLAN --> EXEC["L5 执行：结构化锚点查询 + 多源定位打分 + 动作原子"]
+    EXEC --> VERIFY["L6 验证：结构化断言 + 状态 diff + 成功定义"]
+    VERIFY --> LEARN["L7 学习：多轨迹对齐 + 变量推断 + 成功率健康度 + 语义记忆"]
+    LEARN -.更新世界模型/锚点先验.-> GRAPH
+    LEARN -.更新成功定义/前置条件.-> PLAN
+    VERIFY -.失败重试/换源/暂停.-> EXEC
+```
+
+原则：
+
+1. **SceneGraph 是唯一事实来源**：感知、定位、执行、验证、学习都读它、写它。
+2. **每层输出带置信度**：不确定就降级（只读感知/询问），不硬猜。
+3. **验证失败必回流**：重试 → 换定位源 → 暂停询问 → 失败模式写回技能健康度。
+4. **视觉只做证据，不做控制**：grounding 必须与 OCR/UIA 交叉验证后才作为一条打分证据。
+
+#### 5.8.3 关键模块设计
+
+**统一场景图（新增 `scene.rs`，取代 `element_registry` 孤立地位）**
+
+把 `SituationSnapshot`（应用级）、`SceneElement`（元素级）、`WindowTemplate`（ROI 级）、`OcrSummary`（版面级）统一为跨帧世界模型：
+
+```rust
+pub struct SceneGraph {
+    revision: u64, state_hash: u64,
+    app: Option<ForegroundApp>,
+    window: Option<WindowState>,            // hwnd/几何/DPI/可见性/遮挡
+    elements: Vec<SceneElement>,            // 稳定元素 + 多源证据
+    relations: Vec<ElementRelation>,        // parent/contains/overlaps/occludes
+    entities: HashMap<String, EntityState>, // input_box.empty / window.focused
+    hypotheses: Vec<TaskHypothesis>,
+    template_hits: HashMap<String, f64>,    // ROI 命中率，模板健康度
+}
+pub struct SceneElement {
+    id: String, evidence: Vec<Evidence>, rect: Rect, confidence: f64,
+    stale_frames: u32, last_hit: Option<String>,
+}
+pub struct Evidence { source: EvidenceSource, rect: Rect, confidence: f64, text_hash: Option<u64> }
+```
+
+融合规则：UIA 提供语义角色与几何（权重最高）；OCR 补自绘控件；视觉 grounding 交叉验证后才加入；历史命中先验作为弱证据；同名但几何差异大的标记冲突并降置信度。
+
+**多源定位打分（新增 `locate.rs`）**
+
+把 `executor::find_recursive` 替换为结构化锚点查询 + 概率定位：
+
+```rust
+pub struct AnchorQuery { app_id, role, name_pattern, parent, min_confidence,
+                         source_priority, stable_id, text_hash, context_rect }
+pub struct LocateResult { candidates: Vec<(SceneElement, f64)>, best, uncertainty, used_source }
+pub fn locate(graph: &SceneGraph, query: &AnchorQuery) -> LocateResult;
+```
+
+`score = w_uia·uia + w_ocr·ocr + w_vision·vision(cross_validated) + w_template·template_hit + w_history·prior_hit`。命中后把稳定 ID 写回执行器锚点池，减少每次全量 OCR；不确定高于阈值时降级询问。
+
+**动作程序（升级 `ActionGraph` → 新增 `action_program.rs`）**
+
+```rust
+pub enum ProgramNode {
+    Step, Assert(Assertion), WaitUntil(Assertion, Timeout),
+    Branch { cond, then, otherwise }, Loop { cond, body, max_iter },
+    Retry { body, max_attempts, on_fail }, Sub { program: String },
+}
+```
+
+`ActionType` 扩展 Click/Type/Shortcut/Inject/Launch/ClickAt/Scroll/Drag/Wait/Assert/Hover/RightClick/DoubleClick。执行器改为解释器 + 状态机，每步 = `locate → precheck（前台/遮挡/可见）→ perform → assert → record`；线性图自动转换为 `Vec<Step>` 兼容。
+
+**结构化断言与成功定义学习（新增 `assert.rs`）**
+
+```rust
+pub enum Assertion { WindowTitle, UiaExists, UiaValue, OcrContains, OcrBoxGone,
+                     PixelDiff, ClipboardChanged, VisionConfirm, StateDiff }
+pub struct VerificationRecipe { assertions: Vec<Assertion>, timeout_ms, retry }
+```
+
+“输入框清空”改为确定性 `OcrBoxGone{text:"输入消息..."}`，而不是让 VL 回答“是否清空”（VL 会把占位符当成未清空）。静默观察时对“操作后 1–3s 状态 diff”做统计，自动生成默认断言并随技能存储。
+
+**记忆三层（升级 `observe.rs`，新增 `memory.rs`）**
+
+```rust
+enum Outcome { Success, Failure, Unknown }
+struct Observation { /* … */ outcome: Option<Outcome>, normalized: Vec<String> }
+struct SemanticMemory { /* 本地 embedding + 向量索引 */ }
+fn recall(query: &str, top_k: usize) -> Vec<MemoryEntry>;
+```
+
+真实面观察源：优先 UIA `AutomationEvent`（Focus/PropertyChange）+ 窗口状态轮询，不装全局低级钩子；键盘只记动作摘要（类型+长度），密码/支付框跳过。沉淀门槛：同 app + 归一化序列 ≥3 次且成功率 ≥80% 才生成候选，候选须用户确认转 active。
+
+**多轨迹对齐与变量推断（升级 `learn::generalize_to_graph`）**
+
+```rust
+pub fn generalize_traces(traces: &[Vec<RecordedAction>]) -> Result<ActionGraph, String>;
+```
+
+归一化 → 多轨迹对齐（编辑距离）→ 变量边界推断（位置稳定但取值变化的锚点/文本 → 变量）→ 前置条件学习 → 从成功样本状态 diff 生成默认 `VerificationRecipe`。
+
+**技能健康度与自愈（扩展 `FlowSkillPackage`）**
+
+```rust
+struct SkillHealth { attempts, successes, recent_failures: Vec<FailureMode>, state: SkillState }
+```
+
+连续 2 次失败标记 Degraded 并提示重新学习；窗口模板命中率下降触发重建，重建前坐标点击降级为询问；用户空闲时只读 OCR 校验模板提前预警。
+
+#### 5.8.4 隐私边界
+
+沿用 7.6：默认只开 L0/L1；L2/L3 逐项授权并热撤；内容默认掩码；敏感面熔断；真实面观察源默认关或白名单；数据出境开关约束云 OCR/云模型/BYOK 视觉。
+
+#### 5.8.5 里程碑（v0.5 全流程专项）
+
+| 阶段 | 内容 | 对应缺口 |
+|---|---|---|
+| M-A 场景图 + 多源定位 | `scene.rs`/`locate.rs`；视觉 grounding 入 `evidence`；模板接入定位；执行器改用 `locate` | G1/G2/G9 |
+| M-B 动作程序 + 结构化断言 | `action_program.rs`/`assert.rs`；`execute_program`；`verify` 统一；占位符误判修复 | G3/G4 |
+| M-C 静默学习 + 记忆三层 | `observe.rs` 真实面采样 + `Outcome`；`generalize_traces`；`memory.rs`；成功率门槛 | G5/G6/G7/G8 |
+| M-D 技能健康度自愈 | `SkillHealth`、模板命中率监控、失败降级、空闲校验 | G6/G9 |
+| M-E 本地 ONNX OCR | RapidOCR/PP-OCRv6 ONNX + `ort`，云 API 作为可选增强 | G10 |
+
+文件变更：新增 `scene.rs / locate.rs / action_program.rs / assert.rs / memory.rs`；改造 `element_registry.rs / executor.rs / learn.rs / observe.rs / vision.rs / window_template.rs / paddle_ocr.rs / lib.rs / owo-agent-server / desktop/web`。
 
 ---
 
@@ -684,23 +820,38 @@ type ModelResponse =
 | `summarize` | 快速模型 | 本地 | 按会话哈希 |
 | `rag` | 本地 embedding | 云 embedding | 分块哈希 |
 
-### 6.5 操作学习（v0.4 D23/D24/D26）
+### 6.5 操作学习与记忆（v0.4 D23/D24/D26，v0.5 合并）
 
-**双轨学习**：
+完整设计见 5.8（七层漏斗 + 多轨迹对齐 + 记忆三层 + 技能健康度）。本节只列契约与公开接口。
 
-- **A 轨示范学习（默认）**：观察用户操作的结构化轨迹（窗口/UI 语义锚点/掩码输入/结果状态，不录屏）→ 泛化（具体值抽象为变量与语义锚点）→ 沙箱或用户确认试跑 → 沉淀流程技能包 → 首次执行必审批，自动复用仅限高置信且环境匹配。
-- **B 轨受限自主探索**：仅显式开启，限沙箱/测试应用或生产力白名单 + 任务级审批；动作预算（次数/时长）、越界熔断、全程审计；低置信结果不自动执行。
-- 敏感面（密码/支付/验证码）在任何轨熔断：不学习、不记录、不执行。
+**双轨学习（保持）**：
 
-**动作图（Action Graph）**：节点 = 语义锚点 + 动作类型（click/type/shortcut/inject）+ 变量模板 + 验证步骤；边 = 前置条件 + 验证；UI 漂移连续失败标记失效，不静默重试。
+- **A 轨示范学习（默认）**：结构化轨迹（窗口/UI 锚点/掩码输入/结果状态，不录屏）→ 多轨迹对齐 + 变量推断 → 沙箱/用户确认试跑 → 沉淀流程技能包 → 首次执行必审批。
+- **B 轨受限自主探索**：仅显式开启，限沙箱/测试应用或生产力白名单 + 任务级审批；动作预算、越界熔断、全程审计。
+- 敏感面（密码/支付/验证码）在任何轨熔断。
 
-**流程技能包**：`SKILL.md + graph.json + manifest.json（targetApps/permissions/variables/sensitivity）`，与内置技能包同构；分享为单文件 `.owskill`（ZIP），导入按 schema → 权限白名单 → 敏感度必填 → 目标应用 → 沙箱回放顺序校验。
+**动作图 → 动作程序**：从“线性图”升级为可分支/循环/等待/重试的动作程序（见 5.8.3），旧线性 `graph.json` 自动兼容。
 
-**主动建议（D24）**：本地离线检测重复操作（同应用 + 相似动作序列，阈值可配），仅提示不执行；学习/执行一次/忽略/静默四选；24h 频控、全屏/游戏自动静默、忽略 2 次自动静默 30 天。
+**流程技能包（保持并扩展）**：`SKILL.md + graph.json + manifest.json（targetApps/permissions/variables/sensitivity/preconditions/verify）`；分享 `.owskill`（ZIP），导入按 schema → 权限只允许相等或降级 → 目标应用白名单 → 敏感度必填 → 沙箱回放校验。
 
-**新增接口（v1 契约草案）**：`context.snapshot`、`perception.subscribe`、`perception.capture`、`perception.layers`、`learn.record/pause/resume/stop/clear/status`、`learn.sink/packages/export/import`、`learn.execute`（confirm + high_risk_ack）、`skill.verify`、`proactive.suggest/observe/decide`、`whitelist.manage`。
+**主动建议（D24 保持）**：重复操作检测 → 学习/执行一次/忽略/静默四选；24h 频控、全屏/游戏自动静默、忽略 2 次静默 30 天；触发需满足成功率门槛（≥3 次且 ≥80%）。
 
-**实现状态（2026-08-12）**：录制/泛化/沉淀、动作图执行引擎（UIA + SendInput）、执行审批与审计、主动建议引擎、.owskill 分享、桌面录制/执行 UI 均已实现。
+**公开接口（v1 契约）**：
+
+| 方法 | 说明 |
+|---|---|
+| `context.snapshot` | 取当前情景快照（按权限过滤） |
+| `perception.subscribe / capture / layers / tree / ocr / elements / window / template/*` | 感知订阅、截图、层级、UIA 树、OCR、元素注册表、窗口级抓取、窗口模板 |
+| `locate.query` | 结构化锚点查询 + 多源定位打分（M-A） |
+| `learn.record/pause/resume/stop/clear/status` | 示范学习录制控制 |
+| `learn.sink/packages/export/import` | 沉淀/存取/分享流程技能包 |
+| `learn.execute / execute-package` | 按动作程序执行（confirm + high_risk_ack） |
+| `skill.verify` | 沙箱/测试环境验证技能包 |
+| `memory.observations / mine-skill / recall` | 情景记忆浏览、挖掘技能、语义检索（M-C） |
+| `proactive.suggest/observe/decide` | 主动建议事件与四选 |
+| `whitelist.manage` | 应用白名单增删与级别调整 |
+
+**实现状态（v0.4.22）**：录制/泛化/沉淀、动作图执行（UIA+SendInput+OCR 兜底）、审批与审计、主动建议、`.owskill` 分享、静默观察（模拟面）、PP-OCRv6 云 API、本地 VL 已实现；v0.5 待办为 5.8.5 的 M-A–M-E。
 
 ---
 
@@ -834,6 +985,20 @@ gantt
 
 原 M3/M4 小节（OS 沙箱加固、云执行、公开市场、多格式笔记、computer-use）在 v0.4 路线中顺延为 v1 增强或 v2 项，详见 3.2。
 
+### v0.5 路线图修订（2026-08-13，技术路线合并）
+
+在 v0.4 三条主线（桌面端 / 全域感知 / 操作学习）之上，把“全域情景感知与操作辅助”收敛为一条全流程专项（见 5.8），新增：
+
+| 阶段 | 内容 | 验收要点 |
+|---|---|---|
+| M-A 场景图 + 多源定位 | `scene.rs`/`locate.rs`；视觉 grounding 入 evidence；模板接入定位；执行器改用 `locate` | 连续 5 帧稳定 ID 保持率 ≥95%；`locate("发送")` 与人工标注框 IoU ≥0.8（20 例）；视觉与 OCR 不重合被拒绝 |
+| M-B 动作程序 + 结构化断言 | `action_program.rs`/`assert.rs`；分支/循环/重试；占位符误判修复 | “if 输入框空 then 点击 else retry”流程可执行；占位符存在时 `OcrBoxGone` 仍正确判清空 |
+| M-C 静默学习 + 记忆三层 | `observe.rs` 真实面采样 + Outcome；`generalize_traces`；`memory.rs` | 3 次成功示范 → 换参数复用 ≥80%（首期 ≥70%）；密码/支付 0 采样；`memory.recall` 可检索 |
+| M-D 技能健康度自愈 | `SkillHealth`、模板命中率监控、失败降级 | 连续 2 次失败标记 Degraded；模板重建前坐标点击降级询问 |
+| M-E 本地 ONNX OCR | RapidOCR/PP-OCRv6 ONNX + `ort` | 无网本地识别与云 API 字符级重合率 ≥90% |
+
+输入法融合仍为 M6 占位：前置条件见 10.1（由《输入法融合-P4前置条件评审》并入）。
+
 ### M3：安全沙箱 + 桌面工作台（约 8 周）
 
 交付：本地沙箱加固（AppContainer / bwrap / 网络控制）、审批模式（用户 + 可选独立审批模型）、Tauri 桌面工作台（面板/审批 UI/插件管理/文本注入）、插件 SDK v1 + 2 个官方示例插件。
@@ -876,6 +1041,21 @@ gantt
 | computer-use 误操作/安全 | 高 | 审批 + 沙箱测试 + 熔断 + 审计（v2） |
 | Obsidian/大厂跟进 | 中 | 差异化在"开放 SDK + 安全审批 + 本地/云双执行 + 可插拔插件"的组合，持续绑定生态 |
 
+### 10.1 输入法融合前置条件（v0.5+，不实施）
+
+结论：**暂不启动**。六项前置条件当前为 2 满足 / 3 部分 / 1 未启动；满足全部后再单独立项。
+
+| # | 前置条件 | 状态 | 缺口 |
+|---|---|---|---|
+| 1 | v0.4 桌面端 + 技能包验收全过，M1 无回归 | ✅ | 已实现并回归 |
+| 2 | 全域感知稳定，误判率/确认率有基线 | ⚠️ | 缺真实会话的重复操作检测与建议接受率统计 |
+| 3 | 文本层 computer-use 在生产力白名单通过兼容矩阵 | ⚠️ | Notepad/VSCode 已通，缺 Office/浏览器/终端多应用矩阵 |
+| 4 | 决策层重评 D5–D7，明确 TSF/IMK 壳 + librime 复用工程投入 | ⬜ | 未启动 |
+| 5 | 轻/中/重三档交互共享同一情景模型与技能包的设计评审通过 | ⚠️ | 情景模型/技能包已统一，候选窗交互无设计稿 |
+| 6 | 高敏输入事件（按键/候选）安全门槛单独评审通过 | ⬜ | 未启动 |
+
+最终形态：输入法只是第四种客户端，通过同一 JSON-RPC/SSE 调用 agent-sdk-core；“一个入口、多个交互深度”，不推翻现有架构。
+
 ---
 
 ## 11. 后续阶段开放事项（不影响 v1）
@@ -885,6 +1065,129 @@ gantt
 - 语音输入与 OCR：插件化路径，未排期。
 - 移动端策略：未排期。
 - 定价最终数值：属商务参数，实现以 8.2 默认值为准。
+
+---
+
+## 12. 面向生产力的远期设计（技术构想，v2 → v3+）
+
+> 本节是“深水区”构想，不锁工期、不阻塞当前 v0.5 主线，但作为产品北极星指导 v2 之后的取舍。原则：**先做“操作可靠”，再做“跨应用编排”，最后做“主动生产力”**——每一步都建立在上一层的可信安全底座上。
+
+### 12.1 愿景定位：从“操作助手”到“个人生产力操作系统”
+
+| 台阶 | 产品形态 | 用户心智 | 对应路线 |
+|---|---|---|---|
+| 1 工具化 | Agent 按指令完成单个电脑操作（点/输入/生成/改文件） | “帮我做这件事” | v0.4/v0.5（已实现主体） |
+| 2 助手化 | 跨应用编排、流程技能包、主动建议、语音入口 | “替我把这套流程做完” | v2（方向已定） |
+| 3 系统化 | Agent 成为个人生产力 OS：理解情景、记住工作、预判下一步 | “我告诉它目标，它负责达成并让我审阅” | v3+（本构想） |
+
+一句话愿景：**把“人找工具、搬数据、重复劳动”变成“目标 → 自动完成 → 人审阅”**，回收上下文切换与重复操作的时间。
+
+核心差异化继续围绕既有护城河：情景感知 + 操作学习 + 独立审批 + 本地优先。远期新增的差异化是**个人知识图**与**可组合工作流**，而不是去做一个更大的聊天机器人。
+
+### 12.2 五大生产力支柱
+
+#### 支柱 1：跨应用工作流引擎（Workflow Engine）
+
+目标：把单条流程技能包升级为**可触发、可编排、可回滚**的工作流，打通“浏览器→表格→文档→聊天/邮件”的完整生产力链路。
+
+- 形态演进：`.owskill`（单技能）→ `.owflow`（工作流）＝ 触发器 + 步骤图 + 子流程 + 条件 + 人审节点 + 回滚点。
+- 触发器：定时、前台应用/文件/剪贴板/语音、用户指令、上游流程完成。
+- 步骤类型：感知、定位、动作、断言、调用技能包、调用 MCP/插件、调用本地模型、人审（等待审批）、通知。
+- 可组合：工作流可引用其他工作流与技能包，像函数库一样复用。
+- 可回滚：文件写入、文本注入、跨应用操作都带快照/undo；失败自动回退到最近检查点。
+- 可信安全：每个跨应用边界（读聊天、发消息、写文件、联网）都是独立权限节点，默认 deny。
+
+技术底座：`action_program.rs`（5.8）演化为工作流解释器；`goal/plan` 状态机（原 v0.4 续写计划 §15）作为编排层；`SkillHealth` 提供健康度与自愈。
+
+#### 支柱 2：主动生产力引擎（Proactive Productivity）
+
+目标：从“被动执行指令”升级为“主动发现该做的事”，默认只提示、可授权自动。
+
+- 输入信号融合：前台情景、日历、待办、未读消息摘要、文件变化、历史工作流、用户空闲状态。
+- 输出形态：建议卡片（“检测到你在整理周报，是否自动汇总浏览器里的 3 个表格并生成草稿？”）→ 学习 / 执行一次 / 忽略 / 静默。
+- 信任模型：低风险（只读、草稿、本地）默认提示；中风险（写文件、发消息）必须审批；高风险（支付、对外发布、删数据）必须二次确认且可熔断。
+- 防打扰：场景抑制（全屏/会议/游戏/演示）、时段/频控、用户空闲才提示、连续忽略自动静默。
+
+技术底座：`proactive.rs` 从“重复操作检测”升级为“多信号意图预测”；本地小模型做意图打分，云模型只做重任务。
+
+#### 支柱 3：个人第二大脑（Personal Knowledge Graph）
+
+目标：把“用户碰过的内容”沉淀为可检索、可关联、可复用的个人知识，而不是一堆散文件。
+
+- 对象：文件、网页片段、聊天授权片段、笔记、任务、技能、工作流、决策记录。
+- 结构：不是线性笔记，而是**实体 + 关系 + 时间线**的本地知识图；自动打标签、去重、建立双向链接。
+- 检索：`memory.recall` 升级为“问题 → 相关证据 → 可执行动作”，RAG 之外支持按“任务/应用/时间/结果”结构化过滤。
+- 生成：从知识图中直接生成文档/PPT/周报/汇报，引用可追溯。
+- 隐私：本地优先、默认不建全量索引；内容分层授权；可一键清空、导出、迁移。
+
+技术底座：`memory.rs`（5.8）从向量索引升级为“向量 + 图 + 全文”混合检索；本地 embedding + 可选云端；CRDT 支撑多设备。
+
+#### 支柱 4：统一自然语言入口（Voice / Text → Intent → Action）
+
+目标：让“说一句/写一句”成为所有能力的唯一入口，桌面、输入法、悬浮球、命令行共享同一意图层。
+
+- 入口：全局快捷键/语音/悬浮球/候选窗（输入法融合后）；同一句请求在任意入口得到同一结果。
+- 意图解析：从“指令匹配”升级为“意图识别 + 参数抽取 + 任务分解”，本地小模型为主、云模型兜底。
+- 多模态：语音、截图、选区、拖拽文件都可作为输入附件，结合当前情景消歧。
+- 输入法定位（v0.5+）：输入法作为“永远在线的表层入口”，轻交互走候选窗，重任务唤起 Agent；这是未来与竞品拉开体验差距的关键一环。
+
+技术底座：`stt.rs` + 本地意图小模型 + `goal/plan`；输入法融合前置条件见 10.1。
+
+#### 支柱 5：团队协作与技能共享（Team Workspace）
+
+目标：把个人生产力延伸到团队，共享的不只是文档，而是**可复用的工作流与知识**。
+
+- 共享对象：`.owflow` 工作流、`.owskill` 技能、知识条目、最佳实践模板。
+- 权限：组织/项目/成员分级；共享前强制脱敏检查（凭据、消息内容、个人数据）；导入按白名单 + 签名校验。
+- 协作：工作流的修改有版本、评审、回滚；成员可“一键复用同事已验证的流程”。
+- 价值：企业里“如何做报销/如何导出周报/如何拉取并整理数据”成为团队资产，而非口口相传。
+
+技术底座：本地优先 + CRDT 同步；可选云端中继（加密）；`plugin/skill` 市场机制复用。
+
+### 12.3 端到端生产力场景蓝图
+
+| 场景 | 全流程（打通后） | 涉及支柱 |
+|---|---|---|
+| 晨间准备 | 闹钟/开机 → 汇总日程、邮件、昨日未完成项 → 生成“今日计划”卡片 → 一键确认并同步任务 | 2/4 |
+| 数据搬运与分析 | 浏览器选中表格 → “整理成 Excel 并算同比，再出 PPT” → 自动下载/清洗/分析/生成 → 人审图表与结论 | 1/3 |
+| 会议纪要 | 授权录音 → 转写 → 抽行动项 → 按人分配 → 同步到任务系统并 @ 对应人 | 1/2/3/5 |
+| 内容创作 | 收集素材（网页/聊天/文件）→ 生成大纲 → 分段成稿 → 审校 → 发布/导出 | 1/3/4 |
+| 重复行政 | 报销/周报/日报/数据录入：学一次 → 每周自动触发 → 草稿预览 → 一键提交 | 1/2/3 |
+| 开发者全链路 | 需求 → 设计 → 编码 → 测试 → PR 说明 → 提交，全过程可审、可回滚 | 1/3/5 |
+| 知识沉淀 | 把散落的网页/聊天/文档自动整理为结构化笔记，打标签、建链接，需要时秒查并引用 | 3 |
+
+### 12.4 技术底座（支撑远期能力的关键投入）
+
+| 底座 | 说明 | 现有起点 |
+|---|---|---|
+| Goal/Plan 多 Agent 编排 | 目标→计划→并行 worker→验证→仲裁，承载跨应用工作流 | 原续写计划 §15（方向） |
+| 统一场景图世界模型 | 感知/定位/执行/验证/学习的唯一事实来源，承载主动预测 | 5.8（M-A） |
+| 混合记忆系统 | 情景 + 流程 + 语义 + 知识图，承载第二大脑 | 5.8（M-C） |
+| 可组合工作流 DSL | `.owflow` 声明式流程 + 解释器 + 人审节点 + 回滚 | 5.8（M-B 动作程序） |
+| 本地优先 + 加密同步 | CRDT + 端到端加密，支撑多设备与团队协作 | v2 云同步方向 |
+| 隐私个性化 | 本地偏好/习惯记忆，只出最小必要上下文，不出全量行为 | 7.x 隐私模型 |
+| 独立审批 + 熔断 | 从单工具审批扩展到工作流级、跨应用级、团队级授权 | 权限模型 |
+
+### 12.5 演进路线（v2 → v3 → v4）
+
+| 版本 | 生产力目标 | 关键交付 |
+|---|---|---|
+| v2 助手化 | 跨应用编排 + 语音入口 + 主动建议 | `.owflow` v1、`memory.recall`、Goal/Plan、多应用兼容矩阵 |
+| v3 系统化 | 主动生产力 + 个人第二大脑 | 多信号意图预测、知识图、统一自然语言入口、自动化工作流 |
+| v4 协作化 | 团队工作流与知识共享 | 团队空间、共享技能/工作流市场、加密同步、组织级审批 |
+
+输入法融合（v0.5+）作为 v3 的“表层入口”同步推进，但必须满足 10.1 前置条件。
+
+### 12.6 远期风险与边界
+
+| 风险 | 边界/缓解 |
+|---|---|
+| 主动性打扰/过度自动化 | 默认仅提示、分级审批、场景抑制、静默机制、可全局关 |
+| 知识图隐私泄露 | 本地优先、分层授权、默认不建全量索引、可清空/导出 |
+| 跨应用自动化触犯第三方 ToS | 白名单 + 生产力优先 + 游戏/社交默认只读 + 风险提示 |
+| 工作流漂移导致误操作 | 健康度 + 断言 + 回滚点 + 关键步骤人审 |
+| 团队共享引入恶意流程 | 签名 + 静态扫描 + 脱敏检查 + 沙箱回放 + 权限最小化 |
+| 模型幻觉放大生产力错误 | 可验证步骤（断言/测试/回读）+ 人审关键节点 + 审计可回放 |
 
 ---
 
@@ -946,3 +1249,56 @@ gantt
 | 主动建议 | 离线检测重复操作后仅提示（学习/执行一次/忽略/静默） |
 | 应用白名单 | 生产力/聊天/游戏/其他分级，决定感知层级、可操作性与学习权限 |
 | .owskill | 流程技能包单文件分享格式（ZIP） |
+| SceneGraph（场景图） | 统一世界模型：稳定元素 + 关系 + 多源证据 + 状态，是定位/执行/验证/学习的唯一事实来源 |
+| 多源定位 | UIA/OCR/视觉/窗口模板/历史命中加权打分，返回候选 + 不确定性 |
+| 动作程序（Action Program） | 可分支/循环/等待/重试的执行程序，取代线性动作图 |
+| 结构化断言（Assertion） | window_title/uia/ocr/pixel_diff/clipboard/vision/state_diff 等可评估、可学、可存的验证单元 |
+| 成功定义（VerificationRecipe） | 流程技能包内的一组断言，描述“操作成功”的可观测状态 |
+| 语义记忆（Semantic Memory） | 应用知识与流程要点的向量化索引，供 memory.recall 检索 |
+| 多轨迹对齐 | 对同一任务多次示范做序列对齐，区分可变槽位与固定锚点 |
+| 技能健康度（SkillHealth） | 成功率、失败模式与 Active/Degraded/Disabled 状态，驱动降级与自愈 |
+| 工作流引擎（Workflow Engine） | 跨应用、可触发、可编排、可回滚的流程执行层，`.owflow` 为声明式工作流格式 |
+| 个人第二大脑 | 把用户碰过的文件/网页/授权片段/笔记/任务沉淀为本地知识图，可检索、关联、生成 |
+| 知识图谱（Knowledge Graph） | 实体 + 关系 + 时间线的结构化知识表示，配合向量与全文做混合检索 |
+| 主动生产力（Proactive Productivity） | 基于多信号情景预测“该做什么”，默认仅提示、可授权自动 |
+| 统一自然语言入口 | 语音/文本/截图/选区/拖拽共享同一意图解析层，桌面/输入法/悬浮球/CLI 一致 |
+| Goal/Plan | 目标对象与计划步骤依赖图，承载长任务分解、并行编排、验证与恢复 |
+
+---
+
+## 附录 C：完成度与验收基线（合并版，2026-08-13）
+
+> 由《技术路线完成度审计-2026-08-12.md》与《v0.4完成度与验收报告-2026-08-12.md》合并；细节以 `agent-sdk/ACCEPTANCE.md` 为准。
+
+### C.1 v0.3 → v0.4 结论
+
+v0.3 的 M1/M2（SDK 核心、CLI/TUI、HTTP、权限、AGENTS.md/Skills/子代理、MCP、evals/traces）已完成并通过验收；M3/M4 部分/未开始。v0.4 可实施项已全部实现并通过本环境可执行的验证；剩余为依赖外部数据/交互环境的验收口径项。
+
+### C.2 v0.4 里程碑完成度
+
+| 里程碑 | 状态 | 主要证据 |
+|---|---|---|
+| M3 桌面端 + 技能包 | ✅ | Web 工作台 + Tauri 壳 + 自启 + NSIS 安装包；四技能 12 端到端用例 `skill-gate.ps1` 全绿；会话/审计/技能中心/附件/模型热切换/数据出境开关闭环 |
+| M4 全域感知 + 语音 | ✅ | L0/L1/L2 + 窗口级 OCR + PP-OCRv6；STT TTS CER 0.00%、真实人声 CER 13.64%、缓存 0.93s；VSCode 语音改代码 30/30=100% |
+| M5 操作学习 + 主动建议 | ✅ | 示范/受限探索、动作图执行、流程技能包（.owskill）、审批审计、主动建议四选；Notepad 示范→换参复用 2/2 |
+| M6 输入法融合 | 占位 | 前置条件 2 满足 / 3 部分 / 1 未启动，不实施 |
+
+### C.3 质量门禁（2026-08-13 实测）
+
+| 门禁 | 结果 |
+|---|---|
+| `cargo fmt --all -- --check` | ✅ 干净 |
+| `cargo clippy --workspace --all-targets -D warnings` | ✅ 0 警告 |
+| `cargo test --workspace` | ✅ 全绿（core 109 等） |
+| `scripts/skill-gate.ps1` | ✅ 四技能 12 用例 PASS |
+| HTTP 冒烟 | ✅ 会话/审批/diff/感知/学习/分享/STT/自动化/执行 全链路 |
+| 打包 | ✅ 便携 zip + NSIS setup.exe + updater |
+
+### C.4 剩余外部验收项
+
+| 项 | 口径 | 现状 | 需要什么 |
+|---|---|---|---|
+| STT 自然语音 WER | 50 中文 + 20 混说 WER<5%、5s p95<2s | 中文 TTS 0%、真实人声 13.64%、混说均值 22.21%；延迟 0.93s 达标 | 带标注普通话语料 |
+| QQ 发文件复用 | 示范一次后换参数 ≥80% | Notepad 2/2；QQ 登录态/测试账号待复验 | QQ 测试会话 |
+| 桌面会话实机 | 面板唤起 p95<150ms、前台/剪贴板/截图可用 | 核心链路实测通过；IPC p95 1.26ms | QQ 主窗口端到端 |
+| P4 输入法融合 | 前置条件评审 | 占位 | 决策层评审 |
