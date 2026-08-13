@@ -1741,7 +1741,8 @@ struct VisionGroundRequest {
     app_id: Option<String>,
 }
 
-/// 视觉 grounding：视觉模型给框 → 与 OCR 文本交叉验证后才允许点击。
+/// 视觉 grounding：视觉模型给框 → 与 OCR 文本交叉验证；
+/// 无 OCR 文本时仅高置信度（≥0.9）标记 vision_only 允许纯视觉定位。
 async fn vision_ground(
     State(state): State<Arc<AppState>>,
     Json(request): Json<VisionGroundRequest>,

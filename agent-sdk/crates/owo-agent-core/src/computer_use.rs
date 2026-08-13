@@ -978,7 +978,7 @@ impl Tool for VisionGroundTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "vision_ground".into(),
-            description: "让视觉模型定位描述的元素（返回坐标框），并与 OCR 文本交叉验证；只有 matched=true 且 cross_validated=true 时才可点击返回的 line 中心；提供 app_id 时结果并入窗口元素注册表并返回稳定 element_id，后续 desktop_click 可直接用 element_id".into(),
+            description: "让视觉模型定位描述的元素（返回坐标框），并与 OCR 文本交叉验证；matched=true 且 cross_validated=true 时点击 line 中心；matched=true 且 vision_only=true（置信度≥0.9、无 OCR 文本的纯视觉元素，如图片表情/自绘按钮）时只能点击 box 中心；提供 app_id 时结果并入窗口元素注册表并返回稳定 element_id，后续 desktop_click 可直接用 element_id".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

@@ -391,6 +391,23 @@ pub fn cross_validate_box(
     None
 }
 
+/// 视觉-only 定位门槛：无 OCR 重合时，仅当置信度 ≥ 阈值才允许“视觉定位命中”。
+///
+/// 默认阈值 0.9，可用 `OWO_VISION_MIN_VISION_ONLY_CONFIDENCE` 覆盖；
+/// 用于 OCR 读不出文字的纯视觉元素（如图片表情面板、自绘图标按钮）。
+pub fn vision_only_allowed(confidence: Option<f64>, min_confidence: f64) -> bool {
+    confidence
+        .map(|value| value >= min_confidence)
+        .unwrap_or(false)
+}
+
+fn vision_only_min_confidence() -> f64 {
+    std::env::var("OWO_VISION_MIN_VISION_ONLY_CONFIDENCE")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.9)
+}
+
 /// 视觉 grounding（兜底定位）：视觉模型给出元素框 → 与 OCR 文本行交叉验证。
 pub async fn ground_element(description: &str) -> Result<serde_json::Value, String> {
     let (bmp, surface) = capture_vision_bmp().await?;
@@ -421,13 +438,25 @@ pub async fn ground_element(description: &str) -> Result<serde_json::Value, Stri
             "cross_validated": true,
             "surface": surface,
         }))
+    } else if vision_only_allowed(confidence, vision_only_min_confidence()) {
+        // OCR 无文字的高置信度视觉元素（图片按钮/表情面板）：允许定位，但标记 vision_only。
+        Ok(serde_json::json!({
+            "matched": true,
+            "description": description,
+            "box": r#box,
+            "confidence": confidence,
+            "cross_validated": false,
+            "vision_only": true,
+            "reason": "视觉高置信度定位（无 OCR 重合，仅限纯视觉元素）",
+            "surface": surface,
+        }))
     } else {
         Ok(serde_json::json!({
             "matched": false,
             "description": description,
             "box": r#box,
             "confidence": confidence,
-            "reason": "视觉框与 OCR 文本未重合，不允许点击",
+            "reason": "视觉框与 OCR 文本未重合且置信度不足，不允许点击",
             "surface": surface,
         }))
     }
@@ -556,5 +585,16 @@ mod tests {
         ];
         assert!(cross_validate_box(&(815, 624, 170, 36), &lines).is_some());
         assert!(cross_validate_box(&(0, 0, 100, 100), &lines).is_none());
+    }
+
+    #[test]
+    fn vision_only_allowed_requires_high_confidence() {
+        assert!(!vision_only_allowed(None, 0.9));
+        assert!(!vision_only_allowed(Some(0.89), 0.9));
+        assert!(vision_only_allowed(Some(0.9), 0.9));
+        assert!(vision_only_allowed(Some(0.95), 0.9));
+        // 阈值可下调（环境变量）或上调。
+        assert!(vision_only_allowed(Some(0.7), 0.6));
+        assert!(!vision_only_allowed(Some(0.7), 0.75));
     }
 }

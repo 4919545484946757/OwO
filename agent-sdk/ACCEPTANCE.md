@@ -466,3 +466,16 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 
 说明：置信度进入元素注册表后，可支撑后续“低置信度元素不直接点击/需二次确认”的策略
 （当前交叉验证仍以 OCR 重合为准，安全边界不变）。
+
+## 三十四、v0.4.28 视觉-only 高置信度定位策略（2026-08-13）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| vision-only 门槛 | ✅ | `vision_only_allowed(confidence, min)` 纯函数：无 OCR 重合时仅置信度 ≥0.9 允许视觉定位命中（`OWO_VISION_MIN_VISION_ONLY_CONFIDENCE` 可调）；单测覆盖边界值 |
+| grounding 三态响应 | ✅ | OCR 重合 → `matched=true/cross_validated=true`；无 OCR 但高置信度 → `matched=true/vision_only=true`（仅纯视觉元素，图片表情/自绘按钮）；无 OCR 且低置信度 → `matched=false`“未重合且置信度不足” |
+| 工具契约更新 | ✅ | `vision_ground` 描述区分 cross_validated（点 line 中心）与 vision_only（只能点 box 中心），低置信度拒绝保持 |
+| 安全边界 | ✅ | 默认 0.9 高门槛 + 环境变量可调；敏感面熔断、审批流程不受影响 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 124） |
+
+说明：该策略解决 QQ 图片表情面板等“OCR 无文字、纯图像渲染”元素的定位问题，
+为后续视觉-only 点击闭环提供受控入口（仍建议首次执行走审批）。

@@ -90,8 +90,8 @@ pub use trace::{list_traces, load_trace, save_trace, TraceRecord};
 pub use vision::{
     bmp_to_png, capture_vision_bmp, capture_vision_png, capture_vision_png_region,
     cross_validate_box, describe_image, ground_element, ollama_models, parse_verification,
-    parse_vision_box, parse_vision_box_with_confidence, verification_prompt, VisionBox,
-    VisionConfig,
+    parse_vision_box, parse_vision_box_with_confidence, verification_prompt, vision_only_allowed,
+    VisionBox, VisionConfig,
 };
 pub use whitelist::{AppTier, Whitelist, WhitelistEntry};
 pub use window_template::{
