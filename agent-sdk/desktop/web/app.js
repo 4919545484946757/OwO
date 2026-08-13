@@ -449,11 +449,18 @@ async function refreshSuggestions() {
         button.textContent = labels[action];
         button.addEventListener("click", async () => {
           try {
-            await api("/proactive/decide", {
+            const result = await api("/proactive/decide", {
               method: "POST",
               body: JSON.stringify({ suggestion_id: suggestion.id, action }),
             });
             await refreshSuggestions();
+            if (action === "learn" && result && result.package) {
+              addMessage(
+                "system",
+                `建议已沉淀为技能包 ${result.package.name}（变量：${(result.package.variables || []).join(",") || "无"}）`
+              );
+              await refreshPackages();
+            }
           } catch (error) {
             addMessage("error", `建议处理失败：${error.message}`);
           }
