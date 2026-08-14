@@ -1,4 +1,4 @@
-﻿//! 桌面操作与浏览器自动化工具（v0.4.1 计算机使用）。
+//! 桌面操作与浏览器自动化工具（v0.4.1 计算机使用）。
 //!
 //! 桌面工具走“OCR 定位 → SendInput 点击/输入 → OCR 验证”的确定性控制链路；
 //! 浏览器工具走 Playwright（本机 Edge + 持久化 profile），文件类能力优先后端完成。
@@ -27,6 +27,11 @@ fn sim_base_url() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// 是否配置了模拟面（供服务端接线选择 SimTaskSurface / RealTaskSurface）。
+pub fn sim_base_url_configured() -> bool {
+    sim_base_url().is_some()
 }
 
 fn on_sim_surface() -> bool {
@@ -69,6 +74,26 @@ async fn sim_ocr_lines() -> Option<Value> {
         return None;
     }
     Some(value)
+}
+
+/// 向指定模拟服务地址 POST JSON（同 `sim_post`，但 base 由调用方给定）。
+async fn sim_post_at(base: &str, path: &str, body: Value) -> Result<Value, String> {
+    let url = format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    );
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("模拟窗口 {path} 失败：{e}"))?;
+    response
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("模拟窗口 {path} 响应解析失败：{e}"))
 }
 
 async fn sim_post(path: &str, body: Value) -> Result<Value, String> {
@@ -227,6 +252,619 @@ pub fn desktop_launch(target: &str) -> Result<(), String> {
 /// 公开同步入口：屏幕坐标处滚轮（正上负下）。
 pub fn desktop_scroll(x: i32, y: i32, delta: i32) -> Result<(), String> {
     executor::scroll_at_screen(x, y, delta)
+}
+
+// ---------- m4d 任务级门禁与审批闭环 ----------
+
+/// 任务动作门禁：任何 desktop_* 动作执行前必须通过本校验（m4d 审批版）。
+///
+/// 校验顺序：任务存在 → 状态可执行（含超时）→ 动作在允许集 → 目标应用匹配 →
+/// 敏感 UI 熔断 → 动作预算。任一失败返回 Err（**不执行动作**），并落审计
+/// `permission/deny`（approved=false）；全部通过时记审计 `permission/grant`。
+///
+/// `sensitive_sample` 为当前界面的敏感检测样本 `(name, role, ocr_text)`；
+/// 命中密码/支付/验证码等关键词时任务置 Fused 并要求人工接管。
+pub fn task_gate_check(
+    registry: &crate::computer_task::ComputerTaskRegistry,
+    mut audit: Option<&mut crate::audit::AuditLog>,
+    session_id: &str,
+    task_id: &str,
+    action: &str,
+    actual_app: &str,
+    sensitive_sample: Option<(&str, &str, &str)>,
+) -> Result<(), String> {
+    let deny = |audit: &mut crate::audit::AuditLog, detail: String| {
+        audit.record(
+            session_id,
+            "permission",
+            Some(action.to_string()),
+            Some(false),
+            detail,
+        );
+    };
+    // 1. 任务存在 + 状态可执行（含超时自动暂停）。
+    if let Err(e) = registry.check_can_execute(task_id) {
+        if let Some(a) = audit.as_mut() {
+            deny(a, format!("computer-use 门禁拒绝：{e}"));
+        }
+        return Err(e);
+    }
+    // 2. 动作允许集。
+    if let Err(e) = registry.check_action_allowed(task_id, action) {
+        if let Some(a) = audit.as_mut() {
+            deny(a, format!("computer-use 门禁拒绝：{e}"));
+        }
+        return Err(e);
+    }
+    // 3. 目标应用匹配。
+    match registry.target_matches(task_id, actual_app) {
+        Ok(true) => {}
+        Ok(false) => {
+            let detail = format!(
+                "computer-use 门禁拒绝：任务 {task_id} 目标应用不匹配（任务声明与当前 {actual_app}）"
+            );
+            if let Some(a) = audit.as_mut() {
+                deny(a, detail);
+            }
+            return Err(format!(
+                "目标应用 {actual_app} 不在任务 {task_id} 授权范围内"
+            ));
+        }
+        Err(e) => {
+            if let Some(a) = audit.as_mut() {
+                deny(a, format!("computer-use 门禁拒绝：{e}"));
+            }
+            return Err(e);
+        }
+    }
+    // 4. 敏感 UI 熔断。
+    if let Some((name, role, ocr_text)) = sensitive_sample {
+        if let Some(reason) = crate::computer_task::sensitive_ui_hit(name, role, ocr_text) {
+            let detail = format!("computer-use 敏感熔断：{reason}，任务 {task_id} 置 Fused");
+            let _ = registry.fuse(task_id, &detail);
+            if let Some(a) = audit.as_mut() {
+                deny(a, detail);
+            }
+            return Err(format!(
+                "敏感 UI 熔断：{reason}；任务 {task_id} 已暂停，需人工接管后 resume"
+            ));
+        }
+    }
+    // 5. 动作预算。
+    if let Err(e) = registry.check_action_budget(task_id) {
+        if let Some(a) = audit.as_mut() {
+            deny(a, format!("computer-use 门禁拒绝：{e}"));
+        }
+        return Err(e);
+    }
+    if let Some(a) = audit.as_mut() {
+        a.record(
+            session_id,
+            "permission",
+            Some(action.to_string()),
+            Some(true),
+            format!("computer-use 任务 {task_id} 动作 {action} 已获授权（目标 {actual_app}）"),
+        );
+    }
+    Ok(())
+}
+
+/// 对 OCR lines 做整屏敏感扫描，返回首个命中说明（无命中返回 None）。
+pub fn scan_ui_sensitive(ocr: &Value) -> Option<String> {
+    let lines = ocr.get("lines")?.as_array()?;
+    for line in lines {
+        let text = line.get("text").and_then(Value::as_str).unwrap_or("");
+        let role = line.get("role_hint").and_then(Value::as_str).unwrap_or("");
+        if let Some(reason) = crate::computer_task::sensitive_ui_hit(text, role, "") {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+/// 门禁后屏幕单击（sim/真实统一走各自实现）。
+#[allow(clippy::too_many_arguments)]
+pub async fn desktop_click_gated(
+    registry: &crate::computer_task::ComputerTaskRegistry,
+    mut audit: Option<&mut crate::audit::AuditLog>,
+    session_id: &str,
+    task_id: &str,
+    app: &str,
+    x: i32,
+    y: i32,
+    sensitive_sample: Option<(&str, &str, &str)>,
+) -> Result<Value, String> {
+    task_gate_check(
+        registry,
+        audit.as_deref_mut(),
+        session_id,
+        task_id,
+        "desktop_click",
+        app,
+        sensitive_sample,
+    )?;
+    let result = if on_sim_surface() {
+        sim_post("click", json!({ "x": x, "y": y })).await?
+    } else {
+        executor::click_at_screen(x, y)?;
+        json!({ "clicked": [x, y] })
+    };
+    registry.record_action(task_id);
+    if let Some(a) = audit.as_mut() {
+        a.record(
+            session_id,
+            "tool_call",
+            Some("desktop_click".to_string()),
+            Some(true),
+            format!("任务 {task_id} 点击 ({x},{y})"),
+        );
+    }
+    Ok(result)
+}
+
+/// 门禁后注入文本。
+#[allow(clippy::too_many_arguments)]
+pub async fn desktop_type_gated(
+    registry: &crate::computer_task::ComputerTaskRegistry,
+    mut audit: Option<&mut crate::audit::AuditLog>,
+    session_id: &str,
+    task_id: &str,
+    app: &str,
+    text: &str,
+    sensitive_sample: Option<(&str, &str, &str)>,
+) -> Result<Value, String> {
+    task_gate_check(
+        registry,
+        audit.as_deref_mut(),
+        session_id,
+        task_id,
+        "desktop_type",
+        app,
+        sensitive_sample,
+    )?;
+    let result = if on_sim_surface() {
+        sim_post("type", json!({ "text": text })).await?
+    } else {
+        executor::send_unicode(text)?;
+        json!({ "typed_chars": text.chars().count() })
+    };
+    registry.record_action(task_id);
+    if let Some(a) = audit.as_mut() {
+        a.record(
+            session_id,
+            "tool_call",
+            Some("desktop_type".to_string()),
+            Some(true),
+            format!("任务 {task_id} 输入 {} 字符", text.chars().count()),
+        );
+    }
+    Ok(result)
+}
+
+/// 门禁后发送按键（enter/tab/backspace 等）。
+#[allow(clippy::too_many_arguments)]
+pub async fn desktop_key_gated(
+    registry: &crate::computer_task::ComputerTaskRegistry,
+    mut audit: Option<&mut crate::audit::AuditLog>,
+    session_id: &str,
+    task_id: &str,
+    app: &str,
+    key: &str,
+    sensitive_sample: Option<(&str, &str, &str)>,
+) -> Result<Value, String> {
+    task_gate_check(
+        registry,
+        audit.as_deref_mut(),
+        session_id,
+        task_id,
+        "desktop_key",
+        app,
+        sensitive_sample,
+    )?;
+    let result = if on_sim_surface() {
+        sim_post("key", json!({ "key": key })).await?
+    } else {
+        executor::send_shortcut(key)?;
+        json!({ "key": key })
+    };
+    registry.record_action(task_id);
+    if let Some(a) = audit.as_mut() {
+        a.record(
+            session_id,
+            "tool_call",
+            Some("desktop_key".to_string()),
+            Some(true),
+            format!("任务 {task_id} 按键 {key}"),
+        );
+    }
+    Ok(result)
+}
+
+/// 门禁后滚轮。
+#[allow(clippy::too_many_arguments)]
+pub async fn desktop_scroll_gated(
+    registry: &crate::computer_task::ComputerTaskRegistry,
+    mut audit: Option<&mut crate::audit::AuditLog>,
+    session_id: &str,
+    task_id: &str,
+    app: &str,
+    x: i32,
+    y: i32,
+    delta: i32,
+    sensitive_sample: Option<(&str, &str, &str)>,
+) -> Result<Value, String> {
+    task_gate_check(
+        registry,
+        audit.as_deref_mut(),
+        session_id,
+        task_id,
+        "desktop_scroll",
+        app,
+        sensitive_sample,
+    )?;
+    let result = if on_sim_surface() {
+        sim_post("scroll", json!({ "x": x, "y": y, "delta": delta })).await?
+    } else {
+        executor::scroll_at_screen(x, y, delta)?;
+        json!({ "scrolled": [x, y, delta] })
+    };
+    registry.record_action(task_id);
+    if let Some(a) = audit.as_mut() {
+        a.record(
+            session_id,
+            "tool_call",
+            Some("desktop_scroll".to_string()),
+            Some(true),
+            format!("任务 {task_id} 滚轮 ({x},{y},{delta})"),
+        );
+    }
+    Ok(result)
+}
+
+/// 门禁后启动应用/URL（任务已批准且目标应用匹配时才允许）。
+#[allow(clippy::too_many_arguments)]
+pub async fn desktop_launch_gated(
+    registry: &crate::computer_task::ComputerTaskRegistry,
+    mut audit: Option<&mut crate::audit::AuditLog>,
+    session_id: &str,
+    task_id: &str,
+    app: &str,
+    target: &str,
+) -> Result<Value, String> {
+    task_gate_check(
+        registry,
+        audit.as_deref_mut(),
+        session_id,
+        task_id,
+        "desktop_launch",
+        app,
+        None,
+    )?;
+    let result = if on_sim_surface() {
+        json!({ "launched": target, "surface": "sim" })
+    } else {
+        executor::launch_target(target)?;
+        json!({ "launched": target })
+    };
+    registry.record_action(task_id);
+    if let Some(a) = audit.as_mut() {
+        a.record(
+            session_id,
+            "tool_call",
+            Some("desktop_launch".to_string()),
+            Some(true),
+            format!("任务 {task_id} 启动 {target}"),
+        );
+    }
+    Ok(result)
+}
+
+/// 闭环单步目标：感知到 `anchor_text` 后执行动作，并用 `verify_text` 验证。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TaskGoal {
+    /// 定位锚点（OCR 文本，大小写不敏感子串匹配）。
+    pub anchor_text: String,
+    /// 动作类型：click / type / key。
+    pub action: String,
+    /// 动作载荷：type 的文本或 key 名（click 忽略）。
+    pub value: String,
+    /// 动作后的验证文本（可选；出现在下一轮 OCR 即视为验证通过）。
+    pub verify_text: Option<String>,
+}
+
+/// 闭环执行报告。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskReport {
+    pub task_id: String,
+    pub steps: usize,
+    pub state: crate::computer_task::TaskState,
+    pub detail: String,
+}
+
+/// 感知闭环执行所需的桌面面抽象：感知（OCR 版面）与动作注入。
+///
+/// 运行环境用 [`SimTaskSurface`]（owo-sim-qq）；契约测试注入内存 Mock，
+/// 使闭环在无网络/无真实桌面时完整可测。
+#[async_trait::async_trait]
+pub trait TaskSurface: Send {
+    /// 当前前台应用标识（用于目标应用匹配）。
+    fn app(&self) -> String;
+    /// 当前 OCR 版面（screen_ocr 同构：lines 数组，每行 text/x/y/width/height/role_hint）。
+    async fn ocr(&mut self) -> Result<Value, String>;
+    async fn click(&mut self, x: i32, y: i32) -> Result<(), String>;
+    async fn type_text(&mut self, text: &str) -> Result<(), String>;
+    async fn key(&mut self, key: &str) -> Result<(), String>;
+    async fn launch(&mut self, target: &str) -> Result<(), String>;
+}
+
+/// owo-sim-qq HTTP 模拟面（`OWO_SIM_QQ_URL` 指向模拟窗口）。
+#[derive(Debug)]
+pub struct SimTaskSurface {
+    base: String,
+}
+
+impl SimTaskSurface {
+    pub fn new() -> Result<Self, String> {
+        let base = sim_base_url().ok_or("模拟环境未配置 OWO_SIM_QQ_URL")?;
+        Ok(Self { base })
+    }
+}
+
+/// 真实桌面面：OCR 走本地引擎（Media.Ocr / PP-OCRv6 / 本地 ONNX），
+/// 动作走 executor（SendInput / UIA / 启动）。用于已授权任务在真实桌面的闭环。
+#[derive(Debug, Default)]
+pub struct RealTaskSurface;
+
+#[async_trait::async_trait]
+impl TaskSurface for RealTaskSurface {
+    fn app(&self) -> String {
+        crate::platform::poll_foreground_app()
+            .map(|(app_id, _)| app_id)
+            .unwrap_or_default()
+    }
+
+    async fn ocr(&mut self) -> Result<Value, String> {
+        ocr_screen(0).await
+    }
+
+    async fn click(&mut self, x: i32, y: i32) -> Result<(), String> {
+        executor::click_at_screen(x, y)
+    }
+
+    async fn type_text(&mut self, text: &str) -> Result<(), String> {
+        executor::send_unicode(text)
+    }
+
+    async fn key(&mut self, key: &str) -> Result<(), String> {
+        executor::send_shortcut(key)
+    }
+
+    async fn launch(&mut self, target: &str) -> Result<(), String> {
+        executor::launch_target(target)
+    }
+}
+
+#[async_trait::async_trait]
+impl TaskSurface for SimTaskSurface {
+    fn app(&self) -> String {
+        "owo-sim-qq".to_string()
+    }
+
+    async fn ocr(&mut self) -> Result<Value, String> {
+        let base = self.base.trim_end_matches('/');
+        let response = reqwest::get(format!("{base}/ocr"))
+            .await
+            .map_err(|e| format!("模拟面 OCR 失败：{e}"))?;
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("模拟面 OCR 响应解析失败：{e}"))?;
+        let has_lines = value
+            .get("lines")
+            .and_then(Value::as_array)
+            .map(|lines| !lines.is_empty())
+            .unwrap_or(false);
+        if has_lines {
+            Ok(value)
+        } else {
+            Err("模拟面 OCR 不可用".to_string())
+        }
+    }
+
+    async fn click(&mut self, x: i32, y: i32) -> Result<(), String> {
+        sim_post_at(&self.base, "click", json!({ "x": x, "y": y })).await?;
+        Ok(())
+    }
+
+    async fn type_text(&mut self, text: &str) -> Result<(), String> {
+        sim_post_at(&self.base, "type", json!({ "text": text })).await?;
+        Ok(())
+    }
+
+    async fn key(&mut self, key: &str) -> Result<(), String> {
+        sim_post_at(&self.base, "key", json!({ "key": key })).await?;
+        Ok(())
+    }
+
+    async fn launch(&mut self, _target: &str) -> Result<(), String> {
+        // 模拟面无独立启动端点；启动语义由真实面/后续接线承载。
+        Ok(())
+    }
+}
+
+/// 感知闭环（指定 surface）：截图/OCR 感知 → 定位锚点 → 门禁动作 → 验证 → 下一步/完成，每步审计。
+///
+/// 前置：任务已 Approved 或 Running（Pending 返回 Err，需用户先批准）。
+/// 敏感 UI（密码/支付/验证码）在每步感知后扫描，命中即 Fused 熔断并要求人工接管。
+/// 任一动作被门禁拒绝（未批准/越界应用/超预算/超时）立即停止并返回错误。
+pub async fn run_approved_task_on(
+    registry: &crate::computer_task::ComputerTaskRegistry,
+    audit: &mut crate::audit::AuditLog,
+    session_id: &str,
+    task_id: &str,
+    goals: &[TaskGoal],
+    surface: &mut dyn TaskSurface,
+) -> Result<TaskReport, String> {
+    // 前置门禁：以首个动作做整体授权检查（任务须已批准）。
+    let task = registry
+        .get(task_id)
+        .ok_or_else(|| format!("任务 {task_id} 不存在"))?;
+    if task.state != crate::computer_task::TaskState::Approved
+        && task.state != crate::computer_task::TaskState::Running
+    {
+        return Err(format!(
+            "任务 {task_id} 状态 {:?}，需用户先批准（Pending→approve）",
+            task.state
+        ));
+    }
+    // 当前前台应用（用于门禁的目标应用匹配）。
+    let surface_app = surface.app();
+    // 闭环步动作名（click/type/key/launch）→ 门禁动作名（desktop_*）。
+    let first_action = if goals.is_empty() {
+        "desktop_click"
+    } else {
+        match goals[0].action.as_str() {
+            "click" => "desktop_click",
+            "type" => "desktop_type",
+            "key" => "desktop_key",
+            "launch" => "desktop_launch",
+            other => other,
+        }
+    };
+    task_gate_check(
+        registry,
+        Some(&mut *audit),
+        session_id,
+        task_id,
+        first_action,
+        &surface_app,
+        None,
+    )?;
+    if registry.get(task_id).unwrap().state != crate::computer_task::TaskState::Running {
+        registry.start(task_id)?;
+    }
+    audit.record(
+        session_id,
+        "computer_task",
+        Some("start".to_string()),
+        Some(true),
+        format!("任务 {task_id} 感知闭环启动（{} 步目标）", goals.len()),
+    );
+
+    let mut steps = 0usize;
+    for goal in goals {
+        // 1. 感知：OCR 版面。
+        let ocr = surface.ocr().await?;
+        // 2. 敏感扫描（整屏）→ 熔断。
+        if let Some(reason) = scan_ui_sensitive(&ocr) {
+            let detail = format!("敏感熔断（第 {} 步感知）：{reason}", steps + 1);
+            let _ = registry.fuse(task_id, &detail);
+            audit.record(
+                session_id,
+                "computer_task",
+                Some("fuse".to_string()),
+                Some(false),
+                detail.clone(),
+            );
+            return Err(detail);
+        }
+        // 3. 定位锚点（OCR lines 中找目标文本行）。
+        let line = find_ocr_line(&ocr, &goal.anchor_text, "")
+            .ok_or_else(|| format!("定位失败：未找到锚点「{}」", goal.anchor_text))?;
+        let x = line.get("x").and_then(Value::as_i64).unwrap_or(0) as i32;
+        let y = line.get("y").and_then(Value::as_i64).unwrap_or(0) as i32;
+        let w = line.get("width").and_then(Value::as_i64).unwrap_or(0) as i32;
+        let h = line.get("height").and_then(Value::as_i64).unwrap_or(0) as i32;
+        let (cx, cy) = (x + w / 2, y + h / 2);
+        // 4. 门禁动作（状态/允许集/目标应用/敏感/预算，拒绝即停）。
+        let action_name = match goal.action.as_str() {
+            "click" => "desktop_click",
+            "type" => "desktop_type",
+            "key" => "desktop_key",
+            "launch" => "desktop_launch",
+            other => return Err(format!("闭环不支持的动作：{other}")),
+        };
+        task_gate_check(
+            registry,
+            Some(&mut *audit),
+            session_id,
+            task_id,
+            action_name,
+            &surface_app,
+            None,
+        )?;
+        let outcome = match goal.action.as_str() {
+            "click" => surface.click(cx, cy).await,
+            "type" => surface.type_text(&goal.value).await,
+            "key" => surface.key(&goal.value).await,
+            "launch" => surface.launch(&goal.value).await,
+            _ => unreachable!(),
+        };
+        outcome.map_err(|e| format!("第 {} 步动作执行失败：{e}", steps + 1))?;
+        registry.record_action(task_id);
+        steps += 1;
+        // 5. 验证（可选）。
+        if let Some(expected) = &goal.verify_text {
+            let verified = verify_text_appears_on(surface, expected).await?;
+            if !verified {
+                return Err(format!("验证失败（第 {steps} 步）：未出现「{expected}」"));
+            }
+        }
+        audit.record(
+            session_id,
+            "computer_task",
+            Some("step".to_string()),
+            Some(true),
+            format!("任务 {task_id} 第 {steps} 步完成（{action_name}）@({cx},{cy})"),
+        );
+        // 6. 超时兜底（超时自动暂停并报错）。
+        registry.check_can_execute(task_id)?;
+    }
+    let _ = registry.complete(task_id);
+    audit.record(
+        session_id,
+        "computer_task",
+        Some("complete".to_string()),
+        Some(true),
+        format!("任务 {task_id} 闭环完成，共 {steps} 步"),
+    );
+    Ok(TaskReport {
+        task_id: task_id.to_string(),
+        steps,
+        state: crate::computer_task::TaskState::Completed,
+        detail: "全部目标完成".to_string(),
+    })
+}
+
+/// 感知闭环（模拟/沙箱面便捷入口）：`OWO_SIM_QQ_URL` 指向 owo-sim-qq，
+/// 在沙箱应用内跑通"打开应用→输入→保存/发送→验证"最小闭环。
+///
+/// 真实桌面需显式授权（本轮不提供）；逻辑与 [`run_approved_task_on`] 完全一致。
+pub async fn run_approved_task(
+    registry: &crate::computer_task::ComputerTaskRegistry,
+    audit: &mut crate::audit::AuditLog,
+    session_id: &str,
+    task_id: &str,
+    goals: &[TaskGoal],
+) -> Result<TaskReport, String> {
+    let mut surface = SimTaskSurface::new()?;
+    run_approved_task_on(registry, audit, session_id, task_id, goals, &mut surface).await
+}
+
+/// 验证 `needle` 是否出现在 surface 的 OCR 版面中（重试 5 次，间隔 50ms）。
+async fn verify_text_appears_on(
+    surface: &mut dyn TaskSurface,
+    needle: &str,
+) -> Result<bool, String> {
+    for _ in 0..5 {
+        if let Ok(ocr) = surface.ocr().await {
+            if find_ocr_line(&ocr, needle, "").is_some() {
+                return Ok(true);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(false)
 }
 
 pub struct ScreenOcrTool;

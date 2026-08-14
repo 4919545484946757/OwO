@@ -10,6 +10,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// 默认动作次数预算（每个任务，超出后自动暂停并要求人工接管）。
+pub const DEFAULT_ACTION_BUDGET: u32 = 200;
+
 /// computer-use 任务状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskState {
@@ -69,6 +72,10 @@ pub struct ComputerTask {
 pub struct ComputerTaskRegistry {
     tasks: Arc<Mutex<HashMap<String, ComputerTask>>>,
     started: Arc<Mutex<HashMap<String, Instant>>>,
+    /// 每个任务已执行的受控动作次数（预算消耗）。
+    actions: Arc<Mutex<HashMap<String, u32>>>,
+    /// 每个任务的动作次数预算（未设置时用 [`DEFAULT_ACTION_BUDGET`]；显式 0 = 不限）。
+    action_budget: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl ComputerTaskRegistry {
@@ -254,6 +261,93 @@ impl ComputerTaskRegistry {
         }
     }
 
+    /// 校验动作次数预算；超限自动暂停并返回错误（m4d 动作预算上限）。
+    /// 设置动作次数预算（显式 0 = 不限；未设置时默认 [`DEFAULT_ACTION_BUDGET`]）。
+    pub fn set_action_budget(&self, id: &str, budget: u32) -> Result<(), String> {
+        let exists = {
+            let tasks = self.tasks.lock().map_err(|_| "任务表锁中毒".to_string())?;
+            tasks.contains_key(id)
+        };
+        if !exists {
+            return Err(format!("任务 {id} 不存在"));
+        }
+        if let Ok(mut budgets) = self.action_budget.lock() {
+            budgets.insert(id.to_string(), budget);
+        }
+        Ok(())
+    }
+
+    /// 查询任务已执行动作数。
+    pub fn actions_taken(&self, id: &str) -> u32 {
+        self.actions
+            .lock()
+            .ok()
+            .and_then(|actions| actions.get(id).copied())
+            .unwrap_or(0)
+    }
+
+    /// 查询任务当前预算（未设置返回 [`DEFAULT_ACTION_BUDGET`]）。
+    pub fn action_budget(&self, id: &str) -> u32 {
+        self.action_budget
+            .lock()
+            .ok()
+            .and_then(|budgets| budgets.get(id).copied())
+            .unwrap_or(DEFAULT_ACTION_BUDGET)
+    }
+
+    pub fn check_action_budget(&self, id: &str) -> Result<(), String> {
+        let exists = {
+            let tasks = self.tasks.lock().map_err(|_| "任务表锁中毒".to_string())?;
+            tasks.contains_key(id)
+        };
+        if !exists {
+            return Err(format!("任务 {id} 不存在"));
+        }
+        let cap = self.action_budget(id);
+        if cap == 0 {
+            return Ok(());
+        }
+        let count = self.actions_taken(id);
+        if count >= cap {
+            drop(self.started.lock());
+            let _ = self.pause(
+                id,
+                &format!("动作次数超预算（上限 {cap} 次，已执行 {count} 次）"),
+            );
+            return Err(format!(
+                "任务 {id} 动作次数超预算（上限 {cap} 次），已自动暂停"
+            ));
+        }
+        Ok(())
+    }
+
+    /// 记录一次已执行动作（预算计数，仅递增不校验；校验走 `check_action_budget`）。
+    pub fn record_action(&self, id: &str) {
+        if let Ok(mut actions) = self.actions.lock() {
+            let entry = actions.entry(id.to_string()).or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
+    }
+
+    /// 目标应用是否匹配任务声明（大小写不敏感等值匹配，`*.exe` 后缀等价；`*` 或 `any` 视为通配）。
+    pub fn target_matches(&self, id: &str, actual_app: &str) -> Result<bool, String> {
+        let task = self
+            .tasks
+            .lock()
+            .map_err(|_| "任务表锁中毒".to_string())?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("任务 {id} 不存在"))?;
+        let expected = task.target_app.trim().to_lowercase();
+        let actual = actual_app.trim().to_lowercase();
+        let actual_base = actual
+            .strip_suffix(".exe")
+            .unwrap_or(actual.as_str())
+            .trim()
+            .to_string();
+        Ok(expected == "*" || expected == "any" || expected == actual || expected == actual_base)
+    }
+
     fn transition<F>(&self, id: &str, f: F) -> Result<TaskState, String>
     where
         F: FnOnce(&mut ComputerTask) -> Result<TaskState, String>,
@@ -387,5 +481,61 @@ mod tests {
         assert!(sensitive_ui_hit("", "", "captcha 验证码").is_some());
         assert!(sensitive_ui_hit("输入消息", "Edit", "").is_none());
         assert!(sensitive_ui_hit("发送", "Button", "发送消息").is_none());
+    }
+
+    #[test]
+    fn action_budget_pauses_when_exceeded() {
+        let registry = ComputerTaskRegistry::new();
+        registry.create(sample_task("b1")).unwrap();
+        registry.set_action_budget("b1", 2).unwrap();
+        registry.approve("b1").unwrap();
+        registry.start("b1").unwrap();
+        assert!(registry.check_action_budget("b1").is_ok());
+        registry.record_action("b1");
+        assert!(registry.check_action_budget("b1").is_ok());
+        registry.record_action("b1");
+        let error = registry.check_action_budget("b1").unwrap_err();
+        assert!(error.contains("超预算"));
+        assert_eq!(registry.get("b1").unwrap().state, TaskState::Paused);
+    }
+
+    #[test]
+    fn action_budget_default_and_unlimited_semantics() {
+        let registry = ComputerTaskRegistry::new();
+        registry.create(sample_task("d1")).unwrap();
+        assert_eq!(registry.action_budget("d1"), DEFAULT_ACTION_BUDGET);
+        registry.set_action_budget("d1", 0).unwrap();
+        assert_eq!(registry.action_budget("d1"), 0);
+        for _ in 0..(DEFAULT_ACTION_BUDGET + 10) {
+            registry.record_action("d1");
+        }
+        // 显式 0 = 不限，永不超预算。
+        assert!(registry.check_action_budget("d1").is_ok());
+        assert_eq!(registry.actions_taken("d1"), DEFAULT_ACTION_BUDGET + 10);
+    }
+
+    #[test]
+    fn target_matches_wildcard_and_case_insensitive() {
+        let registry = ComputerTaskRegistry::new();
+        registry.create(sample_task("m1")).unwrap();
+        assert!(registry.target_matches("m1", "notepad").unwrap());
+        assert!(registry.target_matches("m1", "Notepad").unwrap());
+        assert!(registry.target_matches("m1", "notepad.exe").unwrap());
+        assert!(!registry.target_matches("m1", "qq").unwrap());
+        let mut task = sample_task("m2");
+        task.target_app = "*".to_string();
+        registry.create(task).unwrap();
+        assert!(registry.target_matches("m2", "anything").unwrap());
+    }
+
+    #[test]
+    fn computer_task_serde_roundtrip_without_budget_field() {
+        // 预算不落在任务结构体上（registry 侧维护），旧 JSON 可无损反序列化。
+        let old_json = r#"{"id":"s1","target_app":"notepad","description":"d","allowed_actions":[],"max_duration_ms":1000,"state":"Pending","created_at":"2026-08-13T00:00:00Z","fuse_reason":null}"#;
+        let task: ComputerTask = serde_json::from_str(old_json).unwrap();
+        let encoded = serde_json::to_string(&task).unwrap();
+        let round: ComputerTask = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(round.id, "s1");
+        assert_eq!(round.max_duration_ms, 1000);
     }
 }
