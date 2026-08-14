@@ -116,12 +116,13 @@ async function api(path, options = {}) {
 }
 
 // 统一友好错误：404/405/5xx 提示"服务接口不可用"，其余透传原错误。
-function friendlyError(error) {
+// resource=true 时（契约资源型 404 路径），404/405 提示"资源不存在"而非接口不可用。
+function friendlyError(error, options = {}) {
   const msg = String((error && error.message) || error || "");
   const match = msg.match(/^(\d{3}):/);
   const status = match ? Number(match[1]) : 0;
   if (status === 404 || status === 405 || status >= 500) {
-    return `服务接口不可用（HTTP ${status}）`;
+    return options.resource ? `资源不存在（HTTP ${status}）` : `服务接口不可用（HTTP ${status}）`;
   }
   return msg || "未知错误";
 }
@@ -466,7 +467,7 @@ async function refreshPackages() {
           const detail = await api(`/learn/packages/${encodeURIComponent(pkg.name)}`);
           $("packageDetail").textContent = JSON.stringify(detail, null, 2);
         } catch (error) {
-          addMessage("system", `查看失败：${error.message || error}`);
+          addMessage("system", `查看失败：${friendlyError(error, { resource: true })}`);
         }
       });
       li.appendChild(detailBtn);
@@ -480,7 +481,7 @@ async function refreshPackages() {
           await refreshPackages();
           addMessage("system", `已删除流程技能包 ${pkg.name}`);
         } catch (error) {
-          addMessage("system", `删除失败：${error.message || error}`);
+          addMessage("system", `删除失败：${friendlyError(error, { resource: true })}`);
         }
       });
       li.appendChild(deleteBtn);
@@ -504,7 +505,7 @@ async function exportPackage(name) {
     link.click();
     URL.revokeObjectURL(url);
   } catch (error) {
-    addMessage("error", `导出失败：${error.message}`);
+    addMessage("error", `导出失败：${friendlyError(error, { resource: true })}`);
   }
 }
 
@@ -851,7 +852,7 @@ async function refreshSessionsImpl(selectId) {
           }
           await refreshSessions(selectId || state.sessionId);
         } catch (error) {
-          addMessage("system", `操作失败：${error.message || error}`);
+          addMessage("system", `操作失败：${friendlyError(error, { resource: true })}`);
         }
       });
     }
@@ -882,7 +883,7 @@ async function selectSession(id) {
   } catch (error) {
     if (selectionVersion !== state.selectionVersion) return;
     $("messages").innerHTML = "";
-    addMessage("system", `会话加载失败：${error.message || error}`);
+    addMessage("system", `会话加载失败：${friendlyError(error, { resource: true })}`);
   }
   await refreshSessions(id);
   await refreshDiff(id);
@@ -914,7 +915,7 @@ async function refreshSessionContext(sessionId) {
       : "会话上下文状态";
     bar.classList.remove("hidden");
   } catch (error) {
-    $("contextLabel").textContent = friendlyError(error);
+    $("contextLabel").textContent = friendlyError(error, { resource: true });
     bar.title = "会话上下文状态";
     bar.classList.remove("hidden");
   }
@@ -1229,7 +1230,7 @@ async function refreshSkills() {
           await refreshSkills();
           addMessage("system", `技能 ${skill.name} 已${enabled ? "禁用" : "启用"}（即时生效）`);
         } catch (error) {
-          addMessage("system", `操作失败：${error.message || error}`);
+          addMessage("system", `操作失败：${friendlyError(error, { resource: true })}`);
         }
       });
       const view = document.createElement("button");
@@ -1241,7 +1242,7 @@ async function refreshSkills() {
           $("skillDetail").textContent = detail.content || "";
           addMessage("system", `技能 ${skill.name}：${detail.path}`);
         } catch (error) {
-          addMessage("system", `查看失败：${error.message || error}`);
+          addMessage("system", `查看失败：${friendlyError(error, { resource: true })}`);
         }
       });
       const edit = document.createElement("button");
@@ -1426,7 +1427,7 @@ async function showTrace(index) {
     }
     $("traceReplay").textContent = lines.join("\n");
   } catch (error) {
-    $("traceReplay").textContent = `回放失败：${error.message}`;
+    $("traceReplay").textContent = `回放失败：${friendlyError(error, { resource: true })}`;
   }
 }
 
@@ -1447,7 +1448,7 @@ async function exportSession(format) {
     URL.revokeObjectURL(url);
     addMessage("system", `已导出会话为 ${format.toUpperCase()}`);
   } catch (error) {
-    addMessage("error", `导出失败：${error.message}`);
+    addMessage("error", `导出失败：${friendlyError(error, { resource: true })}`);
   }
 }
 
@@ -1523,7 +1524,9 @@ async function generateAgentsTemplate() {
     $("agentsEditor").dataset.seeded = "0";
     await refreshProjectRules();
   } catch (error) {
-    addMessage("error", `生成失败：${error.message}`);
+    const msg = String((error && error.message) || error || "");
+    if (msg.startsWith("409")) addMessage("error", "AGENTS.md 已存在，未生成模板（幂等）");
+    else addMessage("error", `生成失败：${friendlyError(error)}`);
   }
 }
 
@@ -1547,7 +1550,7 @@ async function refreshMcp() {
           await refreshMcp();
           addMessage("system", `已移除 MCP 服务器 ${server.name}`);
         } catch (error) {
-          addMessage("error", `移除失败：${error.message}`);
+          addMessage("error", `移除失败：${friendlyError(error, { resource: true })}`);
         }
       });
       li.appendChild(removeBtn);
@@ -1626,13 +1629,13 @@ async function refreshComputerTasks() {
     const tasks = data.tasks || [];
     for (const task of tasks) {
       const li = document.createElement("li");
-      const status = task.state || "unknown";
+      const status = String(task.state || "unknown").toLowerCase();
       const elapsed = task.elapsed_ms != null ? `${Math.round(task.elapsed_ms / 1000)}s / ` : "";
-      const cap = task.max_duration_secs != null ? `${task.max_duration_secs}s` : "无上限";
+      const cap = task.max_duration_ms != null ? `${Math.round(task.max_duration_ms / 1000)}s` : "无上限";
       li.innerHTML =
-        `<strong>${esc(task.app || "")}：${esc(task.description || "")}</strong>` +
+        `<strong>${esc(task.target_app || task.app || "")}：${esc(task.description || "")}</strong>` +
         `<span class="sub">${esc(status)} ｜ ${elapsed}${cap} ｜ 动作 ${esc((task.allowed_actions || []).join(",")) || "全部"}</span>`;
-      if (status === "pending_approval") {
+      if (status.startsWith("pending")) {
         const approve = document.createElement("button");
         approve.textContent = "批准";
         approve.addEventListener("click", async () => {
@@ -1648,14 +1651,25 @@ async function refreshComputerTasks() {
         deny.textContent = "拒绝";
         deny.addEventListener("click", async () => {
           try {
-            await api(`/computer-use/task/${encodeURIComponent(task.id)}/abort`, { method: "POST" });
+            await api(`/computer-use/task/${encodeURIComponent(task.id)}/reject`, { method: "POST" });
             await refreshComputerTasks();
           } catch (error) {
             addMessage("error", `拒绝失败：${friendlyError(error)}`);
           }
         });
         li.appendChild(deny);
-      } else if (status === "running") {
+        const cancel = document.createElement("button");
+        cancel.textContent = "取消";
+        cancel.addEventListener("click", async () => {
+          try {
+            await api(`/computer-use/task/${encodeURIComponent(task.id)}/cancel`, { method: "POST" });
+            await refreshComputerTasks();
+          } catch (error) {
+            addMessage("error", `取消失败：${friendlyError(error)}`);
+          }
+        });
+        li.appendChild(cancel);
+      } else if (status.startsWith("running")) {
         const pause = document.createElement("button");
         pause.textContent = "暂停";
         pause.addEventListener("click", async () => {
@@ -1671,14 +1685,14 @@ async function refreshComputerTasks() {
         abort.textContent = "终止";
         abort.addEventListener("click", async () => {
           try {
-            await api(`/computer-use/task/${encodeURIComponent(task.id)}/abort`, { method: "POST" });
+            await api(`/computer-use/task/${encodeURIComponent(task.id)}/cancel`, { method: "POST" });
             await refreshComputerTasks();
           } catch (error) {
             addMessage("error", `终止失败：${friendlyError(error)}`);
           }
         });
         li.appendChild(abort);
-      } else if (status === "paused") {
+      } else if (status.startsWith("paused")) {
         const resume = document.createElement("button");
         resume.textContent = "恢复";
         resume.addEventListener("click", async () => {
@@ -1700,21 +1714,21 @@ async function refreshComputerTasks() {
 }
 
 async function createComputerTask() {
-  const app = $("cuApp").value.trim();
+  const targetApp = $("cuApp").value.trim();
   const description = $("cuDesc").value.trim();
-  if (!app || !description) {
+  if (!targetApp || !description) {
     addMessage("system", "请填写目标应用与任务描述");
     return;
   }
-  const maxDurationSecs = parseInt($("cuMaxDur").value, 10) || 120;
+  const maxDurationMs = (parseInt($("cuMaxDur").value, 10) || 120) * 1000;
   const allowedActions = $("cuActions").value.split(",").map((s) => s.trim()).filter(Boolean);
   try {
     const result = await api("/computer-use/task", {
       method: "POST",
       body: JSON.stringify({
-        app,
+        target_app: targetApp,
         description,
-        max_duration_secs: maxDurationSecs,
+        max_duration_ms: maxDurationMs,
         allowed_actions: allowedActions,
       }),
     });
