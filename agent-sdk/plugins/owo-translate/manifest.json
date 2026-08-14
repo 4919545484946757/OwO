@@ -3,11 +3,21 @@
   "name": "Official Translate",
   "version": "1.0.0",
   "description": "官方示例插件：演示翻译工具（本地词典演示，无网络依赖；接入后 Agent 可用 translate 工具）",
-  "permissions": ["agent:tools"],
+  "permissions": [
+    "agent:tools"
+  ],
   "mcp": {
     "name": "owo-translate",
     "transport": "stdio",
     "command": "python",
-    "args": ["plugins/owo-translate/server.py"]
-  }
+    "args": [
+      "plugins/owo-translate/server.py"
+    ]
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "public_key_b64": "2VK9uwqMyqw9UIsp+b25fL8l4jVHL4t/+T2CGxjh0mw=",
+    "signature_b64": "cQrohmeVRWdz6ZL/rWYgW6/aagJYAnWuBY1oRY5+lC046lZO65hXKImxjTV9aTf65OC+NsK4JtUKmqnjZE+sBQ=="
+  },
+  "entry": "server.py"
 }

@@ -3,11 +3,18 @@
   "name": "Example Hello",
   "version": "1.0.0",
   "description": "示例插件：通过 MCP 测试服务器提供 echo/add 工具（需先构建 owo-mcp-test-server）",
-  "permissions": ["agent:tools"],
+  "permissions": [
+    "agent:tools"
+  ],
   "mcp": {
     "name": "example-hello",
     "transport": "stdio",
     "command": "../../target/debug/owo-mcp-test-server.exe",
     "args": []
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "public_key_b64": "2VK9uwqMyqw9UIsp+b25fL8l4jVHL4t/+T2CGxjh0mw=",
+    "signature_b64": "13tmKb+QOPg3k4gwBzqDppQyl2HokeAOawZSd7LVRWmvRMxGKqqEzqq7TGQIIbn6hyTETq71O5uGO79ajr93Aw=="
   }
 }

@@ -3,11 +3,23 @@
   "name": "Official Clipboard",
   "version": "1.0.0",
   "description": "官方示例插件：剪贴板读写（Windows 经 PowerShell Get/Set-Clipboard；权限 clipboard:read/write 需审批策略放行）",
-  "permissions": ["agent:tools", "clipboard:read", "clipboard:write"],
+  "permissions": [
+    "agent:tools",
+    "clipboard:read",
+    "clipboard:write"
+  ],
   "mcp": {
     "name": "owo-clipboard",
     "transport": "stdio",
     "command": "python",
-    "args": ["plugins/owo-clipboard/server.py"]
+    "args": [
+      "plugins/owo-clipboard/server.py"
+    ]
+  },
+  "entry": "server.py",
+  "signature": {
+    "algorithm": "ed25519",
+    "public_key_b64": "2VK9uwqMyqw9UIsp+b25fL8l4jVHL4t/+T2CGxjh0mw=",
+    "signature_b64": "3RnRI4n1DyiFomFWbxrCJN8UH34ZuItEm9BxWkIazqsLrWl7VHdvUxulXswIKtvz+pXRO4r7AQAttiu3NsTxDw=="
   }
 }
