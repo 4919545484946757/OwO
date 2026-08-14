@@ -87,6 +87,19 @@
       <ul id="pluginList" class="list"></ul>
     </section>
     <section>
+      <h2>Computer-use 任务（P2）</h2>
+      <form id="computerTaskForm" class="stack">
+        <input id="cuApp" placeholder="目标应用（如 qq）" required>
+        <input id="cuDesc" placeholder="任务描述" required>
+        <div class="inline">
+          <input id="cuMaxDur" placeholder="最长时长（秒，默认 120）" inputmode="numeric">
+          <input id="cuActions" placeholder="允许动作（click/type/scroll，逗号分隔）">
+        </div>
+        <button type="submit">创建任务（需任务级审批）</button>
+      </form>
+      <ul id="computerTaskList" class="list"></ul>
+    </section>
+    <section>
       <h2>操作学习</h2>
       <div class="inline">
         <button id="learnStart">开始</button>

@@ -81,6 +81,8 @@ def main():
         seen_kinds = {
             obs.get("detail", {}).get("type")
             for obs in memory.get("observations", [])
+            if obs.get("kind") == "sim_event"
+            and isinstance(obs.get("detail", {}).get("type"), str)
         }
         if {"typed", "send_clicked"}.issubset(seen_kinds):
             break

@@ -1,6 +1,6 @@
 # OwO Agent SDK
 
-Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
+Codex 式 Agent 智能体 SDK（当前基线 v0.6，桌面工作台 + 全流程感知/学习/执行已落地）。
 
 ## 目标形态
 
@@ -10,10 +10,18 @@ Codex 式 Agent 智能体 SDK（v0.1 骨架，M1 最小闭环）。
 - HTTP API（`owo-agent-server`）：session/turn/permission/diff/revert/abort，SSE 事件流。
 - CLI（`owo-agent-cli`）：交互式 `turn` 与 `serve`。
 
-技术基线见 `../builGoal/技术文档-AI智能体输入法.md`（v0.3，输入法路线不实施）。
-迭代依据见 `../builGoal/技术文档-AI智能体输入法-v0.4续写计划.md`（桌面端 + 全域情景感知 + 操作学习）。
+技术基线见 `../builGoal/技术文档-AI智能体输入法.md`（v0.6，只实施 Agent 智能体方案，输入法路线不实施）。
+迭代依据：技术文档 5.8 全流程专项（M-A 场景图定位 / M-B 动作程序 / M-C 静默学习 / M-D 技能健康 / M-E 本地 ONNX OCR）与附录 C 验收基线；逐项实测记录见 `ACCEPTANCE.md`。
 
-## v0.4 已落地（SDK 侧）
+## 当前基线（v0.6，2026-08-14 交付面收敛）
+
+- **HTTP 服务面契约化**：`/locate/query`、`/memory/recall`、`/skills/health[/{name}/reset]`、`/plugins`、`/traces[/{index}]`、`/subagent/run`、`/project/rules[/template]`、`/mcp[/add|/remove]`、`/session/{id}/context`、`/computer-use/*`、`/usage` 等端点与 `/openapi.json` 完全一致；路由契约测试（`tests/route_contract.rs`）防回归。
+- **桌面工作台全面板**：插件管理、技能健康、记忆检索、Traces 回放、子代理（只读/通用）、项目规则（AGENTS.md 注入/编辑/模板）、MCP 管理、会话上下文 token 仪表、模型用量、computer-use 任务面板；接口不可用时显示可读错误，不白屏。
+- **全流程感知/执行**：场景图 + 多源定位（UIA/OCR/视觉/模板/历史）、动作程序解释器 + 结构化断言、静默观察 + 情景记忆、技能健康度自愈、本地 ONNX OCR（ch_PP-OCRv4，纯 Rust，随包分发开箱即用）。
+- **TypeScript SDK**（`clients/ts`）：由 `/openapi.json` 生成类型与客户端，`npm run typecheck/build/test:unit` 通过。
+- **门禁与打包**：`scripts/sim-regression.py`（qq-learn/qq-observe 2/2）、`scripts/skill-gate.ps1`（12/12）、便携 zip / NSIS setup.exe / updater（含 `models/ocr` 三件套 + onnxruntime.dll）。
+
+## 历史落地记录（v0.4 SDK 侧）
 
 - 应用白名单（`whitelist.rs`）：生产力/聊天/游戏/其他分级，敏感类默认禁止操作与学习。
 - 全域情景感知（`perception.rs`）：L0-L3 分层、情景快照、消息掩码、L2 截图环形缓冲（不落盘、用后即毁）、SSE 订阅。

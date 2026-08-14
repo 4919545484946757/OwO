@@ -1289,6 +1289,7 @@ v0.3 的 M1/M2（SDK 核心、CLI/TUI、HTTP、权限、AGENTS.md/Skills/子代�
 | M4 全域感知 + 语音 | ✅ | L0/L1/L2 + 窗口级 OCR + PP-OCRv6；STT TTS CER 0.00%、真实人声 CER 13.64%、缓存 0.93s；VSCode 语音改代码 30/30=100% |
 | M5 操作学习 + 主动建议 | ✅ | 示范/受限探索、动作图执行、流程技能包（.owskill）、审批审计、主动建议四选；Notepad 示范→换参复用 2/2 |
 | M6 输入法融合 | 占位 | 前置条件 2 满足 / 3 部分 / 1 未启动，不实施 |
+| M4 前奏骨架 + TS SDK（2026-08-14 现状） | 🟡 骨架 | 云端执行骨架 `cloud_exec.rs`（v0.1 `LocalSimExecutor`：仓库快照 → 隔离执行 → diff 回传 → revert，凭据不落盘、审计完整；远端容器实现待后续）；computer-use 任务级审批（7.3 语义：`/computer-use/tasks|task|task/{id}/{action}|check|sensitive-check`，任务注册表 + 熔断 + CLI/桌面配套）；TypeScript SDK `clients/ts`（openapi.json → `schema.d.ts` → openapi-fetch 客户端，typecheck/build/test:unit 门禁） |
 
 ### C.3 质量门禁（2026-08-13 实测）
 

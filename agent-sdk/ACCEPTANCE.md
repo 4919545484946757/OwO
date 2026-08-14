@@ -229,7 +229,7 @@ scripts\skill-gate.ps1                    # 内置技能端到端门禁
 | 滚轮支持 | ✅ | `desktop_scroll`（tool + HTTP + executor），权限 Inject；滚动会话/聊天列表 |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 99） |
 
-## 二十八、v0.4.22 网络恢复后实机闭环复测（2026-08-13）
+## 十四、v0.4.22 网络恢复后实机闭环复测（2026-08-13）
 
 | 项 | 状态 | 证据 |
 |---|---|---|
@@ -338,7 +338,7 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 实机复测 | ⚠️ 网络仍不稳 | 视觉 Agent 多轮任务在本地代理下仍出现后续调用挂起（4 分钟无数据，超时看门狗应触发但未见退出，指向代理连接级问题）；单轮模型冒烟正常（6.4s） |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
 
-## 二十七、v0.4.21 全本地工具调用验证（2026-08-13）
+## 二十三、v0.4.21 全本地工具调用验证（2026-08-13）
 
 | 项 | 状态 | 证据 |
 |---|---|---|
@@ -347,7 +347,7 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 结论 | ⚠️ | 本地工具调用链路可用；复杂任务建议用 DeepSeek（网络稳定时）或等待 GPU/更大算力；llama3.2 适合简单工具轮 |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
 
-## 二十六、v0.4.20 定位多轮卡死根因：screen_ocr boxes（2026-08-13）
+## 二十四、v0.4.20 定位多轮卡死根因：screen_ocr boxes（2026-08-13）
 
 | 项 | 状态 | 证据 |
 |---|---|---|
@@ -365,7 +365,7 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 本地工具调用模型 | ⏳ 进行中 | qwen2.5:0.5b/3b 均不触发 tool_calls；llama3.2:3b 拉取中（工具调用能力强，待验证） |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
 
-## 二十四、v0.4.18 本地文本模型工具调用评估（2026-08-13）
+## 二十六、v0.4.18 本地文本模型工具调用评估（2026-08-13）
 
 | 项 | 状态 | 证据 |
 |---|---|---|
@@ -374,7 +374,7 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 结论 | ⚠️ | 全本地多轮 Agent 需更强工具调用模型（如 llama3.2:3b 或 7B+）或 DeepSeek 网络恢复；当前继续用 DeepSeek（网络恢复后）+ 本地 VL 做视觉验证 |
 | 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 109） |
 
-## 二十三、v0.4.17 本地模型通道与回归门禁（2026-08-13）
+## 二十七、v0.4.17 本地模型通道与回归门禁（2026-08-13）
 
 | 项 | 状态 | 证据 |
 |---|---|---|
@@ -387,7 +387,7 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 环境变量：`PADDLE_OCR_TOKEN`、`PADDLE_OCR_MODEL`（默认 PP-OCRv6）、`PADDLE_OCR_API_URL`、
 `PADDLE_OCR_PROXY`（可选）、`OWO_OCR_STRICT=paddle`（诊断）。本地 ONNX 部署（RapidOCR/Paddle 模型）为后续替换项。
 
-## 十四、v0.4.8 真实环境迭代修复（2026-08-13）
+## 二十八、v0.4.8 真实环境迭代修复（2026-08-13）
 
 | 项 | 状态 | 证据 |
 |---|---|---|
@@ -668,7 +668,7 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 
 说明：M-E 验收“无网本地识别与云 API 字符级重合率 ≥90%”在本环境以“渲染已知文本 LCS=1.00”口径验证；
 云 API 对照（需 PADDLE_OCR_TOKEN）与真实桌面截图口径留作外部验收项。改动仍未 git 提交。
-## 四十八、v0.5.5 Agent 核心能力 HTTP 化 + 桌面面板（2026-08-13，未提交）
+## 四十九、v0.5.5 Agent 核心能力 HTTP 化 + 桌面面板（2026-08-13，未提交）
 
 对标 Codex：CLI 独占的子代理（@explore/@subagent）、AGENTS.md 项目规则、MCP 服务器管理
 接入 HTTP API 与桌面工作台。
@@ -686,7 +686,7 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 
 说明：本轮文件变更 `agent.rs`（registry RwLock）、`tools.rs`（Arc<dyn Tool> + get）、`owo-agent-server/lib.rs`（三组接口 + OpenAPI）、`mcp_tests.rs`（热注册契约）、`desktop/web/*`（三面板）；与 OCR 专项无文件交集。测试残留 AGENTS.md 已清理。
 
-## 四十九、v0.5.6 Traces 可观测 HTTP 化 + 会话导出 UI（2026-08-13，未提交）
+## 五十、v0.5.6 Traces 可观测 HTTP 化 + 会话导出 UI（2026-08-13，未提交）
 
 M2 验收项"trace 可回放"补齐 HTTP 面；桌面端 P0 补会话导出入口。
 
@@ -702,7 +702,7 @@ M2 验收项"trace 可回放"补齐 HTTP 面；桌面端 P0 补会话导出入�
 
 说明：本轮文件变更 `owo-agent-server/lib.rs`（traces 两接口 + OpenAPI）、`desktop/web/*`（Traces 面板 + 导出按钮）、`owo-agent-cli/main.rs`（恢复 merge_plugin_mcp）。与 OCR 专项无文件交集；与另一模型在 server lib.rs 的并行改动（插件进程级热卸载）共存并通过全部测试。
 
-## 五十、v0.5.7 上下文管理可视化 + AGENTS.md 模板（2026-08-13，未提交）
+## 五十一、v0.5.7 上下文管理可视化 + AGENTS.md 模板（2026-08-13，未提交）
 
 对标 Codex 的上下文状态显示与 init 命令桌面化；文档 5.2.2 上下文预算可视化落地。
 
@@ -719,3 +719,13 @@ M2 验收项"trace 可回放"补齐 HTTP 面；桌面端 P0 补会话导出入�
 | 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 200 + 集成 13+） |
 
 说明：本轮文件变更 `agent.rs`（config 访问器 + 3 测试）、`owo-agent-server/lib.rs`（context 接口 + 模板接口 + OpenAPI）、`eval.rs`/`eval_tests.rs`（补齐另一模型 EvalCase 扩展的中间态）、`desktop/web/*`（上下文仪表 + 模板按钮）。与 OCR 专项零交集；与另一模型并行改动（EvalCase 落盘断言、MCP 热卸载）共存通过。
+
+## 四十九、v0.5.8 HTTP 契约恢复 + 路由面契约测试（2026-08-14）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 9 组 HTTP 接口恢复 | ✅ | /locate/query、/memory/recall、/skills/health、/plugins、/traces、/subagent/run、/project/rules、/mcp、/session/{id}/context 全部恢复注册（此前因 lib.rs 重建回归丢失返回 404） |
+| 路由面契约测试 | ✅ 2/2 | route_contract_tests：13 条 v0.5 路由非 404 断言 + computer-use sensitive-check JSON 验证；防未来回归 |
+| 编码损坏重建 | ✅ | 两个并行 agent 以错误编码写入 lib.rs 导致 GBK mojibake（117 处损坏）；以 git HEAD 为基线重建 + 从损坏备份提取修复 14 组 handler |
+| 回归门禁 | ✅ 2/2 | qq-learn PASS、qq-observe PASS（服务端恢复后 observe 链路正常） |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；cargo test --workspace 293 项全绿（core 220 + 集成 61 + server 5 + CLI 7） |

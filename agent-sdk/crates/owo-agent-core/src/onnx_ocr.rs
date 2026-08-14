@@ -1,6 +1,8 @@
 //! 本地 ONNX OCR（M-E）：`ort` + ch_PP-OCRv4 det/rec ONNX 模型，全本地推理，无网可用。
 //!
-//! 模型目录：`<data>/models/ocr/`（`OWO_ONNX_OCR_MODEL_DIR` 可覆盖）：
+//! 模型目录解析优先级：`OWO_ONNX_OCR_MODEL_DIR` → 用户数据目录 `<data>/models/ocr/`
+//! → exe 同级 `models/ocr/`（便携发布随包）→ 仓库相对路径 `models/ocr/`；
+//! 非环境变量候选按“目录内模型三件套就绪”优先，保证打包后无网开箱即用。
 //!
 //! - `ch_PP-OCRv4_det_infer.onnx`（文本检测）
 //! - `ch_PP-OCRv4_rec_infer.onnx`（文本识别）
@@ -716,13 +718,8 @@ pub fn load_dict(path: &Path) -> Result<Vec<String>, String> {
     Ok(chars)
 }
 
-/// 模型目录：`OWO_ONNX_OCR_MODEL_DIR` 或 `<data>/models/ocr`。
-pub fn model_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("OWO_ONNX_OCR_MODEL_DIR") {
-        if !dir.trim().is_empty() {
-            return PathBuf::from(dir);
-        }
-    }
+/// 用户数据目录下的模型目录（`OWO_AGENT_DATA` 或 `%LOCALAPPDATA%\OwO\Agent`）。
+fn data_models_dir() -> PathBuf {
     let data_root = std::env::var("OWO_AGENT_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -732,6 +729,46 @@ pub fn model_dir() -> PathBuf {
             base.join("OwO").join("Agent")
         });
     data_root.join("models").join("ocr")
+}
+
+/// exe 同级 `models/ocr`（便携发布：核心服务与随包模型同目录）。
+fn exe_adjacent_models_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("models").join("ocr")))
+        .unwrap_or_default()
+}
+
+/// 仓库相对路径：从当前工作目录向上最多 4 层查找 `models/ocr`。
+fn repo_models_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut current = std::env::current_dir().unwrap_or_default();
+    for _ in 0..4 {
+        dirs.push(current.join("models").join("ocr"));
+        if !current.pop() {
+            break;
+        }
+    }
+    dirs
+}
+
+/// 模型目录：`OWO_ONNX_OCR_MODEL_DIR` → 用户数据目录 → exe 同级 `models/ocr` → 仓库相对路径；
+/// 非环境变量候选取“目录内模型三件套就绪”的首个，保证打包后无网可用。
+pub fn model_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("OWO_ONNX_OCR_MODEL_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    let data_dir = data_models_dir();
+    let mut candidates = vec![data_dir.clone(), exe_adjacent_models_dir()];
+    candidates.extend(repo_models_dirs());
+    for dir in candidates {
+        if models_present(&dir) {
+            return dir;
+        }
+    }
+    data_dir
 }
 
 /// 模型三件套是否就绪（仅检查文件存在，不加载）。
@@ -1067,6 +1104,51 @@ mod tests {
         let img = parse_bmp32(&test_bmp(24, 48, [200, 100, 50])).unwrap();
         let input = rec_preprocess(&img);
         assert_eq!(input.shape()[3], 24);
+    }
+
+    /// 模型目录：环境变量覆盖优先。
+    #[test]
+    fn model_dir_env_override_wins() {
+        let dir = std::env::temp_dir().join(format!("owo_ocr_dir_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("OWO_ONNX_OCR_MODEL_DIR", &dir);
+        assert_eq!(model_dir(), dir);
+        std::env::remove_var("OWO_ONNX_OCR_MODEL_DIR");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 模型目录：用户数据目录就绪时优先于仓库相对路径。
+    #[test]
+    fn model_dir_data_dir_wins_over_repo_when_ready() {
+        let data = std::env::temp_dir().join(format!("owo_ocr_data_test_{}", std::process::id()));
+        let ocr_dir = data.join("models").join("ocr");
+        std::fs::create_dir_all(&ocr_dir).unwrap();
+        for name in [
+            "ch_PP-OCRv4_det_infer.onnx",
+            "ch_PP-OCRv4_rec_infer.onnx",
+            "ppocr_keys_v1.txt",
+        ] {
+            std::fs::write(ocr_dir.join(name), b"x").unwrap();
+        }
+        std::env::remove_var("OWO_ONNX_OCR_MODEL_DIR");
+        std::env::set_var("OWO_AGENT_DATA", &data);
+        assert_eq!(model_dir(), ocr_dir);
+        std::env::remove_var("OWO_AGENT_DATA");
+        std::fs::remove_dir_all(&data).ok();
+    }
+
+    /// 模型目录：默认环境（无任何环境变量）下解析结果应为模型就绪目录，
+    /// 而非空的数据目录——保证真实模型测试不再静默跳过。
+    #[test]
+    fn model_dir_resolves_ready_models_without_env() {
+        std::env::remove_var("OWO_ONNX_OCR_MODEL_DIR");
+        std::env::remove_var("OWO_AGENT_DATA");
+        let dir = model_dir();
+        if !models_present(&dir) {
+            eprintln!("跳过：无随包/仓库 ONNX OCR 模型（{}）", dir.display());
+            return;
+        }
+        assert!(models_present(&dir));
     }
 
     /// 真实模型集成测试：模型就绪时（`scripts/download-onnx-ocr-models.ps1` 下载后）

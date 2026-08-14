@@ -115,6 +115,17 @@ async function api(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
+// 统一友好错误：404/405/5xx 提示"服务接口不可用"，其余透传原错误。
+function friendlyError(error) {
+  const msg = String((error && error.message) || error || "");
+  const match = msg.match(/^(\d{3}):/);
+  const status = match ? Number(match[1]) : 0;
+  if (status === 404 || status === 405 || status >= 500) {
+    return `服务接口不可用（HTTP ${status}）`;
+  }
+  return msg || "未知错误";
+}
+
 function addMessage(kind, text, meta = "") {
   const div = document.createElement("div");
   div.className = `msg ${kind}`;
@@ -408,8 +419,8 @@ async function refreshPlugins() {
       list.appendChild(li);
     }
     if (!plugins.length) list.innerHTML = '<li class="sub">未发现插件</li>';
-  } catch (_) {
-    $("pluginList").innerHTML = '<li class="sub">插件读取失败</li>';
+  } catch (error) {
+    $("pluginList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
   }
 }
 
@@ -476,8 +487,8 @@ async function refreshPackages() {
       list.appendChild(li);
     }
     if (!packages.length) list.innerHTML = '<li class="sub">暂无流程技能包（先录制再沉淀）</li>';
-  } catch (_) {
-    $("packageList").innerHTML = '<li class="sub">加载失败</li>';
+  } catch (error) {
+    $("packageList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
   }
 }
 
@@ -541,8 +552,8 @@ async function refreshAutomations() {
       list.appendChild(li);
     }
     if (!tasks.length) list.innerHTML = '<li class="sub">暂无自动化任务</li>';
-  } catch (_) {
-    $("automationList").innerHTML = '<li class="sub">加载失败</li>';
+  } catch (error) {
+    $("automationList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
   }
 }
 
@@ -590,8 +601,8 @@ async function refreshReminders() {
       list.appendChild(li);
     }
     if (!reminders.length) list.innerHTML = '<li class="sub">暂无提醒</li>';
-  } catch (_) {
-    $("reminderList").innerHTML = '<li class="sub">加载失败</li>';
+  } catch (error) {
+    $("reminderList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
   }
 }
 
@@ -617,8 +628,8 @@ async function refreshSettings() {
       $("settingsEditor").value = JSON.stringify(settings, null, 2);
       $("settingsEditor").dataset.seeded = "1";
     }
-  } catch (_) {
-    $("settingsPreview").textContent = "读取失败";
+  } catch (error) {
+    $("settingsPreview").textContent = friendlyError(error);
   }
 }
 
@@ -635,8 +646,8 @@ async function refreshUsage() {
       ` ｜ token 预算：${budget.token_cap ?? "未配置"}` +
       ` ｜ 成本预算：${budget.cost_cap_usd != null ? "$" + budget.cost_cap_usd : "未配置"}` +
       ` ｜ 状态：${status}`;
-  } catch (_) {
-    $("usagePanel").textContent = "用量读取失败";
+  } catch (error) {
+    $("usagePanel").textContent = friendlyError(error);
   }
 }
 
@@ -712,8 +723,8 @@ async function refreshSuggestions() {
       list.appendChild(li);
     }
     if (!suggestions.length) list.innerHTML = '<li class="sub">暂无建议</li>';
-  } catch (_) {
-    $("suggestionList").innerHTML = '<li class="sub">加载失败</li>';
+  } catch (error) {
+    $("suggestionList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
   }
 }
 
@@ -737,8 +748,8 @@ async function refreshAudit() {
       list.appendChild(li);
     }
     if (!entries.length) list.innerHTML = '<li class="sub">暂无审计记录</li>';
-  } catch (_) {
-    $("auditList").innerHTML = '<li class="sub">加载失败</li>';
+  } catch (error) {
+    $("auditList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
   }
 }
 
@@ -902,8 +913,10 @@ async function refreshSessionContext(sessionId) {
       ? `最近压缩摘要：\n${ctx.last_compaction.slice(0, 300)}`
       : "会话上下文状态";
     bar.classList.remove("hidden");
-  } catch (_) {
-    bar.classList.add("hidden");
+  } catch (error) {
+    $("contextLabel").textContent = friendlyError(error);
+    bar.title = "会话上下文状态";
+    bar.classList.remove("hidden");
   }
 }
 
@@ -1258,8 +1271,8 @@ async function refreshSkills() {
       list.appendChild(li);
     }
     if (!skills.length) list.innerHTML = '<li class="sub">暂无技能</li>';
-  } catch (_) {
-    $("skillList").innerHTML = '<li class="sub">加载失败</li>';
+  } catch (error) {
+    $("skillList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
   }
 }
 
@@ -1279,8 +1292,8 @@ async function refreshObservations() {
       list.appendChild(li);
     }
     if (!(data.observations || []).length) list.innerHTML = '<li class="sub">暂无观察记录</li>';
-  } catch (_) {
-    $("observationList").innerHTML = '<li class="sub">读取失败</li>';
+  } catch (error) {
+    $("observationList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
   }
 }
 
@@ -1325,8 +1338,8 @@ async function refreshSkillHealth() {
       container.appendChild(row);
     }
     if (!skills.length) container.textContent = "暂无技能健康度数据";
-  } catch (_) {
-    $("healthList").textContent = "读取失败";
+  } catch (error) {
+    $("healthList").textContent = friendlyError(error);
   }
 }
 
@@ -1384,8 +1397,8 @@ async function refreshTraces() {
       list.appendChild(li);
     }
     if (!traces.length) list.innerHTML = '<li class="sub">暂无轨迹（完成回合后自动记录）</li>';
-  } catch (_) {
-    $("traceList").innerHTML = '<li class="sub">读取失败</li>';
+  } catch (error) {
+    $("traceList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
   }
 }
 
@@ -1484,8 +1497,8 @@ async function refreshProjectRules() {
         }
       }
     }
-  } catch (_) {
-    $("projectRulesInfo").textContent = "读取失败";
+  } catch (error) {
+    $("projectRulesInfo").textContent = friendlyError(error);
   }
 }
 
@@ -1541,8 +1554,8 @@ async function refreshMcp() {
       list.appendChild(li);
     }
     if (!(data.servers || []).length) list.innerHTML = '<li class="sub">暂无 MCP 服务器</li>';
-  } catch (_) {
-    $("mcpList").innerHTML = '<li class="sub">读取失败</li>';
+  } catch (error) {
+    $("mcpList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
   }
 }
 
@@ -1598,8 +1611,121 @@ async function refreshWhitelist() {
       });
       list.appendChild(li);
     }
-  } catch (_) {
-    $("whitelistList").innerHTML = '<li class="sub">加载失败</li>';
+  } catch (error) {
+    $("whitelistList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
+  }
+}
+
+// ---------- Computer-use 任务级审批（P2，文档 7.3 语义：批准目标应用+描述+最长时长+允许动作） ----------
+
+async function refreshComputerTasks() {
+  try {
+    const data = await api("/computer-use/tasks");
+    const list = $("computerTaskList");
+    list.innerHTML = "";
+    const tasks = data.tasks || [];
+    for (const task of tasks) {
+      const li = document.createElement("li");
+      const status = task.state || "unknown";
+      const elapsed = task.elapsed_ms != null ? `${Math.round(task.elapsed_ms / 1000)}s / ` : "";
+      const cap = task.max_duration_secs != null ? `${task.max_duration_secs}s` : "无上限";
+      li.innerHTML =
+        `<strong>${esc(task.app || "")}：${esc(task.description || "")}</strong>` +
+        `<span class="sub">${esc(status)} ｜ ${elapsed}${cap} ｜ 动作 ${esc((task.allowed_actions || []).join(",")) || "全部"}</span>`;
+      if (status === "pending_approval") {
+        const approve = document.createElement("button");
+        approve.textContent = "批准";
+        approve.addEventListener("click", async () => {
+          try {
+            await api(`/computer-use/task/${encodeURIComponent(task.id)}/approve`, { method: "POST" });
+            await refreshComputerTasks();
+          } catch (error) {
+            addMessage("error", `批准失败：${friendlyError(error)}`);
+          }
+        });
+        li.appendChild(approve);
+        const deny = document.createElement("button");
+        deny.textContent = "拒绝";
+        deny.addEventListener("click", async () => {
+          try {
+            await api(`/computer-use/task/${encodeURIComponent(task.id)}/abort`, { method: "POST" });
+            await refreshComputerTasks();
+          } catch (error) {
+            addMessage("error", `拒绝失败：${friendlyError(error)}`);
+          }
+        });
+        li.appendChild(deny);
+      } else if (status === "running") {
+        const pause = document.createElement("button");
+        pause.textContent = "暂停";
+        pause.addEventListener("click", async () => {
+          try {
+            await api(`/computer-use/task/${encodeURIComponent(task.id)}/pause`, { method: "POST" });
+            await refreshComputerTasks();
+          } catch (error) {
+            addMessage("error", `暂停失败：${friendlyError(error)}`);
+          }
+        });
+        li.appendChild(pause);
+        const abort = document.createElement("button");
+        abort.textContent = "终止";
+        abort.addEventListener("click", async () => {
+          try {
+            await api(`/computer-use/task/${encodeURIComponent(task.id)}/abort`, { method: "POST" });
+            await refreshComputerTasks();
+          } catch (error) {
+            addMessage("error", `终止失败：${friendlyError(error)}`);
+          }
+        });
+        li.appendChild(abort);
+      } else if (status === "paused") {
+        const resume = document.createElement("button");
+        resume.textContent = "恢复";
+        resume.addEventListener("click", async () => {
+          try {
+            await api(`/computer-use/task/${encodeURIComponent(task.id)}/resume`, { method: "POST" });
+            await refreshComputerTasks();
+          } catch (error) {
+            addMessage("error", `恢复失败：${friendlyError(error)}`);
+          }
+        });
+        li.appendChild(resume);
+      }
+      list.appendChild(li);
+    }
+    if (!tasks.length) list.innerHTML = '<li class="sub">暂无 computer-use 任务</li>';
+  } catch (error) {
+    $("computerTaskList").innerHTML = `<li class="sub">${esc(friendlyError(error))}</li>`;
+  }
+}
+
+async function createComputerTask() {
+  const app = $("cuApp").value.trim();
+  const description = $("cuDesc").value.trim();
+  if (!app || !description) {
+    addMessage("system", "请填写目标应用与任务描述");
+    return;
+  }
+  const maxDurationSecs = parseInt($("cuMaxDur").value, 10) || 120;
+  const allowedActions = $("cuActions").value.split(",").map((s) => s.trim()).filter(Boolean);
+  try {
+    const result = await api("/computer-use/task", {
+      method: "POST",
+      body: JSON.stringify({
+        app,
+        description,
+        max_duration_secs: maxDurationSecs,
+        allowed_actions: allowedActions,
+      }),
+    });
+    addMessage("system", `已创建 computer-use 任务（${result.id}），等待任务级审批`);
+    $("cuApp").value = "";
+    $("cuDesc").value = "";
+    $("cuMaxDur").value = "";
+    $("cuActions").value = "";
+    await refreshComputerTasks();
+  } catch (error) {
+    addMessage("error", `创建失败：${friendlyError(error)}`);
   }
 }
 
@@ -1704,6 +1830,10 @@ $("agentsTemplateBtn").addEventListener("click", () => generateAgentsTemplate())
 $("mcpForm").addEventListener("submit", (event) => {
   event.preventDefault();
   addMcpServer();
+});
+$("computerTaskForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  createComputerTask();
 });
 $("whitelistForm").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1819,6 +1949,7 @@ async function boot() {
     refreshProjectRules(),
     refreshMcp(),
     refreshTraces(),
+    refreshComputerTasks(),
   ]);
   setInterval(refreshPerception, 3000);
   setInterval(refreshLearn, 5000);
@@ -1835,6 +1966,7 @@ async function boot() {
   setInterval(refreshObservations, 30000);
   setInterval(refreshMcp, 20000);
   setInterval(refreshTraces, 15000);
+  setInterval(refreshComputerTasks, 15000);
 }
 
 boot();

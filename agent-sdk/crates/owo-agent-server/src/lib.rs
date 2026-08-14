@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 //! OwO Agent SDK HTTP 服务（M1 + v0.4）：session/turn/permission/diff/revert/abort + SSE，
 //! 以及 v0.4 接口：context.snapshot / perception.subscribe / learn.* / skill.verify /
@@ -16,12 +16,15 @@ use owo_agent_core::learn::{
     ActionType, LearnPipeline, LearnState, ProactiveEngine, ProactiveSuggestion, RecordedAction,
     SemanticAnchor, Sensitivity, SuggestionAction,
 };
+use owo_agent_core::locate::{locate, AnchorQuery};
 use owo_agent_core::perception::{SituationSnapshot, SituationStore};
 use owo_agent_core::permissions::{Approver, Decision, PermissionRequest};
+use owo_agent_core::scene::{Evidence, EvidenceSource, GraphElement};
 use owo_agent_core::session::{Session, SessionStore};
 use owo_agent_core::validate_skill_package;
 use owo_agent_core::whitelist::{Whitelist, WhitelistEntry};
 use owo_agent_core::Agent;
+use owo_agent_core::SceneElement;
 use owo_agent_protocol::{
     CreateSessionRequest, EvalRunRequest, FileDiff, ForkRequest, HealthResponse,
     PermissionResponse, RewindRequest, SessionInfo, SseEvent, TurnRequest,
@@ -237,6 +240,24 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/settings/egress", post(settings_egress))
         .route("/whitelist", get(whitelist_list))
         .route("/whitelist/manage", post(whitelist_manage))
+        .route("/session/{id}/context", get(session_context))
+        .route("/skills/health", get(skills_health))
+        .route("/skills/health/{name}/reset", post(skill_health_reset))
+        .route("/plugins", get(plugins_list))
+        .route("/plugins/{id}/enabled", post(plugin_enabled))
+        .route("/subagent/run", post(subagent_run))
+        .route(
+            "/project/rules",
+            get(project_rules_get).post(project_rules_post),
+        )
+        .route("/project/rules/template", post(project_rules_template))
+        .route("/mcp", get(mcp_list))
+        .route("/mcp/add", post(mcp_add))
+        .route("/mcp/remove", post(mcp_remove))
+        .route("/locate/query", post(locate_query))
+        .route("/traces", get(traces_list))
+        .route("/traces/{index}", get(trace_show))
+        .route("/memory/recall", get(memory_recall))
         .route("/computer-use/tasks", get(computer_tasks_list))
         .route("/computer-use/task", post(computer_task_create))
         .route(
@@ -339,7 +360,30 @@ async fn openapi_spec() -> Json<Value> {
             "/settings": { "get": { "operationId": "settingsGet", "responses": { "200": { "description": "workspace settings" } } }, "post": { "operationId": "settingsUpdate", "responses": { "200": { "description": "workspace settings" } } } },
             "/settings/egress": { "post": { "operationId": "settingsEgress", "responses": { "200": { "description": "cloud enabled state" } } } },
             "/whitelist": { "get": { "operationId": "whitelistList", "responses": { "200": { "description": "whitelist entries" } } } },
-            "/whitelist/manage": { "post": { "operationId": "whitelistManage", "responses": { "200": { "description": "whitelist entries" } } } }
+            "/session/{id}/context": { "get": { "operationId": "sessionContext", "parameters": [path_param("id")], "responses": { "200": { "description": "context stats: messages/tokens/budget/compaction/rules" } } } },
+            "/skills/health": { "get": { "operationId": "skillsHealth", "responses": { "200": { "description": "flow skill health overview" } } } },
+            "/skills/health/{name}/reset": { "post": { "operationId": "skillHealthReset", "parameters": [path_param("name")], "responses": { "200": { "description": "health reset" } } } },
+            "/plugins": { "get": { "operationId": "pluginsList", "responses": { "200": { "description": "discovered plugins with manifests" } } } },
+            "/plugins/{id}/enabled": { "post": { "operationId": "pluginEnabled", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "enabled": { "type": "boolean" } }, "required": ["enabled"] } } } }, "responses": { "200": { "description": "plugin enabled state" } } } },
+            "/subagent/run": { "post": { "operationId": "subagentRun", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "prompt": { "type": "string" }, "read_only": { "type": "boolean" }, "model": { "type": "string" } }, "required": ["prompt"] } } } }, "responses": { "200": { "description": "subagent execution result" } } } },
+            "/project/rules": { "get": { "operationId": "projectRulesGet", "responses": { "200": { "description": "AGENTS.md/CLAUDE.md rules with injection status" } } }, "post": { "operationId": "projectRulesPost", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "content": { "type": "string" } }, "required": ["content"] } } } }, "responses": { "200": { "description": "rules written" } } } },
+            "/project/rules/template": { "post": { "operationId": "projectRulesTemplate", "responses": { "200": { "description": "AGENTS.md template written" } } } },
+            "/mcp": { "get": { "operationId": "mcpList", "responses": { "200": { "description": "configured MCP servers" } } } },
+            "/mcp/add": { "post": { "operationId": "mcpAdd", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "transport": { "type": "string", "enum": ["stdio", "http"] }, "command": { "type": "string" }, "args": { "type": "array", "items": { "type": "string" } }, "url": { "type": "string" } }, "required": ["name", "transport"] } } } }, "responses": { "200": { "description": "server added and connected" } } } },
+            "/mcp/remove": { "post": { "operationId": "mcpRemove", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } } } }, "responses": { "200": { "description": "server removed" } } } },
+            "/locate/query": { "post": { "operationId": "locateQuery", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "app_id": { "type": "string" }, "role": { "type": "string" }, "name_pattern": { "type": "string" }, "parent": { "type": "string" }, "stable_id": { "type": "string" }, "min_confidence": { "type": "number" } }, "required": [] } } } }, "responses": { "200": { "description": "multi-source locate result" } } } },
+            "/traces": { "get": { "operationId": "tracesList", "responses": { "200": { "description": "trace list" } } } },
+            "/traces/{index}": { "get": { "operationId": "traceShow", "parameters": [path_param("index")], "responses": { "200": { "description": "trace detail" } } } },
+            "/memory/observations": { "get": { "operationId": "memoryObservations", "responses": { "200": { "description": "situation memory observations" } } } },
+            "/memory/recall": { "get": { "operationId": "memoryRecall", "responses": { "200": { "description": "semantic memory recall" } } } },
+            "/memory/clear": { "post": { "operationId": "memoryClear", "responses": { "200": { "description": "memory cleared" } } } },
+            "/memory/mine-skill": { "post": { "operationId": "memoryMineSkill", "responses": { "200": { "description": "mined flow skill package" } } } },
+            "/whitelist/manage": { "post": { "operationId": "whitelistManage", "responses": { "200": { "description": "whitelist entries" } } } },
+            "/computer-use/tasks": { "get": { "operationId": "computerTasksList", "responses": { "200": { "description": "computer-use task list" } } } },
+            "/computer-use/task": { "post": { "operationId": "computerTaskCreate", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "target_app": { "type": "string" }, "description": { "type": "string" }, "allowed_actions": { "type": "array", "items": { "type": "string" } }, "max_duration_ms": { "type": "integer" } }, "required": ["target_app"] } } } }, "responses": { "200": { "description": "task created (Pending)" } } } },
+            "/computer-use/task/{id}/{action}": { "post": { "operationId": "computerTaskTransition", "parameters": [path_param("id"), path_param("action")], "responses": { "200": { "description": "task state transitioned" } } } },
+            "/computer-use/task/{id}/check/{action}": { "get": { "operationId": "computerTaskCheck", "parameters": [path_param("id"), path_param("action")], "responses": { "200": { "description": "task executable check" } } } },
+            "/computer-use/sensitive-check": { "post": { "operationId": "computerSensitiveCheck", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "role": { "type": "string" }, "ocr_text": { "type": "string" } }, "required": ["name"] } } } }, "responses": { "200": { "description": "sensitive ui detection" } } } }
         },
         "components": {
             "schemas": {
@@ -3229,6 +3273,690 @@ pub async fn start_observer(state: Arc<AppState>) {
             }
         }
     }
+}
+
+// ---------- v0.5 恢复：M-A 定位 / M-C 记忆 / M-D 技能健康 / 插件 / 子代理 / MCP / Traces ----------
+// struct PluginEnabledRequest (行 636-638)
+#[derive(serde::Deserialize)]
+struct PluginEnabledRequest {
+    enabled: bool,
+}
+
+// struct SubagentRunRequest (行 731-737)
+#[derive(serde::Deserialize)]
+struct SubagentRunRequest {
+    prompt: String,
+    /// true 为只读探索模式（对齐 CLI `@explore`）；false 为通用子代理（对齐 `@subagent`）。
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+// struct McpAddRequest (行 920-933)
+#[derive(serde::Deserialize)]
+struct McpAddRequest {
+    name: String,
+    /// "stdio" 或 "http"
+    #[serde(default = "default_mcp_transport")]
+    transport: String,
+    /// stdio 传输时的启动命令
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    /// http 传输时的端点 URL
+    #[serde(default)]
+    url: Option<String>,
+}
+
+fn default_mcp_transport() -> String {
+    "stdio".to_string()
+}
+
+// struct McpRemoveRequest (行 990-992)
+#[derive(serde::Deserialize)]
+struct McpRemoveRequest {
+    name: String,
+}
+
+fn load_mcp_configs(root: &Path) -> Vec<owo_agent_core::McpServerConfig> {
+    std::fs::read_to_string(root.join("mcp-servers.json"))
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_mcp_configs(root: &Path, configs: &[owo_agent_core::McpServerConfig]) {
+    if let Ok(content) = serde_json::to_string_pretty(configs) {
+        let _ = std::fs::write(root.join("mcp-servers.json"), content);
+    }
+}
+
+// ==== session_context (备份行 1332-1365) ====
+async fn session_context(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = load_session(&state, &id)?;
+    let messages: Vec<owo_agent_core::ChatMessage> = session.messages.clone();
+    let estimated = owo_agent_core::estimate_tokens(&messages);
+    let rules = owo_agent_core::context::load_project_rules(&session.workspace);
+    let config = state.agent.config();
+    let mut last_compaction: Option<String> = None;
+    // 反向找最近的压缩摘要（system 消息以"历史摘要"开头）。
+    for message in messages.iter().rev() {
+        if message.role == "system"
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.starts_with("历史摘要"))
+        {
+            last_compaction = message.content.clone();
+            break;
+        }
+    }
+    Ok(Json(json!({
+        "session_id": id,
+        "messages": messages.len(),
+        "estimated_tokens": estimated,
+        "token_budget": config.token_budget,
+        "compaction_enabled": config.compaction_enabled,
+        "over_budget": estimated > config.token_budget,
+        "rules_injected": !rules.is_empty(),
+        "rules_chars": rules.chars().count(),
+        "last_compaction": last_compaction,
+    })))
+}
+
+// ==== skills_health (备份行 1111-1133) ====
+async fn skills_health(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let pipeline = state.pipeline.lock().map_err(poison)?;
+    let skills: Vec<Value> = pipeline
+        .store
+        .list_health()
+        .into_iter()
+        .map(|(name, health)| {
+            json!({
+                "name": name,
+                "state": health.state,
+                "attempts": health.attempts,
+                "successes": health.successes,
+                "success_rate": health.success_rate(),
+                "consecutive_failures": health.consecutive_failures,
+                "template_hit_rate": health.template_hit_rate(),
+                "recent_failures": health.recent_failures,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "count": skills.len(), "skills": skills })))
+}
+
+// ==== skill_health_reset (备份行 1136-1153) ====
+async fn skill_health_reset(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let pipeline = state.pipeline.lock().map_err(poison)?;
+    pipeline
+        .store
+        .reset_health(&name)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "learn",
+            "health-reset",
+            Some(name.clone()),
+            Some(true),
+            format!("重置技能健康度：{name}"),
+        );
+    }
+    Ok(Json(json!({ "ok": true, "name": name })))
+}
+
+// ==== plugins_list (备份行 600-633) ====
+async fn plugins_list(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let plugins = owo_agent_core::discover_plugins(&state.workspace, &state.data_root);
+    let plugin_state = state
+        .plugin_state
+        .lock()
+        .map(|guard| guard.disabled_ids())
+        .unwrap_or_default();
+    let items: Vec<Value> = plugins
+        .into_iter()
+        .map(|(path, manifest)| {
+            let enabled = !plugin_state.contains(&manifest.id);
+            let tools_hidden = state
+                .agent
+                .tool_disabled(&owo_agent_core::tools::mcp_tool_prefix(&manifest.id));
+            json!({
+                "id": manifest.id,
+                "name": manifest.name,
+                "version": manifest.version,
+                "description": manifest.description,
+                "enabled": enabled,
+                "tools_hidden": tools_hidden,
+                "permissions": manifest.permissions,
+                "mcp": manifest.mcp.as_ref().map(|mcp| json!({
+                    "name": mcp.name,
+                    "transport": mcp.transport,
+                    "command": mcp.command,
+                    "args": mcp.args,
+                })),
+                "manifest_path": path.to_string_lossy(),
+            })
+        })
+        .collect();
+    Json(json!({ "count": items.len(), "plugins": items }))
+}
+
+// ==== plugin_enabled (备份行 642-726) ====
+async fn plugin_enabled(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<PluginEnabledRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    {
+        let mut plugin_state = state.plugin_state.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "插件状态锁中毒".to_string(),
+            )
+        })?;
+        plugin_state
+            .set_enabled(&id, request.enabled)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    }
+    let prefix = owo_agent_core::tools::mcp_tool_prefix(&id);
+    let mut process_killed = false;
+    let mut tools = 0usize;
+    if request.enabled {
+        // 启用：重新连接插件 MCP 服务器并注册工具（幂等：先清理旧连接再连接）。
+        let _ = state.agent.shutdown_mcp_server(&id).await;
+        let discovered = owo_agent_core::discover_plugins(&state.workspace, &state.data_root);
+        let Some((manifest_path, manifest)) = discovered.into_iter().find(|(_, m)| m.id == id)
+        else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("插件 {id} 不存在（已从工作区移除？）"),
+            ));
+        };
+        match owo_agent_core::plugin_mcp_config(&manifest_path, &manifest) {
+            Some(config) => match state.agent.connect_mcp_server(&config).await {
+                Ok(count) => {
+                    tools = count;
+                    state.agent.set_tool_prefix_enabled(&prefix, true);
+                }
+                Err(error) => {
+                    // 连接失败仍标记启用（状态持久化），工具不可用由 UI 提示。
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        format!("插件 MCP 服务器连接失败：{error}"),
+                    ));
+                }
+            },
+            None => {
+                // 无 MCP 声明（纯视图插件）：仅恢复前缀。
+                state.agent.set_tool_prefix_enabled(&prefix, true);
+            }
+        }
+    } else {
+        // 禁用：进程级热卸载（kill 子进程 + 撤销工具）。
+        process_killed = state
+            .agent
+            .shutdown_mcp_server(&id)
+            .await
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    }
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "plugin",
+            "set-enabled",
+            Some(id.clone()),
+            Some(true),
+            format!(
+                "插件 {} 已{}（{}）",
+                id,
+                if request.enabled { "启用" } else { "禁用" },
+                if request.enabled {
+                    format!("重新连接 MCP，工具 {tools} 个")
+                } else if process_killed {
+                    "进程级热卸载（子进程已终止）".to_string()
+                } else {
+                    "无 MCP 子进程".to_string()
+                }
+            ),
+        );
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "id": id,
+        "enabled": request.enabled,
+        "process_killed": process_killed,
+        "tools": tools,
+    })))
+}
+
+// ==== subagent_run (备份行 742-788) ====
+async fn subagent_run(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SubagentRunRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    if request.prompt.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "缺少 prompt".to_string()));
+    }
+    let started = std::time::Instant::now();
+    let workspace = state.workspace.clone();
+    let model = request
+        .model
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string())
+        });
+    let agent = Arc::clone(&state.agent);
+    let text = agent
+        .run_subagent(&workspace, &model, &request.prompt, request.read_only)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let duration_ms = started.elapsed().as_millis() as u64;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "subagent",
+            if request.read_only { "explore" } else { "run" },
+            None,
+            Some(true),
+            format!(
+                "{}子代理完成（{}ms）：{}",
+                if request.read_only {
+                    "鍙??鎺㈢储"
+                } else {
+                    "通用"
+                },
+                duration_ms,
+                request.prompt.chars().take(120).collect::<String>()
+            ),
+        );
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "read_only": request.read_only,
+        "model": model,
+        "duration_ms": duration_ms,
+        "text": text,
+    })))
+}
+
+// ==== mcp_list (备份行 904-917) ====
+async fn mcp_list(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let configs = load_mcp_configs(&state.data_root);
+    let settings = owo_agent_core::Settings::load(&state.workspace);
+    let mut merged = configs.clone();
+    for server in settings.mcp_servers {
+        if !merged.iter().any(|config| config.name == server.name) {
+            merged.push(server);
+        }
+    }
+    Json(json!({
+        "count": merged.len(),
+        "servers": merged,
+    }))
+}
+
+// ==== mcp_add (备份行 940-987) ====
+async fn mcp_add(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<McpAddRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let name = request.name.trim().to_string();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "缺少名称 name".to_string()));
+    }
+    let config = owo_agent_core::McpServerConfig {
+        name: name.clone(),
+        transport: request.transport.clone(),
+        command: request.command.clone(),
+        args: request.args.clone(),
+        url: request.url.clone(),
+        timeout_ms: None,
+    };
+    let mut configs = load_mcp_configs(&state.data_root);
+    if configs.iter().any(|existing| existing.name == name) {
+        return Err((StatusCode::CONFLICT, format!("MCP 服务器 {name} 已存在")));
+    }
+    // 热连接（经 Agent 注册表：注册工具 + 记入进程注册表，可被 /mcp/remove 进程级卸载）。
+    let tool_count = state
+        .agent
+        .connect_mcp_server(&config)
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("连接失败：{error}")))?;
+    let connected = true;
+    configs.push(config);
+    save_mcp_configs(&state.data_root, &configs);
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "mcp",
+            "add",
+            Some(name.clone()),
+            Some(true),
+            format!(
+                "新增 MCP 服务器 {name}（{}，工具 {tool_count} 个）",
+                request.transport
+            ),
+        );
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "name": name,
+        "connected": connected,
+        "tools": tool_count,
+    })))
+}
+
+// ==== mcp_remove (备份行 995-1028) ====
+async fn mcp_remove(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<McpRemoveRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let name = request.name.trim().to_string();
+    let mut configs = load_mcp_configs(&state.data_root);
+    let before = configs.len();
+    configs.retain(|config| config.name != name);
+    if configs.len() == before {
+        return Err((StatusCode::NOT_FOUND, format!("MCP 服务器 {name} 不存在")));
+    }
+    save_mcp_configs(&state.data_root, &configs);
+    //
+    // 进程级卸载：kill stdio 子进程 + 撤销工具（前缀移除且禁用）。
+    let process_killed = state
+        .agent
+        .shutdown_mcp_server(&name)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "mcp",
+            "remove",
+            Some(name.clone()),
+            Some(true),
+            format!(
+                "移除 MCP 服务器 {name}（{}）",
+                if process_killed {
+                    "子进程已终止"
+                } else {
+                    "未连接"
+                }
+            ),
+        );
+    }
+    Ok(Json(
+        json!({ "ok": true, "name": name, "process_killed": process_killed }),
+    ))
+}
+
+// ==== locate_query (备份行 1049-1108) ====
+async fn locate_query(
+    State(state): State<Arc<AppState>>,
+    Json(query): Json<AnchorQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let elements = state.elements.lock().map_err(poison)?;
+    let elements: Vec<SceneElement> = if query.app_id.is_some() {
+        elements.list(query.app_id.as_deref().unwrap_or_default())
+    } else {
+        elements.list_all()
+    };
+    let mut graph_elements: Vec<GraphElement> = elements
+        .iter()
+        .map(|element| {
+            let mut entry = GraphElement::from_element(element.clone());
+            let source = if element.sources.contains(&"uia".to_string()) {
+                EvidenceSource::Uia
+            } else if element.sources.contains(&"ocr".to_string()) {
+                EvidenceSource::Ocr
+            } else {
+                EvidenceSource::Vision
+            };
+            entry.add_evidence(Evidence::new(source, element, element.confidence));
+            entry
+        })
+        .collect();
+    let mut graph = state.scene.lock().map_err(poison)?;
+    graph.update(None, None, std::mem::take(&mut graph_elements));
+
+    let result = locate(&graph, &query);
+    if let Some(best) = &result.best {
+        graph.record_hit(&best.id, &query.signature());
+    }
+    let candidates: Vec<Value> = result
+        .candidates
+        .iter()
+        .map(|(element, score)| {
+            json!({
+                "id": element.id,
+                "name": element.name,
+                "role": element.role_hint,
+                "rect": [element.x, element.y, element.width, element.height],
+                "score": score,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "count": candidates.len(),
+        "candidates": candidates,
+        "best": result.best.as_ref().map(|element| json!({
+            "id": element.id,
+            "name": element.name,
+            "role": element.role_hint,
+            "rect": [element.x, element.y, element.width, element.height],
+            "confidence": element.confidence,
+        })),
+        "uncertainty": result.uncertainty,
+        "used_source": result.used_source.map(|source| format!("{source:?}").to_lowercase()),
+        "reliable": result.is_reliable(),
+    })))
+}
+
+// ==== traces_list (备份行 1840-1871) ====
+async fn traces_list(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let traces = owo_agent_core::list_traces(&state.traces_dir);
+    let items: Vec<Value> = traces
+        .iter()
+        .filter_map(|path| {
+            let trace = owo_agent_core::load_trace(path).ok()?;
+            let preview: String = trace.prompt.chars().take(60).collect();
+            Some(json!({
+                        "index": {
+                            //
+            // index 为在倒序列表中的位置（回放用）。
+                            "position": traces.iter().position(|p| p == path).unwrap_or(0),
+                        },
+                        "file": path.file_name().unwrap_or_default().to_string_lossy(),
+                        "session_id": trace.session_id,
+                        "model": trace.model,
+                        "prompt_preview": preview,
+                        "prompt": trace.prompt,
+                        "started_at": trace.started_at,
+                        "duration_ms": trace.duration_ms,
+                        "steps": trace.steps,
+                        "has_final": trace.final_text.is_some(),
+                        "final_text": trace.final_text,
+                        "usage": json!({
+                            "prompt_tokens": trace.usage.prompt_tokens,
+                            "completion_tokens": trace.usage.completion_tokens,
+                            "total_tokens": trace.usage.total_tokens,
+                        }),
+                    }))
+        })
+        .collect();
+    Json(json!({ "count": items.len(), "traces": items }))
+}
+
+// ==== trace_show (备份行 1874-1901) ====
+async fn trace_show(
+    State(state): State<Arc<AppState>>,
+    AxumPath(index): AxumPath<usize>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let traces = owo_agent_core::list_traces(&state.traces_dir);
+    let path = traces.get(index).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("trace 序号越界（共 {} 条）", traces.len()),
+        )
+    })?;
+    let trace = owo_agent_core::load_trace(path)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(json!({
+        "index": index,
+        "file": path.file_name().unwrap_or_default().to_string_lossy(),
+        "session_id": trace.session_id,
+        "workspace": trace.workspace,
+        "model": trace.model,
+        "prompt": trace.prompt,
+        "started_at": trace.started_at,
+        "duration_ms": trace.duration_ms,
+        "steps": trace.steps,
+        "final_text": trace.final_text,
+        "usage": trace.usage,
+        "events": trace.events,
+    })))
+}
+
+// ==== memory_recall (备份行 2611-2631) ====
+async fn memory_recall(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let q = params
+        .get("q")
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "缂哄皯鏌ヨ?鍙傛暟 q".to_string()))?;
+    let top_k = params
+        .get("top_k")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(5)
+        .min(50);
+    let memory = state.memory.lock().map_err(poison)?;
+    let hits = memory.recall(q, top_k);
+    Ok(Json(json!({
+        "count": hits.len(),
+        "hits": hits,
+    })))
+}
+
+// ==== project_rules_get ====
+/// 项目规则列表：`GET /project/rules`。
+/// 读取工作区 AGENTS.md / CLAUDE.md 并报告注入状态（会话启动时是否会加载）。
+async fn project_rules_get(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let names = ["AGENTS.md", "CLAUDE.md"];
+    let rules: Vec<Value> = names
+        .iter()
+        .map(|name| {
+            let path = state.workspace.join(name);
+            let exists = path.is_file();
+            let content = if exists {
+                std::fs::read_to_string(&path).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            json!({
+                "name": name,
+                "path": path.to_string_lossy(),
+                "exists": exists,
+                "injected": exists,
+                "content": content,
+            })
+        })
+        .collect();
+    Json(json!({
+        "workspace": state.workspace.to_string_lossy(),
+        "count": rules.len(),
+        "rules": rules,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct ProjectRulesRequest {
+    content: String,
+}
+
+// ==== project_rules_post ====
+async fn project_rules_post(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ProjectRulesRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let path = state.workspace.join("AGENTS.md");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    std::fs::write(&path, &request.content)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "project",
+            "rules-write",
+            Some("AGENTS.md".to_string()),
+            Some(true),
+            format!(
+                "写入项目规则 AGENTS.md（{} 字符）",
+                request.content.chars().count()
+            ),
+        );
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "path": path.to_string_lossy(),
+        "chars": request.content.chars().count(),
+    })))
+}
+
+// ==== project_rules_template ====
+async fn project_rules_template(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    const TEMPLATE: &str = "# AGENTS.md
+
+<!-- 由 OwO Agent 生成，按项目实际情况修改。
+     该文件会被 Agent 在每次会话开始时注入，作为项目级规则。 -->
+
+## 项目说明
+
+- 一句话描述本项目做什么。
+
+## 开发规则
+
+- 写清楚构建命令、测试命令与代码约定。
+- 说明哪些目录/文件禁止修改。
+";
+    let path = state.workspace.join("AGENTS.md");
+    if path.exists() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("AGENTS.md 已存在（{}），未覆盖", path.display()),
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    std::fs::write(&path, TEMPLATE)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "project",
+            "rules-template",
+            Some("AGENTS.md".to_string()),
+            Some(true),
+            "生成 AGENTS.md 模板：init 等价操作".to_string(),
+        );
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "path": path.to_string_lossy(),
+        "chars": TEMPLATE.chars().count(),
+    })))
 }
 
 // ---------- computer-use 任务级审批（m4d 前奏，文档 7.3） ----------
