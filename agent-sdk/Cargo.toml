@@ -30,6 +30,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 axum = "0.8"
 tokio-stream = { version = "0.1", features = ["sync"] }
+ed25519-dalek = "2"
+sha2 = "0.10"
 owo-agent-protocol = { path = "crates/owo-agent-protocol" }
 owo-agent-core = { path = "crates/owo-agent-core" }
 owo-agent-server = { path = "crates/owo-agent-server" }

@@ -19,6 +19,8 @@ tracing.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 futures = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
+ed25519-dalek.workspace = true
+sha2.workspace = true
 zip = "2"
 png = "0.17"
 
