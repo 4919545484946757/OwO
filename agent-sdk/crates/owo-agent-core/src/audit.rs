@@ -14,7 +14,7 @@ pub struct AuditEntry {
 }
 
 /// M1 审计日志：进程内记录，后续接入 SQLite/文件。
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AuditLog {
     pub entries: Vec<AuditEntry>,
 }

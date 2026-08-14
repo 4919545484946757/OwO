@@ -1291,19 +1291,21 @@ v0.3 的 M1/M2（SDK 核心、CLI/TUI、HTTP、权限、AGENTS.md/Skills/子代�
 | M6 输入法融合 | 占位 | 前置条件 2 满足 / 3 部分 / 1 未启动，不实施 |
 | M4 前奏骨架 + TS SDK（2026-08-14 现状） | 🟡 骨架 | 云端执行骨架 `cloud_exec.rs`（v0.1 `LocalSimExecutor`：仓库快照 → 隔离执行 → diff 回传 → revert，凭据不落盘、审计完整；远端容器实现待后续）；computer-use 任务级审批（7.3 语义：`/computer-use/tasks|task|task/{id}/{action}|check|sensitive-check`，任务注册表 + 熔断 + CLI/桌面配套）；TypeScript SDK `clients/ts`（openapi.json → `schema.d.ts` → openapi-fetch 客户端，typecheck/build/test:unit 门禁） |
 
-### C.3 质量门禁（2026-08-13 实测）
+### C.3 质量门禁（2026-08-14 实测）
 
 | 门禁 | 结果 |
 |---|---|
 | `cargo fmt --all -- --check` | ✅ 干净 |
 | `cargo clippy --workspace --all-targets -D warnings` | ✅ 0 警告 |
-| `cargo test --workspace` | ✅ 全绿（core lib 196 + 集成 55，共 251 项） |
+| `cargo test --workspace` | ✅ 全绿 294 项（core lib 220 + 集成 61 + server 6 + CLI 7；集成=audit 3/cloud_exec 7/eval 3/loop 20/mcp 13/memory_health 6/plugin_lifecycle 3/scene_locate 6） |
 | `scripts/skill-gate.ps1` | ✅ 四技能 12 用例 PASS |
-| `scripts/run-eval-gate.ps1 -Threshold 0.8` | ✅ 20/20 = 100% |
+| `scripts/run-eval-gate.ps1 -Threshold 0.8` | ⏭️ 本轮未跑（需 OPENAI_API_KEY，外部依赖；历史 20/20 = 100% 记录于 2026-08-13） |
 | `scripts/sim-regression.py` | ✅ qq-learn + qq-observe 2/2 PASS |
-| 新契约测试 | ✅ `scene_locate_tests` 6/6、`memory_health_tests` 6/6、`audit_search_tests` 3/3、`plugin_lifecycle_tests` 3/3、MCP 7/7 |
-| HTTP 冒烟 | ✅ 会话/审批/diff/感知/学习/分享/STT/自动化/执行 全链路 |
-| 打包 | ✅ 便携 zip + NSIS setup.exe + updater |
+| 路由面契约测试 | ✅ `route_contract_tests` 3/3：契约快照全路径非 404/405（资源型 404 白名单 8 项）+ /openapi.json 覆盖断言 + 真实 HTTP smoke；/openapi.json 106 路径与路由一致 |
+| 新契约测试 | ✅ `scene_locate_tests` 6/6、`memory_health_tests` 6/6、`audit_search_tests` 3/3、`plugin_lifecycle_tests` 3/3、`mcp_tests` 13/13、`loop_tests` 20/20、`cloud_exec_tests` 7/7 |
+| HTTP 冒烟 | ✅ 会话/审批/diff/感知/学习/分享/STT/自动化/执行 全链路；桌面面板 33 项接口矩阵非 404 |
+| 打包自检 | ✅ 便携 zip 解包：/health 200、onnx_models_present=true、OWO_OCR_STRICT=onnx 下 provider=onnx-v4（2026-08-14 产物） |
+| TS SDK | ✅ clients/ts typecheck 0 错误 / build 通过 / test:unit 3/3（schema.d.ts 与 openapi.json 一致） |
 
 ### C.4 剩余外部验收项
 

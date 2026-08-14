@@ -720,12 +720,21 @@ M2 验收项"trace 可回放"补齐 HTTP 面；桌面端 P0 补会话导出入�
 
 说明：本轮文件变更 `agent.rs`（config 访问器 + 3 测试）、`owo-agent-server/lib.rs`（context 接口 + 模板接口 + OpenAPI）、`eval.rs`/`eval_tests.rs`（补齐另一模型 EvalCase 扩展的中间态）、`desktop/web/*`（上下文仪表 + 模板按钮）。与 OCR 专项零交集；与另一模型并行改动（EvalCase 落盘断言、MCP 热卸载）共存通过。
 
-## 四十九、v0.5.8 HTTP 契约恢复 + 路由面契约测试（2026-08-14）
+## 五十二、v0.5.8 交付面收敛（2026-08-14）
+
+四 Agent 并行交付：A=HTTP 服务面恢复 + 路由契约测试；B=桌面面板联调；C=回归门禁修复 + ONNX 模型随包分发；D=文档与验收基线收敛。协作遵循 `.coord/OWNERSHIP.md` 文件域冻结，契约见 `.coord/CONTRACT.md`，门禁矩阵见 `.coord/GATES.md`。
 
 | 项 | 状态 | 证据 |
 |---|---|---|
-| 9 组 HTTP 接口恢复 | ✅ | /locate/query、/memory/recall、/skills/health、/plugins、/traces、/subagent/run、/project/rules、/mcp、/session/{id}/context 全部恢复注册（此前因 lib.rs 重建回归丢失返回 404） |
-| 路由面契约测试 | ✅ 2/2 | route_contract_tests：13 条 v0.5 路由非 404 断言 + computer-use sensitive-check JSON 验证；防未来回归 |
-| 编码损坏重建 | ✅ | 两个并行 agent 以错误编码写入 lib.rs 导致 GBK mojibake（117 处损坏）；以 git HEAD 为基线重建 + 从损坏备份提取修复 14 组 handler |
-| 回归门禁 | ✅ 2/2 | qq-learn PASS、qq-observe PASS（服务端恢复后 observe 链路正常） |
-| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；cargo test --workspace 293 项全绿（core 220 + 集成 61 + server 5 + CLI 7） |
+| 9 组 HTTP 接口恢复 | ✅ | /locate/query、/memory/recall、/skills/health[/{name}/reset]、/plugins、/traces[/{index}]、/subagent/run、/project/rules[/template]、/mcp[/add\|remove]、/session/{id}/context 全部恢复注册（此前因 lib.rs 重建回归丢失返回 404） |
+| OpenAPI 一致 | ✅ | openapi_spec 补齐 24 个漏登路径（/desktop/*、/vision/*、/perception/template/*、/perception/elements、/perception/ocr/bytes、/perception/window、/learn/status、/openapi.json）；服务端 /openapi.json 106 路径 = clients/ts/openapi.json 快照 = schema.d.ts（generate:local 重新生成） |
+| 路由面契约测试 | ✅ 3/3 | route_contract_tests：契约快照全路径+方法非 404/405（资源型 404 白名单 8 项：skills/learn-packages/traces/mcp-remove/automations/perception-template）、/openapi.json 覆盖断言、真实 HTTP smoke；tempfile 临时数据目录，测试后清理 |
+| 桌面工作台联调 | ✅ 33 项矩阵 | app.js 新增 friendlyError（404/5xx → "服务接口不可用"；资源型 404 → "资源不存在"），18+10 处面板 catch 统一友好错误；插件管理/技能健康/记忆检索/Traces 轮询回放/子代理（只读/通用）/项目规则（注入+编辑+模板）/MCP 管理/会话上下文 token 仪表（绿黄红三态）/模型用量全通；P2 computer-use 任务面板按文档 7.3 语义（target_app、max_duration_ms、approve/reject/cancel/start/pause/fuse/resume/complete 状态迁移）实测对齐；XSS 基线保持（esc() + renderMarkdown 协议白名单） |
+| sim 回归修复 | ✅ 2/2 | sim-qq-observe-e2e.py：seen_kinds 只统计 kind=sim_event 且 detail.type 为字符串的观察项（None 跳过），保留 typed/send_clicked 断言语义；qq-learn PASS + qq-observe PASS（含挖掘 {value} 变量 + 换参复用发送） |
+| 技能门禁 | ✅ 12/12 | skill-gate.ps1：documents/spreadsheets/pdf/browser ×3 用例全过（运行时 python 装 reportlab 4.4.9） |
+| onnx_ocr model_dir() 回退链 | ✅ | 优先级：OWO_ONNX_OCR_MODEL_DIR → 用户数据目录 → exe 同级 models/ocr → 仓库相对路径；新增 3 个单测；真实模型测试不再静默跳过（onnx_ocr 13 项含真实推理通过） |
+| 打包含 ONNX 模型 | ✅ | dist/OwO-Agent-debug.zip（42.3MB）、dist/OwO-Agent-release.zip（37.0MB）、NSIS setup.exe（11.9MB）+ .sig、dist/updates/latest.json 时间戳均为 2026-08-14；解包自检（release 便携包 + 临时数据目录 + OWO_OCR_STRICT=onnx）：/health 200、/perception/ocr/status onnx_models_present=true、POST /perception/ocr/bytes provider=onnx-v4 文本非空——全部 PASS |
+| 编码损坏重建记录 | ✅ | 并行 agent 曾以错误编码写 lib.rs 导致 GBK mojibake（117 处损坏）；以 git HEAD 为基线重建 + 从损坏备份提取修复 14 组 handler（A 复核当前无重复 route/fn） |
+| 质量门禁 | ✅ | cargo test --workspace 294 项全绿（core lib 220 + 集成 61 = audit 3/cloud_exec 7/eval 3/loop 20/mcp 13/memory_health 6/plugin_lifecycle 3/scene_locate 6 + server 6 = 单测 3/route_contract 3 + CLI 7）；cargo fmt --all -- --check 干净；cargo clippy --workspace --all-targets -D warnings 0 警告；node --check 0 错误；TS SDK typecheck 0 错误 / build 通过 / test:unit 3/3 |
+
+说明：全量门禁由 D 收尾统一执行（详见 `.coord/GATES.md`）；eval-gate（需 OPENAI_API_KEY）未纳入本轮实测，C.4 外部验收项保持"开放"。修复过程中 A 的 `route_contract_tests.rs` 白名单缺 `/perception/template/{app_id}`（资源型 404），经协调由 D 补 1 行后全绿。
