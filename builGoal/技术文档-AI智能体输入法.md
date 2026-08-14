@@ -676,13 +676,19 @@ struct SkillHealth { attempts, successes, recent_failures: Vec<FailureMode>, sta
 
 | 阶段 | 内容 | 对应缺口 |
 |---|---|---|
-| M-A 场景图 + 多源定位 | `scene.rs`/`locate.rs`；视觉 grounding 入 `evidence`；模板接入定位；执行器改用 `locate` | G1/G2/G9 |
-| M-B 动作程序 + 结构化断言 | `action_program.rs`/`assert.rs`；`execute_program`；`verify` 统一；占位符误判修复 | G3/G4 |
-| M-C 静默学习 + 记忆三层 | `observe.rs` 真实面采样 + `Outcome`；`generalize_traces`；`memory.rs`；成功率门槛 | G5/G6/G7/G8 |
-| M-D 技能健康度自愈 | `SkillHealth`、模板命中率监控、失败降级、空闲校验 | G6/G9 |
-| M-E 本地 ONNX OCR | RapidOCR/PP-OCRv6 ONNX + `ort`，云 API 作为可选增强 | G10 |
+| M-A 场景图 + 多源定位 | ✅ v0.5.1：`scene.rs`（SceneGraph 跨帧稳定 ID/冲突降置信/stale 淘汰/多源证据/模板 ROI）+ `locate.rs`（UIA/OCR/视觉/模板/历史加权、uncertainty、stable_id、parent/context 消歧）；`POST /locate/query` 已接入 | G1/G2/G9 |
+| M-B 动作程序 + 结构化断言 | ✅ v0.5.1：`action_program.rs`（Step/Assert/WaitUntil/Branch/Loop/Retry/Sub 解释器、敏感面熔断、子程序深度上限）+ `assert.rs`（`OcrBoxGone` 占位符确定性判定等 9 类断言） | G3/G4 |
+| M-C 静默学习 + 记忆三层 | ✅ v0.5.1：`observe.rs` Outcome + 语义记忆持久化；`learn::generalize_traces`（多轨迹编辑距离对齐 + 变量推断）+ `candidate_eligible`（≥3 条且成功率 ≥80%）；`/memory/recall|mine-skill`（支持多轨迹） | G5/G6/G7/G8 |
+| M-D 技能健康度自愈 | ✅ v0.5.1：`skill_health.rs` + `FlowSkillStore` 健康门禁（连续 2 败 Degraded、模板命中率降级、degraded_ack、持久化）；`/skills/health` + 重置端点 | G6/G9 |
+| M-E 本地 ONNX OCR | ✅ v0.5.5：`onnx_ocr.rs`（ort + ch_PP-OCRv4 det/rec ONNX：DB 后处理/CTC 解码/行分组合并，纯 Rust 无 OpenCV）+ `scripts/download-onnx-ocr-models.ps1`；`ocr_preferred` 优先级本地 ONNX → 云 API → Media；GDI 渲染集成测试 5/5 LCS=1.00 | G10 |
 
-文件变更：新增 `scene.rs / locate.rs / action_program.rs / assert.rs / memory.rs`；改造 `element_registry.rs / executor.rs / learn.rs / observe.rs / vision.rs / window_template.rs / paddle_ocr.rs / lib.rs / owo-agent-server / desktop/web`。
+> v0.5.2 状态（2026-08-13）：M-A/M-B/M-C/M-D 已实现并通过契约测试（`scene_locate_tests` 6 项、`action_program`/`assert` 18 项单测、`memory_health_tests` 6 项、`generalize_traces` 4 项）；M-A 收尾完成——执行器 `find` 主链路已接入 `locate_anchor_point`（可信命中直接点击，不可信降级 UIA/OCR）；M-E 仍待办。M3 插件“工具级热卸载/权限撤销立即生效”已落地（模型不可见 + 直接调用拒绝 + 状态持久化），进程级 kill 子进程留作后续。
+>
+> v0.5.3 状态（2026-08-13）：M3 安全加固新增——独立审批模型 Auto-review（启发式预筛 + 可选独立模型复审，Ask 先过审查链，Deny 不打扰用户并审计）与 Prompt Injection 防护（外部内容进上下文前行级净化；内部 20 条注入样本拦截率 100%，正常样本零误报）。
+>
+> v0.5.5 状态（2026-08-13）：M-E 本地 ONNX OCR 落地——`onnx_ocr.rs`（ort + ch_PP-OCRv4 det/rec，全本地确定性、不受数据出境开关约束），`ocr_preferred` 优先级改为 本地 ONNX → Paddle 云 → Media.Ocr；DB 后处理 + CTC 解码 + 行分组合并；`download-onnx-ocr-models.ps1` 一键下载三件套；GDI 渲染已知文本集成测试 5/5 LCS=1.00；onnxruntime.dll 随便携包自动附带（ort load-dynamic，exe 同级优先）。修复 3 个真 bug（BMP 头部错位/竖笔划框分数误拒/rec 输出 T 推断错误）。云 API 重合率对照（≥90%）需 PADDLE_OCR_TOKEN，留作外部验收项。
+
+文件变更：新增 `scene.rs / locate.rs / action_program.rs / assert.rs / memory.rs / onnx_ocr.rs`；改造 `element_registry.rs / executor.rs / learn.rs / observe.rs / vision.rs / window_template.rs / paddle_ocr.rs / ocr.rs / platform.rs / lib.rs / owo-agent-server / desktop/web / scripts/package-desktop.ps1`。
 
 ---
 
@@ -1278,6 +1284,7 @@ v0.3 的 M1/M2（SDK 核心、CLI/TUI、HTTP、权限、AGENTS.md/Skills/子代�
 
 | 里程碑 | 状态 | 主要证据 |
 |---|---|---|
+| v0.5 M-A～M-E + 安全加固（2026-08-13） | ✅ | 场景图+多源定位（含执行器主链路接入）、动作程序+结构化断言、记忆三层+多轨迹泛化、技能健康度自愈、插件工具级热卸载、独立审批模型 Auto-review、Prompt Injection 防护、本地 ONNX OCR（M-E，ort + ch_PP-OCRv4，全本地确定性）；契约测试与 HTTP 冒烟通过（见 `agent-sdk/ACCEPTANCE.md` v0.4.38/v0.5.2/v0.5.3/v0.5.5） |
 | M3 桌面端 + 技能包 | ✅ | Web 工作台 + Tauri 壳 + 自启 + NSIS 安装包；四技能 12 端到端用例 `skill-gate.ps1` 全绿；会话/审计/技能中心/附件/模型热切换/数据出境开关闭环 |
 | M4 全域感知 + 语音 | ✅ | L0/L1/L2 + 窗口级 OCR + PP-OCRv6；STT TTS CER 0.00%、真实人声 CER 13.64%、缓存 0.93s；VSCode 语音改代码 30/30=100% |
 | M5 操作学习 + 主动建议 | ✅ | 示范/受限探索、动作图执行、流程技能包（.owskill）、审批审计、主动建议四选；Notepad 示范→换参复用 2/2 |
@@ -1289,8 +1296,11 @@ v0.3 的 M1/M2（SDK 核心、CLI/TUI、HTTP、权限、AGENTS.md/Skills/子代�
 |---|---|
 | `cargo fmt --all -- --check` | ✅ 干净 |
 | `cargo clippy --workspace --all-targets -D warnings` | ✅ 0 警告 |
-| `cargo test --workspace` | ✅ 全绿（core 109 等） |
+| `cargo test --workspace` | ✅ 全绿（core lib 196 + 集成 55，共 251 项） |
 | `scripts/skill-gate.ps1` | ✅ 四技能 12 用例 PASS |
+| `scripts/run-eval-gate.ps1 -Threshold 0.8` | ✅ 20/20 = 100% |
+| `scripts/sim-regression.py` | ✅ qq-learn + qq-observe 2/2 PASS |
+| 新契约测试 | ✅ `scene_locate_tests` 6/6、`memory_health_tests` 6/6、`audit_search_tests` 3/3、`plugin_lifecycle_tests` 3/3、MCP 7/7 |
 | HTTP 冒烟 | ✅ 会话/审批/diff/感知/学习/分享/STT/自动化/执行 全链路 |
 | 打包 | ✅ 便携 zip + NSIS setup.exe + updater |
 

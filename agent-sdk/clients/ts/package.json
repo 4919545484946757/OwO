@@ -1,0 +1,26 @@
+{
+  "name": "@owo-agent/client",
+  "version": "0.1.0",
+  "description": "OwO Agent SDK TypeScript 客户端（由 /openapi.json 生成的类型 + openapi-fetch）",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "generate": "openapi-typescript http://127.0.0.1:4096/openapi.json -o src/schema.d.ts",
+    "generate:local": "openapi-typescript ./openapi.json -o src/schema.d.ts",
+    "build": "tsc",
+    "postbuild": "node scripts/copy-schema.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test \"dist-tests/tests/*.test.js\"",
+    "test:unit": "tsc -p tsconfig.test.json && node --test dist-tests/tests/client.unit.test.js"
+  },
+  "dependencies": {
+    "openapi-fetch": "^0.17.0"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0",
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  }
+}

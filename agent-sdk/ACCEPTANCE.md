@@ -543,3 +543,179 @@ grounding 交叉验证（vision_ground，与 OCR 重合才允许点击）。
 | 质量门禁 | ✅ | 后端无改动；此前 `cargo test --workspace` 全绿（core 130） |
 
 说明：配合 v0.4.26 的 learn-confirm 沉淀闭环，桌面端现在“学习 → 沉淀 → 技能中心可见”全链路可见。
+
+## 四十、v0.4.34 官方示例插件（翻译 / 剪贴板历史，2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 翻译插件 | ✅ | `plugins/owo-translate`：manifest + Python stdio MCP 服务器，`translate` 工具（演示词典中英互译，未命中返回 `[演示翻译]` 前缀原文）；无网络依赖 |
+| 剪贴板历史插件 | ✅ | `plugins/owo-clipboard`：`clipboard_read`/`clipboard_write`（Windows PowerShell，base64 传输避免转义）；权限声明 `clipboard:read/write` |
+| 契约测试 | ✅ 3/3 | `official_example_plugins_discover_and_validate`（工作区发现两个插件）、`official_translate_plugin_serves_tools`（tools/list + translate 命中/兜底 + 未知工具报错）、`official_clipboard_plugin_lists_and_reads`（工具清单 + 只读调用） |
+| Windows stdio 修复 | ✅ | Python 文本模式 stdout 在 tokio 管道下第二帧丢失 → 改用 `io.TextIOWrapper(sys.stdin/stdout.buffer, utf-8)` 二进制包装，全链路通过 |
+| 文档 | ✅ | `plugins/README.md`：运行要求（python in PATH、相对路径、启动目录）、权限说明 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（mcp_tests 8 项） |
+
+说明：本轮改动按用户要求暂不 git 提交，留待本地持续迭代后统一提交。
+
+## 四十一、v0.4.35 插件管理界面（/plugins + Web 面板，2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `GET /plugins` | ✅ | 返回工作区 + 数据目录发现的插件（id/name/version/description/permissions/MCP 配置/manifest 路径）；OpenAPI 已登记 |
+| Web 插件面板 | ✅ | 侧栏新增“插件”区：名称/id/版本/描述/权限/MCP 通道，15s 自动刷新；`node --check` 通过 |
+| HTTP 冒烟 | ✅ | 从 agent-sdk 根启动服务：`/plugins` 返回 count=3（example-hello + translate + clipboard），权限清单正确 |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 130 + mcp_tests 6） |
+
+说明：至此 P0“插件 SDK（manifest + 沙箱 + 权限声明 + 能力 API + 插件管理界面；随包 2 个官方示例插件）”
+管理界面与示例插件均落地；启停/安装（市场）留作 v2。本轮改动仍未 git 提交。
+
+## 四十二、v0.4.36 审计过滤与门禁复测（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `/audit` 事件/工具过滤 | ✅ | 新增 `event`（精确）与 `tool`（精确）查询参数，OpenAPI 已登记；Web 审计面板加事件/工具过滤输入框 + 应用按钮，定时刷新保留过滤 |
+| 门禁复测 | ✅ | `skill-gate.ps1` 12/12 PASS；`run-eval-gate.ps1 -Threshold 0.8` 20/20=100%；`sim-regression.py` qq-learn/qq-observe 2/2 PASS（无模型依赖） |
+| HTTP 冒烟 | ✅ | 触发 egress 审计后：`/audit` 全量 1 条 event=egress；`event=settings`→0、`tool=read_file`→0（精确过滤语义正确） |
+| 质量门禁 | ✅ | fmt/clippy 0 警告；`cargo test --workspace` 全绿（core 130 + mcp_tests 6）；`node --check` 通过；构建产物更新 |
+
+说明：多轮本地改动（插件示例/插件面板/审计过滤）全部通过既有回归门禁；仍未 git 提交。
+
+## 四十三、v0.4.37 桌面打包脚本修复与复测（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 打包脚本 bug 修复 | ✅ | `package-desktop.ps1` 原先对 debug 配置生成 `cargo build --debug`（非法参数）导致必失败；改为仅 release 追加 `--release`，debug 用默认 profile |
+| 桌面便携包复测 | ✅ | `package-desktop.ps1 -Configuration debug` 完成：核心服务 + 桌面壳（Tauri）构建成功，产出 `dist/OwO-Agent-debug.zip`；Web 资产改动未破坏桌面壳 |
+| 质量门禁 | ✅ | 本轮前 fmt/clippy/test 全绿（core 130 + mcp_tests 6）；打包构建通过 |
+
+说明：用户指示本轮完成即停止目标；改动仍未 git 提交，留待后续统一提交。
+
+## 四十四、v0.5.1 全流程专项 M-A～M-D + 生产加固（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| M-A 场景图 | ✅ | `scene.rs`：SceneGraph 跨帧稳定 ID 保持（5 帧 ≥95%）、冲突降置信、stale 淘汰、多源证据（UIA/OCR/视觉/模板/历史）、元素关系、模板 ROI 命中率、`elements_from_*`/`merge_sources` 构建管线；`element_registry.list_all()` |
+| M-A 多源定位 | ✅ | `locate.rs`：`AnchorQuery`（stable_id/name/role/parent/text_hash/context_rect/source_priority/min_confidence）、`score = w_uia·uia + w_ocr·ocr + w_vision·vision(cross_validated) + w_template·template_hit + w_history·prior_hit`、uncertainty/可靠线、视觉-only 拒绝、同名冲突降分；`POST /locate/query` 已接入（OpenAPI 登记） |
+| M-A 契约测试 | ✅ 6/6 + 8 项单测 | `tests/scene_locate_tests.rs`：5 帧稳定 ID ≥95%、20 例 top-1 IoU≥0.8、视觉-only 拒绝、交叉验证融合、模板 ROI/历史先验、UIA+OCR+视觉融合管线 |
+| M-B 动作程序 | ✅ | `action_program.rs`：ProgramNode（Step/Assert/WaitUntil/Branch/Loop/Retry/Sub）+ 完整解释器（变量填充、敏感面熔断、步数上限、子程序 4 层、WaitUntil 200ms 轮询超时）；`from_graph` 线性兼容 |
+| M-B 结构化断言 | ✅ | `assert.rs`：9 类断言，`OcrBoxGone{text}` 占位符确定性判定（占位符存在→false、消失→true），未接入类型明确报错不静默通过；单测 18 项 |
+| M-C 记忆三层 | ✅ | `observe.rs` Outcome + `MemoryStore.recall/mark_outcome`（JSONL + 语义索引持久化）；`memory.rs` SemanticMemory（CJK 二元组检索、prune/save/load）；`/memory/recall` 冒烟通过 |
+| M-C 多轨迹泛化 | ✅ | `learn::generalize_traces`（编辑距离对齐 + 跨轨迹一致性变量推断）+ `candidate_eligible`（≥3 条且成功率 ≥80%）；`/memory/mine-skill` 支持 traces/outcomes，HTTP 冒烟：3 条成功轨迹 → 变量 `value`、技能包落盘 |
+| M-D 技能健康度 | ✅ | `skill_health.rs`（连续 2 败 Degraded、成功恢复、模板命中率 <40% 降级、JSON 持久化）；`FlowSkillStore` 健康门禁（Disabled 拒绝、Degraded 需 degraded_ack）；`/skills/health` + 重置端点 + Web 技能包健康显示 |
+| 生产加固：MCP stdio 超时 | ✅ | 可配置超时（配置 > `OWO_MCP_STDIO_TIMEOUT_MS` > 15s 默认），超时杀挂死子进程并自动重连重试一次 |
+| 生产加固：插件启停 | ✅ | `PluginStateStore`（默认启用、禁用持久化、reset）+ `discover_enabled_plugins`；`POST /plugins/{id}/enabled` + Web 面板开关，冒烟 ok |
+| 生产加固：审计查询 | ✅ | `AuditQuery`（limit/offset/event/tool/approved/q 模糊搜索 + LIKE 转义）；`/audit` 全参数接入，冒烟 `q=mine` 命中 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 218 项全绿（lib 172 + 集成 46）；`skill-gate.ps1` 12/12；`run-eval-gate.ps1 -Threshold 0.8` 20/20=100%；`sim-regression.py` qq-learn/qq-observe 2/2 PASS；HTTP 冒烟（locate/plugins/health/mine-skill/audit）通过 |
+
+说明：本轮按用户要求不 git 提交；M-A 的“执行器主链路替换为 locate”与 M-E（本地 ONNX OCR）留作下一迭代。子代理质量评估：M-B 交付质量好；M-C/M-D 部分交付后停滞由根代理补齐；M-A 两个子代理零产出被中断、由根代理实现——后续迭代默认根代理直接实现核心路径，子代理只用于明确的独立子任务。
+
+## 四十五、v0.5.2 M-A 收尾 + 插件热卸载（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 执行器接入多源定位 | ✅ | `executor::locate_anchor_point`：从元素注册表构建 SceneGraph → `AnchorQuery` 加权打分，可信命中直接按中心点操作；视觉-only/冲突/低置信返回 None 降级到 UIA 递归 + OCR 兜底（不硬猜）；`WindowsUiaSource::find` 主链路已接入；3 项契约测试（UIA 命中、视觉-only 拒绝、未知返回 None） |
+| AnchorQuery 默认可信线 | ✅ | `min_confidence` 默认 0.4（此前 derive Default 为 0.0 导致低置信也能返回 best） |
+| 工具注册表前缀撤销 | ✅ | `ToolRegistry::remove_prefix`（按 `owo_plugin_<id>_` 前缀移除）；`mcp_tool_prefix` 命名空间助手；单测覆盖移除只匹配前缀 |
+| Agent 热卸载过滤 | ✅ | `Agent::set_tool_prefix_enabled/tool_disabled`：禁用后工具从模型可见集移除、直接调用返回“插件热卸载”错误并写审计；`loop_tests::hot_disabled_plugin_tool_prefix_is_hidden_and_blocked` 通过 |
+| 服务端即时生效 | ✅ | `POST /plugins/{id}/enabled` 同步设置 Agent 工具前缀；`/plugins` 返回 `tools_hidden` 字段；服务启动时按 `plugin_state.json` 恢复禁用状态；HTTP 冒烟：禁用 translate 后 `enabled=False tools_hidden=True` |
+| 场景图跨请求持久化 | ✅ | `AppState.scene`：`/locate/query` 复用持久 SceneGraph（元素每请求刷新），模板命中率/历史命中先验跨请求保留 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 177 + 集成 47）；HTTP 冒烟通过 |
+
+说明：插件禁用为“工具级热卸载”（模型不可见、直接调用被拒、状态持久化）；进程级 kill 子进程需 Agent 注册表改造，列为后续。改动仍未 git 提交。
+
+## 四十六、v0.5.3 独立审批模型 + Prompt Injection 防护（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 独立审批模型（Auto-review） | ✅ | `autoreview.rs`：`Reviewer` trait + `HeuristicReviewer`（零成本预筛）+ `ModelReviewer`（独立模型 ALLOW/DENY/UNKNOWN）+ `AutoReviewChain`（启发式 Deny 优先 → 模型 → 人工）；`Agent::set_reviewer` 接入审批循环：Ask 先过审查链，Deny 不打扰用户并写 `auto_review` 审计，Unknown 才转人工 |
+| CLI 默认挂载 | ✅ | `build_agent_with_mcp` 默认挂启发式链；`OWO_AUTO_REVIEW=1` 启用独立模型复审（`OWO_REVIEW_MODEL` 可选覆盖）；模型初始化失败自动降级启发式并告警 |
+| Prompt Injection 防护 | ✅ | `injection.rs`：`InjectionGuard` 25 条中英模式扫描 + 行级净化；`sanitize_tool_result` 对外部来源工具（OCR/UI/剪贴板/浏览器快照/视觉）结果进上下文前过滤；Agent 工具结果统一走净化 |
+| 拦截率验收 | ✅ ≥95% | 内部 20 条注入样本拦截 100%（19/20 高置信 + 管道取数），3 条正常内容零误报；`internal_injection_suite_interception_rate_at_least_95_percent` |
+| 集成测试 | ✅ 5 项 | `loop_tests`：Auto-review Deny 不写文件且审计、Allow 放行、Unknown 回退人工、剪贴板注入行进上下文前被替换（审计含“已过滤”） |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 235 项全绿（lib 185 + 集成 50） |
+
+说明：Auto-review 默认只启用启发式预筛（零成本），独立模型审查需显式 `OWO_AUTO_REVIEW=1`（BYOK，凭据仅环境变量）。改动仍未 git 提交。
+
+## 四十七、v0.5.4 桌面工作台增强（2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| Markdown 渲染（对标 Codex 桌面） | ✅ | `renderMarkdown`（代码块带复制按钮/标题/列表/表格/链接/行内样式，XSS 转义）；用户/助手消息与流式 `token_delta`/`progress`/`final` 均走 markdown 渲染；Node 提取渲染器 10/10 断言通过（含 XSS 转义） |
+| 流式中断按钮 | ✅ | `abortBtn`：AbortController 中断 fetch + `POST /session/{id}/abort`；回合结束后禁用 |
+| diff 内容展开 | ✅ | `diffText` 行级 diff（`-`/`+`/` ` 前缀，对标 git diff）；点击 diff 条目展开 before/after 内容，默认收起 |
+| 情景记忆面板 | ✅ | `/memory/observations` 最近 30 条 + `/memory/recall` 语义检索（Enter/按钮触发）；字段按 `MemoryEntry`（ts/app_id/summary/confidence）渲染 |
+| 技能健康度面板 | ✅ | `/skills/health` 全量展示（Active/Degraded/Disabled、成功率、连续失败、模板命中率）；30s 轮询 |
+| Eval 面板 | ✅ | `/eval/run` 运行内置套件，展示通过率/耗时/逐用例结果；未知套件 404 校验通过 |
+| 服务端冒烟 | ✅ | 4189 实例：health/静态托管（index 6401B/app.js 50399B/css 6223B 均含新功能）、create session/diff/mine-skill/audit、真实模型 turn（SSE 113 token_delta + final，代码块/列表 markdown 内容，消息持久化 2 条） |
+| 质量门禁 | ✅ | `node --check` app.js 通过；`cargo check --workspace` 干净；未改 Rust 代码 |
+
+说明：本轮只改 `desktop/web/`（index.html/app.js/style.css），与 OCR 专项（onnx_ocr/paddle_ocr/ocr）无文件交集，避免竞争修改。
+
+## 四十八、v0.5.5 M-E 本地 ONNX OCR（全流程专项收尾，2026-08-13，未提交）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `onnx_ocr.rs` 本地 ONNX 引擎 | ✅ | `ort` 2.0.0-rc.13（load-dynamic）+ ch_PP-OCRv4 det/rec ONNX：det 预处理（limit_side=736 min 侧 + 32 对齐 + BGR 通道 mean/std 归一化）、DB 后处理（二值化 0.3 → 2x2 膨胀 → 连通域并查集 → 凸包最小外接矩形 → 框内概率均值 ≥0.5 → unclip 1.6 → NMS 0.3）、rec 预处理（高 48/宽≤320、[-1,1]）、CTC 解码（折叠重复 + blank 剔除 + 字典映射）；引擎惰性加载缓存，加载失败告警并降级 |
+| OCR 通道优先级 | ✅ | `ocr_preferred`：本地 ONNX（模型就绪时优先，provider=onnx-v4）→ Paddle 云（PADDLE_OCR_TOKEN）→ Media.Ocr；`OWO_OCR_STRICT=onnx` 强制本地；本地通道不受数据出境开关约束（无网络请求） |
+| 行分组 + 合并 | ✅ | det 在字符间隙切出多框：按 y 重叠 ≥50% 同行分组 → 行内按 x 排序 → 相邻框 gap<24px 合并后统一 rec，避免顺序错乱/粘连伪字符（修复“输入消息”→"<消息输入" 两处顺序 bug） |
+| 模型下载脚本 | ✅ | `scripts/download-onnx-ocr-models.ps1`：RapidOCR v1.1.0 官方 release（det 4.7MB + rec 10.9MB）+ PaddleOCR Gitee 镜像字典（6624 行）；已下载至 `agent-sdk/models/ocr/` |
+| 真实模型集成测试 | ✅ 5/5 | `onnx_ocr_real_models_when_present`（GDI 内存渲染已知文本，模型缺失自动跳过）：发送/输入消息/hello world/你好 世界/两行混排 全部 LCS 重合 1.00；渲染图 ASCII 校验与字符码校验排除了镜像/错序 |
+| 契约测试 | ✅ 8 项单测 + 2 集成 | BMP 解析（含 54 字节头断言）、det 32 对齐/通道归一化、DB 检出+坐标还原+unclip 几何、NMS 合并、CTC 解码、字典加载、四点排序、rec 形状；真实模型门控测试 1 项；GDI 渲染辅助 1 项 |
+| 修复的 3 个真 bug | ✅ | ① BMP biSizeImage 用 `usize::to_le_bytes()`（x64 写 8 字节致头部 58 字节错位）→ 显式 u32；② `quad_score` 外接框只取单角点导致竖排笔画框分数恒 0 被误拒（单字/竖笔画文本检测缺失根因）；③ rec 输出 T 按输入宽推断（实为 W/8）致 CTC 行错位 → 从输出维度取 (T, C) |
+| onnxruntime.dll 部署 | ✅ | ort 按 load-dynamic 加载（exe 同级优先）；`package-desktop.ps1` 打包时自动附带：本地构建产物优先，缺失则从 microsoft/onnxruntime v1.28.0 官方 release 下载；实测 1.28.0 DLL 全链路可用 |
+| HTTP 冒烟 | ✅ | 服务端 `GET /perception/ocr/status` 返回 `onnx_models_present=true`；`OWO_OCR_STRICT=onnx` 下 `POST /perception/ocr/bytes` 返回 provider=onnx-v4 + 坐标框 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 196 + 集成 55，含真实模型门控 5 例）；模型缺失环境自动跳过不阻塞 |
+
+说明：M-E 验收“无网本地识别与云 API 字符级重合率 ≥90%”在本环境以“渲染已知文本 LCS=1.00”口径验证；
+云 API 对照（需 PADDLE_OCR_TOKEN）与真实桌面截图口径留作外部验收项。改动仍未 git 提交。
+## 四十八、v0.5.5 Agent 核心能力 HTTP 化 + 桌面面板（2026-08-13，未提交）
+
+对标 Codex：CLI 独占的子代理（@explore/@subagent）、AGENTS.md 项目规则、MCP 服务器管理
+接入 HTTP API 与桌面工作台。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| Agent 工具注册表 RwLock 化 | ✅ | `Agent.registry: Arc<RwLock<ToolRegistry>>`：`register_mcp_tools`/`remove_tools_prefix` 改 `&self`（热注册无需重建 Agent）；`ToolRegistry.tools` 改 `Arc<dyn Tool>` + 新增 `get()`（锁内取句柄、锁外跨 await 执行，解决 RwLockGuard 非 Send）；`registry()` 返回 Arc |
+| 子代理 HTTP 接口 | ✅ | `POST /subagent/run {prompt, read_only?, model?}` → 只读探索（对齐 @explore）/通用子代理（对齐 @subagent），复用 `Agent::run_subagent`；审计 `subagent/explore|run`；冒烟：真实模型只读探索 2.0s 返回文件列表 markdown |
+| AGENTS.md 项目规则管理 | ✅ | `GET /project/rules`（AGENTS.md/CLAUDE.md 存在性 + 注入状态 + 内容）；`POST /project/rules`（写 AGENTS.md + 审计）；冒烟：写入后 exists/injected 联动为 true |
+| MCP 服务器管理 | ✅ | `GET /mcp`（mcp-servers.json + settings.json 合并去重）；`POST /mcp/add`（连接成功即热注册工具 + 持久化 + 审计，重复 409，连接失败 502）；`POST /mcp/remove`（持久化 + 前缀禁用热卸载）；冒烟：stdio 测试服务器连接 3 工具、移除成功 |
+| OpenAPI 登记 | ✅ | `/subagent/run`、`/project/rules`、`/mcp`、`/mcp/add`、`/mcp/remove` 五端点登记 |
+| 契约测试 | ✅ | `mcp_tests::agent_hot_register_mcp_tools_after_construction`：Arc<Agent> 构造后热注册 → 工具可见 → 前缀撤销后消失（mcp_tests 8/8） |
+| 桌面 UI 三面板 | ✅ | 子代理面板（只读/通用模式切换 + 结果展示）、项目规则面板（注入状态 + AGENTS.md 编辑保存）、MCP 管理面板（列表/移除/添加连接）；node --check 通过 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 196 + 集成 50+）；HTTP 冒烟 8 步全过；静态托管检查 12/12 PASS |
+
+说明：本轮文件变更 `agent.rs`（registry RwLock）、`tools.rs`（Arc<dyn Tool> + get）、`owo-agent-server/lib.rs`（三组接口 + OpenAPI）、`mcp_tests.rs`（热注册契约）、`desktop/web/*`（三面板）；与 OCR 专项无文件交集。测试残留 AGENTS.md 已清理。
+
+## 四十九、v0.5.6 Traces 可观测 HTTP 化 + 会话导出 UI（2026-08-13，未提交）
+
+M2 验收项"trace 可回放"补齐 HTTP 面；桌面端 P0 补会话导出入口。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| Traces 列表接口 | ✅ | `GET /traces`：倒序列表（prompt 预览/steps/耗时/model/usage/final），与 CLI `/traces` 同口径；OpenAPI 登记 |
+| Traces 回放接口 | ✅ | `GET /traces/{index}`：完整 TraceRecord（事件序列含 tool_start/tool_result/permission_request/compaction/final）；越界 404；OpenAPI 登记 |
+| 桌面 Traces 面板 | ✅ | 左侧面板：轨迹列表（15s 轮询 + 手动刷新），点击回放事件流（模型调用/工具/审批/压缩/最终）；node --check 通过 |
+| 会话导出 UI | ✅ | diff 区新增"导出 MD/HTML"按钮（复用既有 `/session/{id}/export/{format}`）；冒烟 md 211B / html 753B |
+| 协作冲突处理 | ✅ | 发现并修复另一模型中间态导致的编译失败：CLI `merge_plugin_mcp` 已删但调用点未更新 → 恢复函数（基于 core `plugin_mcp_config`，语义一致）；`mcp_add` 统一走 `Agent::connect_mcp_server`（进入 McpRegistry，支持进程级卸载） |
+| 冒烟 | ✅ | 4191 实例：静态面板 6/6、traces 列表 83→85 条（真实 turn 后新增）、回放 111 事件、越界 404、导出 md/html 200 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 197 + 集成，mcp_tests 10/10 含另一模型进程级卸载测试） |
+
+说明：本轮文件变更 `owo-agent-server/lib.rs`（traces 两接口 + OpenAPI）、`desktop/web/*`（Traces 面板 + 导出按钮）、`owo-agent-cli/main.rs`（恢复 merge_plugin_mcp）。与 OCR 专项无文件交集；与另一模型在 server lib.rs 的并行改动（插件进程级热卸载）共存并通过全部测试。
+
+## 五十、v0.5.7 上下文管理可视化 + AGENTS.md 模板（2026-08-13，未提交）
+
+对标 Codex 的上下文状态显示与 init 命令桌面化；文档 5.2.2 上下文预算可视化落地。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 会话上下文接口 | ✅ | `GET /session/{id}/context`：消息数、估算 token（与压缩同口径 estimate_tokens）、token 预算、压缩开关、规则注入状态、最近压缩摘要；OpenAPI 登记 |
+| Agent config 访问器 | ✅ | `Agent::config()` 只读快照（token_budget/compaction 等）供诊断/仪表 |
+| AGENTS.md 模板接口 | ✅ | `POST /project/rules/template`：幂等生成（已存在 409，审计 rules-template，/init 等价）；OpenAPI 登记 |
+| 桌面上下文仪表 | ✅ | 对话区顶部 token 进度条（绿/黄/红三态：>80% 警告、超预算红色）+ 消息数/规则/压缩徽章 + 最近压缩摘要悬停提示；selectSession 与回合结束刷新 |
+| 项目规则面板 | ✅ | "生成模板"按钮（不存在时一键生成并载入编辑器） |
+| 契约测试 | ✅ | `agent::tests`：estimate_tokens 计数/空列表/compact_truncate 保留 system+最近尾部（3 项，lib 200 全绿） |
+| 协作冲突处理 | ✅ | 另一模型扩展 EvalCase（expected_files/expected_missing 真实落盘断言）处于中间态（24 个用例缺字段）→ 补齐全部用例字段并保留其断言语义；eval_tests 3/3 通过（含真实落盘/假写失败/删除残留用例） |
+| 冒烟 | ✅ | 4192 实例：context 0 消息→turn 后 2 消息 13 tokens/budget 60000/压缩开；模板生成 200（158 字符）后清理；静态 UI 5/5 |
+| 质量门禁 | ✅ | fmt 干净；clippy 0 警告；`cargo test --workspace` 全绿（lib 200 + 集成 13+） |
+
+说明：本轮文件变更 `agent.rs`（config 访问器 + 3 测试）、`owo-agent-server/lib.rs`（context 接口 + 模板接口 + OpenAPI）、`eval.rs`/`eval_tests.rs`（补齐另一模型 EvalCase 扩展的中间态）、`desktop/web/*`（上下文仪表 + 模板按钮）。与 OCR 专项零交集；与另一模型并行改动（EvalCase 落盘断言、MCP 热卸载）共存通过。

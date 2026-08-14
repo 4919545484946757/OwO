@@ -18,3 +18,4 @@ __pycache__/
 *.appx
 *.msix
 *.msixbundle
+/agent-sdk/models/

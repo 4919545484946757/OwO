@@ -1,0 +1,13 @@
+{
+  "id": "owo.plugin.translate",
+  "name": "Official Translate",
+  "version": "1.0.0",
+  "description": "官方示例插件：演示翻译工具（本地词典演示，无网络依赖；接入后 Agent 可用 translate 工具）",
+  "permissions": ["agent:tools"],
+  "mcp": {
+    "name": "owo-translate",
+    "transport": "stdio",
+    "command": "python",
+    "args": ["plugins/owo-translate/server.py"]
+  }
+}
