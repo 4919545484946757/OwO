@@ -2,9 +2,14 @@
 //! Agent loop、工具注册表、权限审批、会话、审计、模型网关。
 
 pub mod accessibility;
+pub mod action_program;
 pub mod agent;
+pub mod assert;
 pub mod audit;
 pub mod automation;
+pub mod autoreview;
+pub mod cloud_exec;
+pub mod computer_task;
 pub mod computer_use;
 pub mod context;
 pub mod element_registry;
@@ -12,20 +17,27 @@ pub mod error;
 pub mod eval;
 pub mod executor;
 pub mod gateway;
+pub mod injection;
 pub mod learn;
+pub mod locate;
 pub mod mcp;
+pub mod memory;
 pub mod observe;
 pub mod ocr;
+#[cfg(target_os = "windows")]
+pub mod onnx_ocr;
 pub mod paddle_ocr;
 pub mod perception;
 pub mod permissions;
 pub mod platform;
 pub mod plugin;
+pub mod scene;
 pub mod session;
 pub mod settings;
 pub mod share;
 pub mod share_skill;
 pub mod skill;
+pub mod skill_health;
 pub mod skill_pack;
 pub mod sqlite_store;
 pub mod stt;
@@ -40,6 +52,11 @@ pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};
 pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
 pub use audit::{AuditEntry, AuditLog};
 pub use automation::{AutomationAction, AutomationStore, AutomationTask, Schedule};
+pub use autoreview::{
+    parse_verdict, AutoReviewChain, HeuristicReviewer, ModelReviewer, ReviewVerdict, Reviewer,
+};
+pub use computer_task::{sensitive_ui_hit, ComputerTask, ComputerTaskRegistry, TaskState};
+pub use context::load_project_rules;
 pub use element_registry::{
     fuse_sources, fuse_sources_with_vision, register_vision_grounding, ElementRegistry,
     SceneElement, VisionGrounding,
@@ -51,13 +68,14 @@ pub use gateway::{
     budget_violation, parse_usage_value, ChatMessage, ModelOutput, ModelProvider,
     OpenAiCompatibleConfig, OpenAiCompatibleProvider, TokenUsage, ToolCall,
 };
+pub use injection::{sanitize_tool_result, InjectionGuard, InjectionHit, InjectionSeverity};
 pub use learn::{
     generalize_to_graph, recorded_actions_from_sequence, ActionGraph, ActionNode, ActionType,
     FlowSkillManifest, FlowSkillPackage, FlowSkillStore, LearnPipeline, LearnRecorder, LearnState,
     ProactiveEngine, ProactiveSuggestion, RecordedAction, SemanticAnchor, Sensitivity,
     SuggestionAction,
 };
-pub use mcp::{McpClient, McpServerConfig, McpTool};
+pub use mcp::{McpClient, McpRegistry, McpServerConfig, McpTool};
 pub use observe::{
     desktop_observation, map_sim_events_to_actions, observation_from_sim_event, sample_desktop,
     value_hash, DesktopSnapshot, MemoryStore, Observation,
@@ -73,7 +91,7 @@ pub use perception::{
 };
 pub use permissions::{Approver, Decision, Level, PermissionRequest, Policy};
 pub use platform::{capture_screen, clipboard_sequence, poll_foreground_app};
-pub use plugin::{discover_plugins, PluginManifest};
+pub use plugin::{discover_plugins, plugin_mcp_config, PluginManifest, PluginStateStore};
 pub use session::{JsonSessionStore, Session, SessionStore};
 pub use settings::{EgressSettings, Settings};
 pub use share::{export_html, export_markdown};

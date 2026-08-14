@@ -6,6 +6,7 @@
 //! 供 `/memory/mine-skill` 聚合 → 泛化 → 沉淀流程技能包（候选 → 用户确认 → active）。
 
 use crate::learn::RecordedAction;
+use crate::memory::{MemoryEntry, Outcome, SemanticMemory};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -25,15 +26,26 @@ pub struct Observation {
 pub struct MemoryStore {
     path: PathBuf,
     entries: Vec<Observation>,
+    semantic: SemanticMemory,
+    semantic_path: PathBuf,
 }
 
 impl MemoryStore {
     pub fn new(path: PathBuf) -> Self {
+        let semantic_path = path.with_extension(format!(
+            "{}.semantic",
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("jsonl")
+        ));
         let mut store = Self {
             path,
             entries: Vec::new(),
+            semantic: SemanticMemory::new(),
+            semantic_path,
         };
         store.entries = Self::load(&store.path);
+        store.semantic.load_from(&store.semantic_path);
         store.prune();
         store
     }
@@ -63,7 +75,36 @@ impl MemoryStore {
             serde_json::to_string(&observation).map_err(|e| e.to_string())?
         )
         .map_err(|e| format!("写入情景记忆失败：{e}"))?;
+        self.semantic.add_observation(&observation);
+        self.semantic.prune(semantic_capacity());
+        let entry = self
+            .semantic
+            .entries()
+            .last()
+            .cloned()
+            .ok_or_else(|| "语义记忆条目缺失".to_string())?;
+        append_semantic_line(&self.semantic_path, &entry)?;
         Ok(())
+    }
+
+    /// 语义检索（本地倒排，无外部依赖）。
+    pub fn recall(&self, query: &str, top_k: usize) -> Vec<MemoryEntry> {
+        self.semantic.recall(query, top_k)
+    }
+
+    /// 标记某条观察的结果并持久化。
+    pub fn mark_outcome(
+        &mut self,
+        ts: &str,
+        app_id: &str,
+        summary: &str,
+        outcome: Outcome,
+    ) -> Result<bool, String> {
+        let hit = self.semantic.mark_outcome(ts, app_id, summary, outcome);
+        if hit {
+            self.semantic.save_to(&self.semantic_path)?;
+        }
+        Ok(hit)
     }
 
     pub fn list(&self, limit: usize) -> Vec<Observation> {
@@ -88,7 +129,9 @@ impl MemoryStore {
 
     pub fn clear(&mut self) -> Result<(), String> {
         self.entries.clear();
-        std::fs::write(&self.path, "").map_err(|e| format!("清空情景记忆失败：{e}"))
+        self.semantic = SemanticMemory::new();
+        std::fs::write(&self.path, "").map_err(|e| format!("清空情景记忆失败：{e}"))?;
+        std::fs::write(&self.semantic_path, "").map_err(|e| format!("清空语义记忆失败：{e}"))
     }
 
     pub fn path(&self) -> &std::path::Path {
@@ -105,7 +148,37 @@ impl MemoryStore {
             let overflow = self.entries.len() - max_entries;
             self.entries.drain(0..overflow);
         }
+        let semantic_cap = semantic_capacity().min(max_entries);
+        if self.semantic.len() > semantic_cap {
+            self.semantic.prune(semantic_cap);
+            let _ = self.semantic.save_to(&self.semantic_path);
+        }
     }
+}
+
+fn semantic_capacity() -> usize {
+    std::env::var("OWO_SEMANTIC_MAX")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1_000)
+}
+
+fn append_semantic_line(path: &std::path::Path, entry: &MemoryEntry) -> Result<(), String> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("打开语义记忆失败：{e}"))?;
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(entry).map_err(|e| e.to_string())?
+    )
+    .map_err(|e| format!("写入语义记忆失败：{e}"))
 }
 
 fn retention_config() -> (usize, chrono::Duration) {

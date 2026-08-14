@@ -23,7 +23,9 @@ zip = "2"
 png = "0.17"
 
 [target.'cfg(windows)'.dependencies]
+ndarray = "0.17"
 futures = "0.3"
+ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
 sherpa-onnx = "1.13"
 windows = { version = "0.61", features = [
     "Win32_Foundation",

@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -36,12 +37,17 @@ pub trait Tool: Send + Sync {
 }
 
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<Arc<dyn Tool>>,
+    /// MCP 大 schema 的完整副本（注册时超预算被压缩为骨架；此处保留原始 schema 供按需查询）。
+    full_schemas: HashMap<String, Value>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        let mut registry = Self { tools: Vec::new() };
+        let mut registry = Self {
+            tools: Vec::new(),
+            full_schemas: HashMap::new(),
+        };
         registry.register(ReadFileTool);
         registry.register(WriteFileTool);
         registry.register(ListDirTool);
@@ -98,7 +104,10 @@ impl ToolRegistry {
 
     /// 只读工具表（子代理 explore 使用）：不含写/执行/委派工具。
     pub fn read_only() -> Self {
-        let mut registry = Self { tools: Vec::new() };
+        let mut registry = Self {
+            tools: Vec::new(),
+            full_schemas: HashMap::new(),
+        };
         registry.register(ReadFileTool);
         registry.register(ListDirTool);
         registry.register(SearchFilesTool);
@@ -106,11 +115,25 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: impl Tool + 'static) {
-        self.tools.push(Box::new(tool));
+        self.tools.push(Arc::new(tool));
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.tools.iter().map(|tool| tool.spec()).collect()
+    }
+
+    /// 按前缀撤销工具（插件热卸载：`owo_plugin_<id>_` 前缀）。
+    /// 返回被移除的工具数。
+    pub fn remove_prefix(&mut self, prefix: &str) -> usize {
+        self.remove_prefix_inner(prefix)
+    }
+
+    /// 取工具句柄（Arc 克隆，锁外可跨 await 执行）。
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools
+            .iter()
+            .find(|tool| tool.spec().name == name)
+            .cloned()
     }
 
     pub async fn execute(
@@ -119,33 +142,48 @@ impl ToolRegistry {
         ctx: &mut ToolContext<'_>,
         args: Value,
     ) -> Result<Value, String> {
-        let tool = self
-            .tools
-            .iter()
-            .find(|tool| tool.spec().name == name)
-            .ok_or_else(|| format!("未知工具：{name}"))?;
+        let tool = self.get(name).ok_or_else(|| format!("未知工具：{name}"))?;
         tool.run(ctx, args).await
     }
 
     /// 把 MCP 服务器暴露的工具注册为 Agent 工具（命名：`{server}_{tool}`）。
+    ///
+    /// 延迟加载（M2）：单工具 schema 超过 `schema_budget_bytes` 时，注册为模型可见的
+    /// **压缩骨架**（仅保留 type/required/属性名+属性类型，剔除 description/enum/嵌套细节），
+    /// 完整 schema 保留在 `full_schemas` 供 `full_schema()` 按需查询——大 schema 服务不
+    /// 显著占用模型上下文；调用工具时仍以完整 schema 校验。
     pub fn register_mcp_tools(
         &mut self,
         server_name: &str,
         client: Arc<tokio::sync::Mutex<McpClient>>,
         tools: Vec<McpTool>,
     ) {
+        let budget = schema_budget_bytes();
         for tool in tools {
             let full_name = format!(
                 "{}_{}",
                 sanitize_tool_name(server_name),
                 sanitize_tool_name(&tool.name)
             );
+            let (input_schema, full_schema) = if schema_bytes(&tool.input_schema) > budget {
+                let full = tool.input_schema.clone();
+                (compact_schema(&tool.input_schema), Some(full))
+            } else {
+                (tool.input_schema, None)
+            };
+            let mut description = tool.description;
+            if full_schema.is_some() {
+                description.push_str("（schema 已压缩，完整参数见 /mcp/schema 接口）");
+            }
             let spec = ToolSpec {
                 name: full_name.clone(),
-                description: tool.description,
-                input_schema: tool.input_schema,
+                description,
+                input_schema,
             };
-            self.tools.push(Box::new(McpToolAdapter {
+            if let Some(full) = full_schema {
+                self.full_schemas.insert(full_name.clone(), full);
+            }
+            self.tools.push(Arc::new(McpToolAdapter {
                 full_name,
                 server_name: server_name.to_string(),
                 tool_name: tool.name,
@@ -153,6 +191,21 @@ impl ToolRegistry {
                 client: Arc::clone(&client),
             }));
         }
+    }
+
+    /// 按需取 MCP 工具的完整 schema（压缩注册时保留；小 schema 工具不重复存储）。
+    pub fn full_schema(&self, name: &str) -> Option<Value> {
+        self.full_schemas.get(name).cloned()
+    }
+
+    /// 移除工具时同步清理完整 schema 副本。
+    fn remove_prefix_inner(&mut self, prefix: &str) -> usize {
+        let before = self.tools.len();
+        self.tools
+            .retain(|tool| !tool.spec().name.starts_with(prefix));
+        self.full_schemas
+            .retain(|name, _| !name.starts_with(prefix));
+        before - self.tools.len()
     }
 }
 
@@ -167,6 +220,11 @@ fn sanitize_tool_name(name: &str) -> String {
             }
         })
         .collect()
+}
+
+/// MCP 工具注册前缀（`{server}_{tool}` 命名空间）：如 `owo_plugin_owo-translate_`。
+pub fn mcp_tool_prefix(server_name: &str) -> String {
+    format!("{}_", sanitize_tool_name(server_name))
 }
 
 impl Default for ToolRegistry {
@@ -184,6 +242,50 @@ pub(crate) fn required_string(args: &Value, key: &str) -> Result<String, String>
 
 fn snapshot_key(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// MCP 工具 schema 延迟加载（M2）：单工具 schema 序列化字节数预算，默认 2048 字节。
+pub fn schema_budget_bytes() -> usize {
+    std::env::var("OWO_MCP_SCHEMA_BUDGET_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(2048)
+}
+
+/// 估算 JSON schema 的序列化体积（字节）。
+pub fn schema_bytes(schema: &Value) -> usize {
+    serde_json::to_string(schema)
+        .map(|text| text.len())
+        .unwrap_or(usize::MAX)
+}
+
+/// 把 JSON Schema 压缩为模型可见的骨架：仅保留 `type`、`required` 与
+/// 属性名+属性类型（字符串属性类型；嵌套对象/数组仅保留层级 type）。
+/// 剔除 description / enum / pattern / 嵌套细节，体积大幅缩小。
+/// 非对象 schema 原样返回（按需加载不适用）。
+pub fn compact_schema(schema: &Value) -> Value {
+    let Value::Object(map) = schema else {
+        return schema.clone();
+    };
+    let mut compact = serde_json::Map::new();
+    if let Some(t) = map.get("type") {
+        compact.insert("type".to_string(), t.clone());
+    }
+    if let Some(required) = map.get("required") {
+        compact.insert("required".to_string(), required.clone());
+    }
+    if let Some(properties) = map.get("properties").and_then(Value::as_object) {
+        let mut props = serde_json::Map::new();
+        for (name, property) in properties {
+            let mut item = serde_json::Map::new();
+            if let Some(t) = property.get("type") {
+                item.insert("type".to_string(), t.clone());
+            }
+            props.insert(name.clone(), Value::Object(item));
+        }
+        compact.insert("properties".to_string(), Value::Object(props));
+    }
+    Value::Object(compact)
 }
 
 /// 以会话工作区为基座解析相对路径，并做策略工作区越界检查。
@@ -580,5 +682,65 @@ mod tests {
         );
         assert_eq!(sanitize_tool_name("echo"), "echo");
         assert_eq!(sanitize_tool_name("a b/c"), "a_b_c");
+    }
+
+    #[test]
+    fn mcp_tool_prefix_sanitizes_plugin_id() {
+        assert_eq!(
+            mcp_tool_prefix("owo.plugin.translate"),
+            "owo_plugin_translate_"
+        );
+        assert_eq!(
+            mcp_tool_prefix("owo-plugin-clipboard"),
+            "owo-plugin-clipboard_"
+        );
+    }
+
+    struct NamedTool {
+        name: String,
+    }
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.clone(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+            }
+        }
+
+        async fn run(
+            &self,
+            _ctx: &mut ToolContext<'_>,
+            _args: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            Ok(serde_json::Value::Null)
+        }
+    }
+
+    #[test]
+    fn remove_prefix_unregisters_only_matching_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(NamedTool {
+            name: "owo_plugin_demo_translate".to_string(),
+        });
+        registry.register(NamedTool {
+            name: "owo_plugin_demo_clipboard".to_string(),
+        });
+        registry.register(NamedTool {
+            name: "builtin_tool".to_string(),
+        });
+        let removed = registry.remove_prefix("owo_plugin_demo_");
+        assert_eq!(removed, 2);
+        let names: Vec<String> = registry
+            .specs()
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect();
+        assert!(!names
+            .iter()
+            .any(|name| name.starts_with("owo_plugin_demo_")));
+        assert!(names.iter().any(|name| name == "builtin_tool"));
     }
 }

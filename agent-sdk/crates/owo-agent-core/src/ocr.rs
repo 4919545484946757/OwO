@@ -36,6 +36,9 @@ pub struct OcrLine {
 pub struct OcrEngineStatus {
     pub engine_created: bool,
     pub max_image_dimension: u32,
+    /// 本地 ONNX OCR（M-E）模型是否就绪。
+    #[serde(default)]
+    pub onnx_models_present: bool,
 }
 
 /// OCR 引擎诊断：语言包是否存在、最大图像尺寸、可用识别语言。
@@ -47,6 +50,7 @@ pub fn ocr_engine_status() -> OcrEngineStatus {
     OcrEngineStatus {
         engine_created,
         max_image_dimension,
+        onnx_models_present: crate::onnx_ocr::models_present(&crate::onnx_ocr::model_dir()),
     }
 }
 
@@ -55,6 +59,7 @@ pub fn ocr_engine_status() -> OcrEngineStatus {
     OcrEngineStatus {
         engine_created: false,
         max_image_dimension: 0,
+        onnx_models_present: false,
     }
 }
 

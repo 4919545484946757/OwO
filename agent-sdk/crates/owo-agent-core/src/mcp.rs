@@ -29,6 +29,9 @@ pub struct McpServerConfig {
     /// HTTP 传输时的端点 URL
     #[serde(default)]
     pub url: Option<String>,
+    /// stdio 单次请求超时（毫秒）；未配置时读 OWO_MCP_STDIO_TIMEOUT_MS，再默认 15s。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 impl McpServerConfig {
@@ -39,6 +42,7 @@ impl McpServerConfig {
             command: command.into(),
             args,
             url: None,
+            timeout_ms: None,
         }
     }
 
@@ -49,9 +53,27 @@ impl McpServerConfig {
             command: String::new(),
             args: Vec::new(),
             url: Some(url.into()),
+            timeout_ms: None,
         }
     }
 }
+
+/// stdio 超时来源：配置 > 环境变量 > 默认 15 秒。
+fn stdio_timeout(config: &McpServerConfig) -> Duration {
+    if let Some(ms) = config.timeout_ms {
+        return Duration::from_millis(ms);
+    }
+    if let Ok(ms) = std::env::var("OWO_MCP_STDIO_TIMEOUT_MS") {
+        if let Ok(ms) = ms.parse::<u64>() {
+            if ms > 0 {
+                return Duration::from_millis(ms);
+            }
+        }
+    }
+    Duration::from_secs(15)
+}
+
+const TIMEOUT_ERROR_PREFIX: &str = "MCP_TIMEOUT:";
 
 #[derive(Debug, Clone)]
 pub struct McpTool {
@@ -82,11 +104,16 @@ enum Transport {
 pub struct McpClient {
     transport: Transport,
     tools: Vec<McpTool>,
+    config: McpServerConfig,
 }
 
 impl McpClient {
     /// 启动/连接服务器并完成握手（initialize → initialized → tools/list）。
     pub async fn connect(config: &McpServerConfig) -> Result<Self, String> {
+        Self::connect_inner(config.clone()).await
+    }
+
+    async fn connect_inner(config: McpServerConfig) -> Result<Self, String> {
         let transport = if config.transport == "http" {
             let url = config
                 .url
@@ -114,7 +141,9 @@ impl McpClient {
                 .args(&config.args)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::inherit());
+                .stderr(std::process::Stdio::inherit())
+                // 子进程随客户端释放（客户端被 drop/关机时不留孤儿进程）。
+                .kill_on_drop(true);
             let mut child = command
                 .spawn()
                 .map_err(|error| format!("MCP 服务器启动失败（{}）：{error}", config.command))?;
@@ -158,6 +187,7 @@ impl McpClient {
         let mut client = Self {
             transport,
             tools: Vec::new(),
+            config: config.clone(),
         };
         let initialize = client
             .request(
@@ -210,13 +240,45 @@ impl McpClient {
         self.tools.clone()
     }
 
+    /// stdio 子进程是否仍在运行（HTTP 传输恒为 true——无进程可查）。
+    pub fn is_running(&mut self) -> bool {
+        match &mut self.transport {
+            Transport::Stdio(transport) => transport
+                .child
+                .try_wait()
+                .map(|status| status.is_none())
+                .unwrap_or(false),
+            Transport::Http { .. } => true,
+        }
+    }
+
+    /// 服务器名（工具命名空间基座）。
+    pub fn server_name(&self) -> &str {
+        &self.config.name
+    }
+
     pub async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
-        let result = self
+        let mut result = self
             .request(
                 "tools/call",
-                json!({ "name": name, "arguments": arguments }),
+                json!({ "name": name, "arguments": arguments.clone() }),
             )
-            .await?;
+            .await;
+        if let Err(error) = &result {
+            // stdio 超时：杀掉挂死子进程并自动重连，然后重试一次。
+            if error.starts_with(TIMEOUT_ERROR_PREFIX)
+                && matches!(self.transport, Transport::Stdio(_))
+            {
+                self.reconnect().await?;
+                result = self
+                    .request(
+                        "tools/call",
+                        json!({ "name": name, "arguments": arguments }),
+                    )
+                    .await;
+            }
+        }
+        let result = result?;
         let is_error = result
             .get("isError")
             .and_then(Value::as_bool)
@@ -242,6 +304,13 @@ impl McpClient {
         }
     }
 
+    /// stdio 超时后重建传输并重做握手。
+    async fn reconnect(&mut self) -> Result<(), String> {
+        let rebuilt = Self::connect_inner(self.config.clone()).await?;
+        *self = rebuilt;
+        Ok(())
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), String> {
         if matches!(&self.transport, Transport::Stdio(_)) {
             let _ = self.notify("exit", json!({})).await;
@@ -262,14 +331,8 @@ impl McpClient {
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
         match &mut self.transport {
             Transport::Stdio(transport) => {
-                request_stdio(
-                    &mut transport.stdin,
-                    &transport.pending,
-                    &transport.next_id,
-                    method,
-                    params,
-                )
-                .await
+                let timeout = stdio_timeout(&self.config);
+                request_stdio(transport, timeout, method, params).await
             }
             Transport::Http {
                 client,
@@ -327,12 +390,14 @@ impl McpClient {
 }
 
 async fn request_stdio(
-    stdin: &mut ChildStdin,
-    pending: &Pending,
-    next_id: &AtomicU64,
+    transport: &mut StdioTransport,
+    timeout: Duration,
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
+    let stdin = &mut transport.stdin;
+    let pending = &transport.pending;
+    let next_id = &transport.next_id;
     let id = next_id.fetch_add(1, Ordering::Relaxed);
     let (sender, receiver) = oneshot::channel();
     pending
@@ -358,10 +423,15 @@ async fn request_stdio(
         .flush()
         .await
         .map_err(|error| format!("MCP 刷新失败：{error}"))?;
-    let response = tokio::time::timeout(Duration::from_secs(30), receiver)
-        .await
-        .map_err(|_| format!("MCP 请求超时：{method}"))?
-        .map_err(|_| "MCP 服务器已关闭".to_string())?;
+    let response = match tokio::time::timeout(timeout, receiver).await {
+        Ok(result) => result.map_err(|_| "MCP 服务器已关闭".to_string())?,
+        Err(_) => {
+            // 超时：清掉挂起的响应槽，终止挂死进程，便于下次调用自动重连。
+            let _ = pending.lock().map(|mut map| map.remove(&id));
+            let _ = transport.child.start_kill();
+            return Err(format!("{TIMEOUT_ERROR_PREFIX} stdio 请求超时：{method}"));
+        }
+    };
     extract_result(response)
 }
 
@@ -434,4 +504,88 @@ fn extract_result(value: Value) -> Result<Value, String> {
         return Err(format!("MCP 错误：{error}"));
     }
     Ok(value.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// 已连接 MCP 客户端的进程级生命周期注册表（M3 热卸载收尾）。
+///
+/// 记录每个服务器的客户端句柄，支撑：插件禁用/服务器移除时进程级 kill
+/// （stdio 子进程立即终止，不留孤儿进程）；服务器退出时统一清理。
+#[derive(Clone, Default)]
+pub struct McpRegistry {
+    clients: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<McpClient>>>>>,
+}
+
+impl McpRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 记录客户端（重复插入按名覆盖，旧客户端先关闭，避免泄漏）。
+    pub fn insert(&self, name: &str, client: Arc<tokio::sync::Mutex<McpClient>>) {
+        if let Ok(mut clients) = self.clients.try_lock() {
+            if let Some(previous) = clients.insert(name.to_string(), client) {
+                tokio::spawn(async move {
+                    let mut guard = previous.lock().await;
+                    let _ = guard.shutdown().await;
+                });
+            }
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<tokio::sync::Mutex<McpClient>>> {
+        self.clients
+            .try_lock()
+            .ok()
+            .and_then(|clients| clients.get(name).cloned())
+    }
+
+    /// 已注册服务器名。
+    pub fn names(&self) -> Vec<String> {
+        self.clients
+            .try_lock()
+            .map(|clients| {
+                let mut names: Vec<String> = clients.keys().cloned().collect();
+                names.sort();
+                names
+            })
+            .unwrap_or_default()
+    }
+
+    /// 客户端是否仍在运行（stdio 子进程存活；未注册返回 false）。
+    pub fn is_running(&self, name: &str) -> bool {
+        match self.get(name) {
+            Some(client) => client
+                .try_lock()
+                .map(|mut client| client.is_running())
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
+    /// 断开并终止服务器：stdio 子进程 kill + wait；HTTP 客户端直接移除。
+    pub async fn shutdown(&self, name: &str) -> Result<(), String> {
+        let client = {
+            let mut clients = self.clients.lock().await;
+            clients.remove(name)
+        };
+        match client {
+            Some(client) => {
+                let mut guard = client.lock().await;
+                guard.shutdown().await
+            }
+            None => Err(format!("MCP 服务器 {name} 未连接")),
+        }
+    }
+
+    /// 关闭全部已连接服务器（进程退出前调用，防止遗留 stdio 子进程）。
+    pub async fn shutdown_all(&self) -> Vec<(String, String)> {
+        let names = self.names();
+        let mut errors = Vec::new();
+        for name in names {
+            if let Err(error) = self.shutdown(&name).await {
+                errors.push((name, error));
+            }
+        }
+        errors
+    }
 }

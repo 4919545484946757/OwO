@@ -35,8 +35,37 @@ fn model_name() -> String {
     std::env::var("PADDLE_OCR_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
 }
 
-/// OCR 首选入口：Paddle 启用则先试 Paddle，失败回退 Media.Ocr。
+/// 本地 ONNX OCR 通道（Windows）：模型就绪时返回 Some(结果)，未就绪返回 None。
+#[cfg(target_os = "windows")]
+fn local_onnx_ocr(bmp: &[u8]) -> Option<Result<OcrSummary, String>> {
+    crate::onnx_ocr::cached_engine().map(|engine| crate::onnx_ocr::ocr_bmp_onnx(bmp, &engine))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn local_onnx_ocr(_bmp: &[u8]) -> Option<Result<OcrSummary, String>> {
+    None
+}
+
+/// OCR 首选入口：本地 ONNX（模型就绪时）→ Paddle 云（启用时）→ Media.Ocr。
+/// `OWO_OCR_STRICT=onnx` 可强制只用本地 ONNX 并暴露错误；`=paddle` 同理（原语义）。
 pub async fn ocr_preferred(bmp: &[u8]) -> Result<OcrSummary, String> {
+    let strict = std::env::var("OWO_OCR_STRICT").unwrap_or_default();
+    if strict.eq_ignore_ascii_case("onnx") {
+        return local_onnx_ocr(bmp)
+            .unwrap_or_else(|| Err("ONNX OCR 模型未就绪（OWO_OCR_STRICT=onnx）".to_string()));
+    }
+    // 本地 ONNX 优先：模型就绪时先走本地（确定性、无网、不受数据出境开关约束）
+    if let Some(result) = local_onnx_ocr(bmp) {
+        match result {
+            Ok(mut summary) => {
+                summary.provider = Some("onnx-v4".to_string());
+                return Ok(summary);
+            }
+            Err(onnx_error) => {
+                tracing::debug!(target: "owo", "本地 ONNX OCR 失败，降级后续通道：{onnx_error}");
+            }
+        }
+    }
     if paddle_enabled() {
         match ocr_paddle(bmp).await {
             Ok(mut summary) => {
@@ -44,14 +73,11 @@ pub async fn ocr_preferred(bmp: &[u8]) -> Result<OcrSummary, String> {
                 return Ok(summary);
             }
             Err(paddle_error) => {
-                if std::env::var("OWO_OCR_STRICT")
-                    .map(|value| value.eq_ignore_ascii_case("paddle"))
-                    .unwrap_or(false)
-                {
+                if strict.eq_ignore_ascii_case("paddle") {
                     return Err(format!("PaddleOCR 严格模式：{paddle_error}"));
                 }
                 let mut summary = crate::ocr::ocr_bmp_detailed(bmp).map_err(|media_error| {
-                    format!("PaddleOCR({paddle_error}) 与 Media.Ocr({media_error}) 均失败")
+                    format!("ONNX/PaddleOCR({paddle_error}) 与 Media.Ocr({media_error}) 均失败")
                 })?;
                 summary.provider = Some("media".to_string());
                 return Ok(summary);

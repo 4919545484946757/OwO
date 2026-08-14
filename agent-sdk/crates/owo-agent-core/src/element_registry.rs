@@ -141,6 +141,14 @@ impl ElementRegistry {
             .map(|entries| entries.values().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// 全部应用的元素（供场景图/定位查询跨应用检索）。
+    pub fn list_all(&self) -> Vec<SceneElement> {
+        self.apps
+            .values()
+            .flat_map(|entries| entries.values().cloned())
+            .collect()
+    }
 }
 
 /// 把一次视觉 grounding 结果写入注册表，返回稳定元素 ID（若已存在则复用原 ID）。

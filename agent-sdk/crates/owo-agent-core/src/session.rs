@@ -93,7 +93,8 @@ impl Session {
                 return trimmed.chars().take(40).collect();
             }
         }
-        format!("会话 {}", &self.id[..8])
+        let short_id: String = self.id.chars().take(8).collect();
+        format!("会话 {short_id}")
     }
 
     pub fn rename(&mut self, title: String) {
@@ -113,6 +114,9 @@ impl Session {
 
     pub fn push(&mut self, message: ChatMessage) {
         self.messages.push(message);
+        self.redo_stack.clear();
+        self.message_redo_stack.clear();
+        self.updated_at = Utc::now().to_rfc3339();
     }
 
     /// 当前会话改动 diff（相对工作区路径）。
@@ -271,6 +275,16 @@ pub trait SessionStore: Send + Sync {
         let _ = limit;
         Vec::new()
     }
+
+    /// 分页/过滤/搜索审计（默认退化为 recent_audit；SQLite 存储提供完整实现）。
+    fn query_audit(
+        &self,
+        query: &crate::sqlite_store::AuditQuery,
+    ) -> (Vec<crate::audit::AuditEntry>, usize) {
+        let entries = self.recent_audit(query.limit.max(1));
+        let total = entries.len();
+        (entries, total)
+    }
 }
 
 /// M1 会话存储：JSON 文件（后续迁移 SQLite）。
@@ -309,9 +323,18 @@ impl SessionStore for JsonSessionStore {
     fn save(&self, session: &Session) -> Result<(), AgentError> {
         std::fs::create_dir_all(&self.root)?;
         let tmp = self.root.join(format!("{}.tmp", session.id));
+        let target = self.path(&session.id);
         let content = serde_json::to_vec_pretty(session)?;
         std::fs::write(&tmp, content)?;
-        std::fs::rename(&tmp, self.path(&session.id))?;
+        if let Err(rename_error) = std::fs::rename(&tmp, &target) {
+            // Windows 不允许 rename 覆盖已有文件；保留临时文件写入语义，
+            // 在目标存在时执行一次兼容替换。
+            if !target.exists() {
+                return Err(rename_error.into());
+            }
+            std::fs::remove_file(&target)?;
+            std::fs::rename(&tmp, &target)?;
+        }
         Ok(())
     }
 
@@ -353,6 +376,7 @@ mod tests {
         let session = store
             .create(std::path::Path::new("."), "mock", None)
             .unwrap();
+        store.save(&session).unwrap();
         assert_eq!(store.list().len(), 1);
         let loaded = store.load(&session.id).unwrap();
         assert_eq!(loaded.id, session.id);
@@ -398,6 +422,59 @@ mod tests {
         assert!(session.redo().is_none());
     }
 
+    #[tokio::test]
+    async fn rewind_and_revert_restores_files_before_truncating_history() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-session-rewind-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = workspace.join("changed.txt");
+        std::fs::write(&path, "after").unwrap();
+
+        let mut session = Session::new(&workspace, "mock", None);
+        session.push(ChatMessage::user("first".to_string()));
+        session.push(ChatMessage::assistant_text("reply".to_string()));
+        session.snapshots.insert(
+            path.to_string_lossy().replace('\\', "/"),
+            SnapshotEntry {
+                original_b64: Some(BASE64.encode("before")),
+            },
+        );
+
+        session.revert().await.unwrap();
+        let removed = session.rewind(1);
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(session.messages.len(), 1);
+        assert!(session.snapshots.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before");
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn rewind_does_not_change_files_when_keep_is_current_length() {
+        let workspace =
+            std::env::temp_dir().join(format!("owo-session-rewind-noop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let path = workspace.join("changed.txt");
+        std::fs::write(&path, "after").unwrap();
+
+        let mut session = Session::new(&workspace, "mock", None);
+        session.push(ChatMessage::user("first".to_string()));
+        session.snapshots.insert(
+            path.to_string_lossy().replace('\\', "/"),
+            SnapshotEntry {
+                original_b64: Some(BASE64.encode("before")),
+            },
+        );
+
+        let removed = session.rewind(1);
+
+        assert!(removed.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after");
+        assert!(!session.snapshots.is_empty());
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     #[test]
     fn message_undo_and_redo_round_trip() {
         let mut session = Session::new(".", "mock", None);
@@ -412,6 +489,21 @@ mod tests {
         let restored = session.redo_message().expect("存在可恢复消息");
         assert_eq!(restored.len(), 2);
         assert_eq!(session.messages.len(), 4);
+        assert!(session.redo_message().is_none());
+    }
+
+    #[test]
+    fn pushing_new_history_invalidates_both_redo_stacks() {
+        let mut session = Session::new(".", "mock", None);
+        for index in 0..3 {
+            session.push(ChatMessage::user(format!("m{index}")));
+        }
+        session.rewind(1);
+        session.undo_message(1);
+
+        session.push(ChatMessage::user("new branch".to_string()));
+
+        assert!(session.redo().is_none());
         assert!(session.redo_message().is_none());
     }
 

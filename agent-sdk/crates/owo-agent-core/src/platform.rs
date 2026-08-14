@@ -582,6 +582,137 @@ fn encode_bmp(width: i32, height: i32, bgra: &[u8]) -> Vec<u8> {
     out
 }
 
+/// 用 GDI 在内存位图上渲染文本（白底黑字，支持 `\n` 换行），返回 32bpp BMP。
+/// 纯软件渲染（CreateDIBSection + TextOutW），不依赖交互桌面/前台窗口，
+/// 供 ONNX OCR 集成测试生成已知文本的样本图。
+#[cfg(target_os = "windows")]
+pub fn render_text_bmp(text: &str, font_size: i32) -> Option<Vec<u8>> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
+        GetTextExtentPoint32W, SelectObject, SetBkColor, SetBkMode, SetTextColor, TextOutW,
+        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+        DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, FW_NORMAL, HDC, HGDIOBJ,
+        OUT_DEFAULT_PRECIS, TRANSPARENT,
+    };
+    unsafe {
+        let lines: Vec<Vec<u16>> = text
+            .split('\n')
+            .map(|line| line.encode_utf16().collect())
+            .collect();
+        if lines.iter().all(|l| l.is_empty()) {
+            return None;
+        }
+        let font = CreateFontW(
+            -font_size,
+            0,
+            0,
+            0,
+            FW_NORMAL as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_DEFAULT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32,
+            CLEARTYPE_QUALITY as u32,
+            DEFAULT_PITCH as u32,
+            "Microsoft YaHei\0"
+                .encode_utf16()
+                .collect::<Vec<u16>>()
+                .as_ptr(),
+        );
+        if font.is_null() {
+            return None;
+        }
+        let memory: HDC = CreateCompatibleDC(std::ptr::null_mut());
+        if memory.is_null() {
+            DeleteObject(font as HGDIOBJ);
+            return None;
+        }
+        let old_font = SelectObject(memory, font as HGDIOBJ);
+        let mut extents = Vec::with_capacity(lines.len());
+        let mut max_width = 0i32;
+        for line in &lines {
+            let mut extent: windows_sys::Win32::Foundation::SIZE = std::mem::zeroed();
+            if GetTextExtentPoint32W(memory, line.as_ptr(), line.len() as i32, &mut extent) == 0 {
+                SelectObject(memory, old_font);
+                DeleteObject(font as HGDIOBJ);
+                DeleteDC(memory);
+                return None;
+            }
+            max_width = max_width.max(extent.cx);
+            extents.push(extent);
+        }
+        let margin = 8i32;
+        let line_height = if extents.is_empty() {
+            font_size
+        } else {
+            extents[0].cy
+        };
+        let width = max_width + margin * 2;
+        let height = (extents.len() as i32) * line_height + margin * 2;
+        if width <= 0 || height <= 0 {
+            SelectObject(memory, old_font);
+            DeleteObject(font as HGDIOBJ);
+            DeleteDC(memory);
+            return None;
+        }
+        let mut info: BITMAPINFO = std::mem::zeroed();
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height; // top-down
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let dib = CreateDIBSection(
+            std::ptr::null_mut(),
+            &info,
+            DIB_RGB_COLORS,
+            &mut bits,
+            std::ptr::null_mut(),
+            0,
+        );
+        if dib.is_null() || bits.is_null() {
+            SelectObject(memory, old_font);
+            DeleteObject(font as HGDIOBJ);
+            DeleteDC(memory);
+            return None;
+        }
+        let old_bitmap = SelectObject(memory, dib as HGDIOBJ);
+        // 白底
+        let pixel_bytes = (width as usize) * (height as usize) * 4;
+        std::ptr::write_bytes(bits as *mut u8, 0xFF, pixel_bytes);
+        // 黑字（逐行）
+        SetBkMode(memory, TRANSPARENT as i32);
+        SetBkColor(memory, 0x00FFFFFF);
+        SetTextColor(memory, 0x00000000);
+        for (index, line) in lines.iter().enumerate() {
+            if !line.is_empty() {
+                TextOutW(
+                    memory,
+                    margin,
+                    margin + (index as i32) * line_height,
+                    line.as_ptr(),
+                    line.len() as i32,
+                );
+            }
+        }
+        let bgra = std::slice::from_raw_parts(bits as *const u8, pixel_bytes).to_vec();
+        SelectObject(memory, old_bitmap);
+        SelectObject(memory, old_font);
+        DeleteObject(dib as HGDIOBJ);
+        DeleteObject(font as HGDIOBJ);
+        DeleteDC(memory);
+        Some(encode_bmp(width, height, &bgra))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn render_text_bmp(_text: &str, _font_size: i32) -> Option<Vec<u8>> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,5 +735,24 @@ mod tests {
             assert_eq!(&bmp[..2], b"BM");
             assert!(bmp.len() > 54);
         }
+    }
+
+    #[test]
+    fn render_text_bmp_produces_32bpp_bmp() {
+        // 文本渲染是纯内存 GDI，任何会话都应可用。
+        let bmp = render_text_bmp("OwO 测试", 32).expect("GDI 文本渲染应可用");
+        assert_eq!(&bmp[..2], b"BM");
+        let bit_count = u16::from_le_bytes([bmp[28], bmp[29]]);
+        assert_eq!(bit_count, 32);
+        let width = i32::from_le_bytes([bmp[18], bmp[19], bmp[20], bmp[21]]);
+        let height = i32::from_le_bytes([bmp[22], bmp[23], bmp[24], bmp[25]]).abs();
+        assert!(width > 0 && height > 0);
+        // 白底上应有非白像素（文字痕迹）
+        let pixels = &bmp[54..];
+        let non_white = pixels
+            .chunks_exact(4)
+            .filter(|px| px[0] != 0xFF || px[1] != 0xFF || px[2] != 0xFF)
+            .count();
+        assert!(non_white > 0, "渲染结果应包含非白像素（文字）");
     }
 }

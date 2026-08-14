@@ -12,6 +12,25 @@ pub struct SqliteSessionStore {
     conn: Mutex<Connection>,
 }
 
+/// 审计查询条件（v0.5 生产加固：分页 + 精确过滤 + 模糊搜索）。
+#[derive(Debug, Clone, Default)]
+pub struct AuditQuery {
+    /// 返回条数；0 时取默认 100，上限 1000。
+    pub limit: usize,
+    pub offset: usize,
+    pub event: Option<String>,
+    pub tool: Option<String>,
+    pub approved: Option<bool>,
+    /// 对 detail/event/tool/session_id 做 LIKE 模糊搜索（%/_ 自动转义）。
+    pub q: Option<String>,
+}
+
+fn like_escape(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 impl SqliteSessionStore {
     pub fn open(path: &Path) -> Result<Self, AgentError> {
         let conn = Connection::open(path).map_err(sqlite_error)?;
@@ -222,25 +241,28 @@ impl SessionStore for SqliteSessionStore {
     }
 
     fn append_audit(&self, entries: &[AuditEntry]) -> Result<(), AgentError> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|_| AgentError::Session("SQLite 锁中毒".into()))?;
+        let transaction = conn.transaction().map_err(sqlite_error)?;
         for entry in entries {
-            conn.execute(
-                "INSERT INTO audit (ts, session_id, event, tool, approved, detail)
+            transaction
+                .execute(
+                    "INSERT INTO audit (ts, session_id, event, tool, approved, detail)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    entry.ts,
-                    entry.session_id,
-                    entry.event,
-                    entry.tool,
-                    entry.approved.map(|approved| approved as i64),
-                    entry.detail,
-                ],
-            )
-            .map_err(sqlite_error)?;
+                    params![
+                        entry.ts,
+                        entry.session_id,
+                        entry.event,
+                        entry.tool,
+                        entry.approved.map(|approved| approved as i64),
+                        entry.detail,
+                    ],
+                )
+                .map_err(sqlite_error)?;
         }
+        transaction.commit().map_err(sqlite_error)?;
         Ok(())
     }
 
@@ -270,6 +292,82 @@ impl SessionStore for SqliteSessionStore {
             Err(_) => return Vec::new(),
         };
         rows.filter_map(Result::ok).collect()
+    }
+
+    /// 分页查询审计：返回 (当前页条目, 满足条件总数)。
+    fn query_audit(&self, query: &AuditQuery) -> (Vec<AuditEntry>, usize) {
+        let conn = match self.conn.lock() {
+            Ok(conn) => conn,
+            Err(error) => {
+                eprintln!("AUDIT LOCK ERROR: {error}");
+                return (Vec::new(), 0);
+            }
+        };
+        let mut conditions: Vec<String> = Vec::new();
+        let mut args: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(event) = &query.event {
+            conditions.push("event = ?".to_string());
+            args.push(event.clone().into());
+        }
+        if let Some(tool) = &query.tool {
+            conditions.push("tool = ?".to_string());
+            args.push(tool.clone().into());
+        }
+        if let Some(approved) = query.approved {
+            conditions.push("approved = ?".to_string());
+            args.push(i64::from(approved).into());
+        }
+        if let Some(q) = &query.q {
+            let pattern = format!("%{}%", like_escape(q));
+            conditions.push(
+                "(detail LIKE ? ESCAPE '\\' OR event LIKE ? ESCAPE '\\' \
+                 OR tool LIKE ? ESCAPE '\\' OR session_id LIKE ? ESCAPE '\\')"
+                    .to_string(),
+            );
+            for _ in 0..4 {
+                args.push(pattern.clone().into());
+            }
+        }
+        let where_sql = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+        let total_sql = format!("SELECT COUNT(*) FROM audit{where_sql}");
+        let total = conn
+            .query_row(&total_sql, rusqlite::params_from_iter(args.iter()), |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap_or_default();
+        let limit = if query.limit == 0 {
+            100
+        } else {
+            query.limit.min(1000)
+        };
+        args.push((limit as i64).into());
+        args.push((query.offset as i64).into());
+        let sql = format!(
+            "SELECT ts, session_id, event, tool, approved, detail
+             FROM audit{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+        );
+        let mut statement = match conn.prepare(&sql) {
+            Ok(statement) => statement,
+            Err(_) => return (Vec::new(), total as usize),
+        };
+        let rows = match statement.query_map(rusqlite::params_from_iter(args.iter()), |row| {
+            Ok(AuditEntry {
+                ts: row.get(0)?,
+                session_id: row.get(1)?,
+                event: row.get(2)?,
+                tool: row.get(3)?,
+                approved: row.get::<_, Option<i64>>(4)?.map(|value| value != 0),
+                detail: row.get(5)?,
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return (Vec::new(), total as usize),
+        };
+        (rows.filter_map(Result::ok).collect(), total as usize)
     }
 }
 

@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,7 +67,9 @@ impl Approver for AutoApprover {
 pub struct Policy {
     workspace: PathBuf,
     deny_command_fragments: Vec<String>,
-    read_only: bool,
+    /// 运行时追加的危险命令片段（热生效，与基础列表合并判断）。
+    runtime_deny: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    read_only: Arc<AtomicBool>,
 }
 
 impl Policy {
@@ -83,22 +87,27 @@ impl Policy {
                 "git push".to_string(),
                 "git reset --hard".to_string(),
             ],
-            read_only: false,
+            runtime_deny: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            read_only: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// 只读策略（Plan 模式）：写/执行/注入一律拒绝。
     pub fn read_only(workspace: impl Into<PathBuf>) -> Self {
-        let mut policy = Self::new(workspace);
-        policy.read_only = true;
+        let policy = Self::new(workspace);
+        policy.read_only.store(true, Ordering::Relaxed);
         policy
     }
 
     pub fn set_read_only(&mut self, read_only: bool) {
-        self.read_only = read_only;
+        self.read_only.store(read_only, Ordering::Relaxed);
     }
 
-    /// 追加额外危险命令片段（deny 优先）。
+    pub(crate) fn set_read_only_runtime(&self, read_only: bool) {
+        self.read_only.store(read_only, Ordering::Relaxed);
+    }
+
+    /// 追加额外危险命令片段（deny 优先；写入基础列表，构造时静态）。
     pub fn add_deny_command(&mut self, fragment: impl Into<String>) {
         let fragment = fragment.into().to_lowercase();
         if !self.deny_command_fragments.contains(&fragment) {
@@ -106,12 +115,92 @@ impl Policy {
         }
     }
 
+    /// 运行时追加危险命令片段（热生效，不重建 Policy；进程重启后由 settings 恢复）。
+    pub fn add_runtime_deny(&self, fragment: impl Into<String>) {
+        let fragment = fragment.into().to_lowercase();
+        if let Ok(mut runtime) = self.runtime_deny.lock() {
+            if !runtime.contains(&fragment) {
+                runtime.push(fragment);
+            }
+        }
+    }
+
+    pub(crate) fn replace_runtime_deny(&self, fragments: &[String]) {
+        if let Ok(mut runtime) = self.runtime_deny.lock() {
+            runtime.clear();
+            for fragment in fragments {
+                let fragment = fragment.to_lowercase();
+                if !fragment.is_empty() && !runtime.contains(&fragment) {
+                    runtime.push(fragment);
+                }
+            }
+        }
+    }
+
     pub fn is_read_only(&self) -> bool {
-        self.read_only
+        self.read_only.load(Ordering::Relaxed)
     }
 
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+
+    /// 全部危险命令片段（基础 + 运行时，去重；诊断/可视化用只读访问器）。
+    pub fn deny_fragments(&self) -> Vec<String> {
+        let runtime = self
+            .runtime_deny
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let mut all = self.deny_command_fragments.clone();
+        for fragment in runtime {
+            if !all.contains(&fragment) {
+                all.push(fragment);
+            }
+        }
+        all
+    }
+
+    /// 工具 → 权限级别矩阵（内置映射，诊断面板展示）。
+    pub fn tool_levels() -> Vec<(String, Level)> {
+        [
+            ("read_file", Level::Read),
+            ("list_dir", Level::Read),
+            ("search_files", Level::Read),
+            ("screen_ocr", Level::Read),
+            ("desktop_window_ocr", Level::Read),
+            ("ocr_region", Level::Read),
+            ("desktop_foreground", Level::Read),
+            ("desktop_window_list", Level::Read),
+            ("desktop_wait", Level::Read),
+            ("desktop_wait_until", Level::Read),
+            ("browser_snapshot", Level::Read),
+            ("screen_vision", Level::Read),
+            ("vision_verify", Level::Read),
+            ("vision_ground", Level::Read),
+            ("write_file", Level::Write),
+            ("browser_screenshot", Level::Write),
+            ("browser_download_image", Level::Write),
+            ("run_command", Level::Execute),
+            ("browser_navigate", Level::Execute),
+            ("browser_search", Level::Execute),
+            ("browser_click", Level::Execute),
+            ("browser_type", Level::Execute),
+            ("browser_press", Level::Execute),
+            ("browser_close", Level::Execute),
+            ("text.inject", Level::Inject),
+            ("clipboard", Level::Inject),
+            ("desktop_click", Level::Inject),
+            ("desktop_type", Level::Inject),
+            ("desktop_key", Level::Inject),
+            ("desktop_shortcut", Level::Inject),
+            ("desktop_activate", Level::Inject),
+            ("desktop_launch", Level::Inject),
+            ("desktop_scroll", Level::Inject),
+        ]
+        .iter()
+        .map(|(tool, level)| (tool.to_string(), *level))
+        .collect()
     }
 
     pub fn level_for(tool: &str) -> Level {
@@ -163,11 +252,11 @@ impl Policy {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let lower = command.to_lowercase();
-                if self
-                    .deny_command_fragments
+                let denied = self
+                    .deny_fragments()
                     .iter()
-                    .any(|frag| lower.contains(frag))
-                {
+                    .any(|frag| lower.contains(frag));
+                if denied {
                     "拒绝：命令命中危险模式".to_string()
                 } else {
                     format!("执行命令：{command}")
@@ -189,7 +278,7 @@ impl Policy {
         if request.reason.starts_with("拒绝") {
             return Decision::Deny;
         }
-        if self.read_only && request.level != Level::Read {
+        if self.is_read_only() && request.level != Level::Read {
             return Decision::Deny;
         }
         match request.level {
@@ -271,5 +360,24 @@ mod tests {
             &json!({ "command": "danger-command --force" }),
         );
         assert_eq!(policy.decision(&request), Decision::Deny);
+    }
+
+    #[test]
+    fn runtime_policy_settings_take_effect_without_rebuilding() {
+        let policy = Policy::new(".");
+        let write = policy.evaluate("write_file", &json!({ "path": "a.txt" }));
+        assert_eq!(policy.decision(&write), Decision::Ask);
+
+        policy.set_read_only_runtime(true);
+        assert_eq!(policy.decision(&write), Decision::Deny);
+        policy.set_read_only_runtime(false);
+        assert_eq!(policy.decision(&write), Decision::Ask);
+
+        policy.replace_runtime_deny(&["danger-now".to_string()]);
+        let denied = policy.evaluate("run_command", &json!({ "command": "danger-now" }));
+        assert_eq!(policy.decision(&denied), Decision::Deny);
+        policy.replace_runtime_deny(&[]);
+        let allowed_to_ask = policy.evaluate("run_command", &json!({ "command": "danger-now" }));
+        assert_eq!(policy.decision(&allowed_to_ask), Decision::Ask);
     }
 }

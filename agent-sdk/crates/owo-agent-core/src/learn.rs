@@ -7,6 +7,7 @@
 //! - 主动建议默认仅提示，不执行。
 
 use crate::settings::ProactiveSettings;
+use crate::skill_health::{FailureMode, SkillHealth, SkillHealthStore, SkillState};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -25,6 +26,20 @@ pub enum ActionType {
     Launch,
     /// 按屏幕坐标点击（OCR 定位的自绘控件，如 QQ 红包/表情面板）。
     ClickAt,
+    /// 滚动（v0.5 M-B 动作程序扩展）。
+    Scroll,
+    /// 拖拽（v0.5 M-B 动作程序扩展）。
+    Drag,
+    /// 等待（v0.5 M-B 动作程序扩展）。
+    Wait,
+    /// 结构化断言动作（v0.5 M-B，配合 assert.rs 的 VerificationRecipe）。
+    Assert,
+    /// 悬停（v0.5 M-B 动作程序扩展）。
+    Hover,
+    /// 右键点击（v0.5 M-B 动作程序扩展）。
+    RightClick,
+    /// 双击（v0.5 M-B 动作程序扩展）。
+    DoubleClick,
 }
 
 /// 语义锚点：以无障碍角色 + 名称定位，坐标只作辅助，不作为主定位依据。
@@ -226,11 +241,16 @@ impl FlowSkillPackage {
 /// 流程技能包存储：`<data>/skills/user/<name>/`（SKILL.md + graph.json + manifest.json）。
 pub struct FlowSkillStore {
     root: PathBuf,
+    health: std::sync::Mutex<SkillHealthStore>,
 }
 
 impl FlowSkillStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        let health = SkillHealthStore::new(Some(root.join("health.json")));
+        Self {
+            root,
+            health: std::sync::Mutex::new(health),
+        }
     }
 
     fn package_dir(&self, name: &str) -> Result<PathBuf, String> {
@@ -308,6 +328,69 @@ impl FlowSkillStore {
             return Err(format!("技能包不存在：{name}"));
         }
         std::fs::remove_dir_all(&dir).map_err(|error| error.to_string())
+    }
+
+    /// 记录一次执行结果（成功/失败），失败带步骤与原因；返回最新状态。
+    pub fn record_execution(
+        &self,
+        name: &str,
+        ok: bool,
+        step: &str,
+        reason: &str,
+    ) -> Result<SkillState, String> {
+        self.load(name)?;
+        let failure = if ok {
+            None
+        } else {
+            Some(FailureMode {
+                step: step.to_string(),
+                reason: reason.to_string(),
+                at: Utc::now().to_rfc3339(),
+            })
+        };
+        self.health
+            .lock()
+            .map_err(|_| "健康度存储锁中毒".to_string())?
+            .record(name, ok, failure)
+    }
+
+    /// 执行门禁：Disabled 一律拒绝；Degraded 需显式 degraded_ack。
+    pub fn execution_gate(&self, name: &str, degraded_ack: bool) -> Result<(), String> {
+        self.load(name)?;
+        let state = self
+            .health
+            .lock()
+            .map_err(|_| "健康度存储锁中毒".to_string())?
+            .state(name);
+        match state {
+            SkillState::Disabled => Err(format!("技能已禁用：{name}")),
+            SkillState::Degraded if !degraded_ack => Err(format!(
+                "技能处于降级状态（连续失败或模板命中率过低），需 degraded_ack:true 确认后执行：{name}"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn health_state(&self, name: &str) -> SkillState {
+        self.health
+            .lock()
+            .map(|health| health.state(name))
+            .unwrap_or(SkillState::Active)
+    }
+
+    pub fn list_health(&self) -> Vec<(String, SkillHealth)> {
+        self.health
+            .lock()
+            .map(|health| health.list())
+            .unwrap_or_default()
+    }
+
+    pub fn reset_health(&self, name: &str) -> Result<(), String> {
+        self.load(name)?;
+        self.health
+            .lock()
+            .map_err(|_| "健康度存储锁中毒".to_string())?
+            .reset(name)
     }
 }
 
@@ -473,6 +556,206 @@ pub fn generalize_to_graph(samples: &[RecordedAction]) -> Result<ActionGraph, St
     }
     graph.validate()?;
     Ok(graph)
+}
+
+/// 多轨迹对齐 + 变量推断（v0.5 M-C，对应技术文档 5.8.3）。
+///
+/// 归一化（动作类型 + 语义锚点）→ 多轨迹编辑距离对齐（以最长轨迹为骨干）→
+/// 变量边界推断（骨干位置稳定但 Type 动作跨轨迹重复 → `{value}`）→ 线性动作图。
+///
+/// 输入内容默认掩码（不保存真实消息），因此变量推断基于“位置稳定 + 锚点重复”，
+/// 与 `generalize_to_graph` 的单轨迹启发式一致，但增加了跨轨迹一致性约束：
+/// 只有 ≥2 条轨迹在相同位置出现相同锚点的 Type 动作才推断为变量。
+pub fn generalize_traces(traces: &[Vec<RecordedAction>]) -> Result<ActionGraph, String> {
+    if traces.len() < 2 {
+        // 少于 2 条轨迹时回退到单轨迹泛化（保持既有行为兼容）。
+        if let Some(single) = traces.first() {
+            return generalize_to_graph(single);
+        }
+        return Err("没有可泛化的轨迹".to_string());
+    }
+
+    for trace in traces {
+        if trace.is_empty() {
+            return Err("存在空轨迹".to_string());
+        }
+        for action in trace {
+            if action.sensitive || keyword_breaks(&action.anchor) {
+                return Err("轨迹含敏感面，已拒绝泛化".to_string());
+            }
+        }
+    }
+
+    // 骨干 = 最长轨迹；其余轨迹与骨干做编辑距离对齐。
+    let backbone_idx = traces
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, trace)| trace.len())
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let backbone = &traces[backbone_idx];
+    let backbone_keys: Vec<String> = backbone.iter().map(normalized_action_key).collect();
+
+    // aligned[i] = 第 i 条轨迹中与骨干第 j 个位置对齐的索引（Option）。
+    let mut aligned: Vec<Vec<Option<usize>>> = Vec::new();
+    for (index, trace) in traces.iter().enumerate() {
+        if index == backbone_idx {
+            aligned.push((0..trace.len()).map(Some).collect());
+            continue;
+        }
+        let other_keys: Vec<String> = trace.iter().map(normalized_action_key).collect();
+        aligned.push(align_to_backbone(&backbone_keys, &other_keys));
+    }
+
+    let mut graph = ActionGraph::new();
+    for (position, action) in backbone.iter().enumerate() {
+        if action.sensitive || keyword_breaks(&action.anchor) {
+            return Err("样本含敏感面，已拒绝沉淀".to_string());
+        }
+        let id = format!("step-{}", position + 1);
+
+        // 跨轨迹一致性：有多少条轨迹在该位置出现相同归一化锚点。
+        let consistent = aligned
+            .iter()
+            .enumerate()
+            .filter(|(trace_idx, mapping)| {
+                if *trace_idx == backbone_idx {
+                    return true;
+                }
+                mapping[position]
+                    .map(|other_idx| {
+                        normalized_action_key(&traces[*trace_idx][other_idx])
+                            == backbone_keys[position]
+                    })
+                    .unwrap_or(false)
+            })
+            .count();
+
+        let value_template = if action.action_type == ActionType::Type && consistent >= 2 {
+            Some("{value}".to_string())
+        } else {
+            None
+        };
+        graph.add_node(
+            id,
+            action.action_type,
+            action.anchor.clone(),
+            value_template,
+            None,
+        );
+    }
+    for index in 0..backbone.len().saturating_sub(1) {
+        graph.add_edge(
+            format!("step-{}", index + 1),
+            format!("step-{}", index + 2),
+            None,
+            None,
+        );
+    }
+    graph.validate()?;
+    Ok(graph)
+}
+
+/// 动作归一化键：动作类型 + 角色 + 名称（不含坐标与内容）。
+fn normalized_action_key(action: &RecordedAction) -> String {
+    format!(
+        "{:?}/{}//{}",
+        action.action_type,
+        action.anchor.role.as_deref().unwrap_or(""),
+        action.anchor.name
+    )
+}
+
+/// 编辑距离对齐：返回骨干每个位置在 other 中的最佳对齐索引（gap 为 None）。
+///
+/// 使用 Needleman-Wunsch（匹配 0 / 错配 1 / 空位 1）并回溯。
+fn align_to_backbone(backbone: &[String], other: &[String]) -> Vec<Option<usize>> {
+    let m = backbone.len();
+    let n = other.len();
+    // score[i][j]：骨干前 i 个与 other 前 j 个的最小编辑代价。
+    let mut score = vec![vec![0usize; n + 1]; m + 1];
+    score[0] = (0..=n).collect();
+    for (i, row) in score.iter_mut().enumerate().skip(1) {
+        row[0] = i;
+    }
+    for i in 1..=m {
+        for j in 1..=n {
+            let cost = if backbone[i - 1] == other[j - 1] {
+                0
+            } else {
+                1
+            };
+            score[i][j] = (score[i - 1][j - 1] + cost)
+                .min(score[i - 1][j] + 1)
+                .min(score[i][j - 1] + 1);
+        }
+    }
+    let mut result = vec![None; m];
+    let (mut i, mut j) = (m, n);
+    while i > 0 {
+        if j > 0
+            && score[i][j] == score[i - 1][j - 1] + usize::from(backbone[i - 1] != other[j - 1])
+        {
+            result[i - 1] = Some(j - 1);
+            i -= 1;
+            j -= 1;
+        } else if i > 0 && score[i][j] == score[i - 1][j] + 1 {
+            i -= 1; // 骨干位置在 other 中缺失（gap）。
+        } else if j > 0 && score[i][j] == score[i][j - 1] + 1 {
+            j -= 1; // other 中的额外动作。
+        } else {
+            // 防御：理论不可达，按匹配处理。
+            if j > 0 {
+                result[i - 1] = Some(j - 1);
+                i -= 1;
+                j -= 1;
+            } else {
+                i -= 1;
+            }
+        }
+    }
+    result
+}
+
+/// 沉淀门槛（v0.5 M-C）：同 app + 归一化序列 ≥3 次且成功率 ≥80% 才生成候选。
+///
+/// `outcomes` 与 `traces` 等长时为各轨迹的成功判定；为空时按未知处理（只查数量门槛）。
+pub fn candidate_eligible(traces: &[Vec<RecordedAction>], outcomes: &[bool]) -> Result<(), String> {
+    if traces.len() < 3 {
+        return Err(format!(
+            "沉淀门槛未达：需要 ≥3 条轨迹，当前 {} 条",
+            traces.len()
+        ));
+    }
+    let first_app = traces[0]
+        .first()
+        .map(|action| action.app_id.as_str())
+        .unwrap_or("");
+    if first_app.is_empty() {
+        return Err("沉淀门槛未达：轨迹缺少 app_id".to_string());
+    }
+    if traces
+        .iter()
+        .any(|trace| trace.iter().any(|action| action.app_id != first_app))
+    {
+        return Err("沉淀门槛未达：轨迹必须属于同一应用".to_string());
+    }
+    if !outcomes.is_empty() && outcomes.len() != traces.len() {
+        return Err("沉淀门槛未达：outcomes 与轨迹数量不一致".to_string());
+    }
+    if !outcomes.is_empty() {
+        let successes = outcomes.iter().filter(|ok| **ok).count();
+        let rate = successes as f64 / outcomes.len() as f64;
+        if rate < 0.8 {
+            return Err(format!(
+                "沉淀门槛未达：成功率 {:.1}% < 80%（{} 次成功 / {} 次尝试）",
+                rate * 100.0,
+                successes,
+                outcomes.len()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 示范学习流水线：录制 → 泛化 → 沉淀流程技能包。
@@ -1130,6 +1413,105 @@ mod tests {
         assert_eq!(graph.nodes.len(), 3);
         assert_eq!(graph.variables(), vec!["value"]);
         assert!(graph.validate().is_ok());
+    }
+
+    #[test]
+    fn generalize_traces_infers_variable_from_consistent_type_position() {
+        let trace = |value_at: &str| {
+            vec![
+                typed("搜索输入", value_at),
+                RecordedAction {
+                    app_id: "qq".to_string(),
+                    anchor: SemanticAnchor {
+                        app_id: Some("qq".to_string()),
+                        role: Some("button".to_string()),
+                        name: "发送按钮".to_string(),
+                        parent: None,
+                        element_id: None,
+                    },
+                    action_type: ActionType::Click,
+                    value_masked: true,
+                    sensitive: false,
+                    at: format!("{value_at}-click"),
+                },
+            ]
+        };
+        let traces = vec![trace("t1"), trace("t2"), trace("t3")];
+        let graph = generalize_traces(&traces).unwrap();
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.variables(), vec!["value"]);
+        assert!(graph.validate().is_ok());
+        assert_eq!(graph.nodes[0].anchor.name, "搜索输入");
+        assert_eq!(graph.nodes[1].anchor.name, "发送按钮");
+    }
+
+    #[test]
+    fn generalize_traces_aligns_traces_with_length_variation() {
+        // 第二条轨迹多一次无关点击，仍应对齐到骨干并生成合法图。
+        let trace_a = vec![
+            typed("搜索输入", "t1"),
+            RecordedAction {
+                app_id: "qq".to_string(),
+                anchor: SemanticAnchor {
+                    app_id: Some("qq".to_string()),
+                    role: Some("button".to_string()),
+                    name: "发送按钮".to_string(),
+                    parent: None,
+                    element_id: None,
+                },
+                action_type: ActionType::Click,
+                value_masked: true,
+                sensitive: false,
+                at: "t1-click".to_string(),
+            },
+        ];
+        let mut trace_b = trace_a.clone();
+        trace_b.insert(
+            1,
+            RecordedAction {
+                app_id: "qq".to_string(),
+                anchor: SemanticAnchor {
+                    app_id: Some("qq".to_string()),
+                    role: Some("button".to_string()),
+                    name: "无关按钮".to_string(),
+                    parent: None,
+                    element_id: None,
+                },
+                action_type: ActionType::Click,
+                value_masked: true,
+                sensitive: false,
+                at: "t2-extra".to_string(),
+            },
+        );
+        let graph = generalize_traces(&[trace_a, trace_b.clone(), trace_b]).unwrap();
+        assert!(graph.validate().is_ok());
+        assert_eq!(graph.nodes[0].anchor.name, "搜索输入");
+        assert!(graph.variables().contains(&"value".to_string()));
+    }
+
+    #[test]
+    fn candidate_eligible_enforces_count_and_success_rate() {
+        let trace = || vec![typed("搜索输入", "t")];
+        assert!(candidate_eligible(&[], &[]).is_err());
+        assert!(candidate_eligible(&[trace(), trace()], &[]).is_err());
+        assert!(candidate_eligible(&[trace(), trace(), trace()], &[]).is_ok());
+
+        // 3 条轨迹 2 次成功 = 66.7% < 80%，拒绝。
+        assert!(candidate_eligible(&[trace(), trace(), trace()], &[true, true, false]).is_err());
+        // 5 条轨迹 4 次成功 = 80%，通过。
+        assert!(candidate_eligible(
+            &[trace(), trace(), trace(), trace(), trace()],
+            &[true, true, true, true, false]
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn generalize_traces_rejects_sensitive_or_empty_traces() {
+        assert!(generalize_traces(&[vec![], vec![]]).is_err());
+        let mut sensitive = typed("搜索输入", "t");
+        sensitive.sensitive = true;
+        assert!(generalize_traces(&[vec![sensitive], vec![typed("搜索输入", "t")]]).is_err());
     }
 
     #[test]

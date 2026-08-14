@@ -206,11 +206,18 @@ pub struct OpenAiCompatibleConfig {
 
 impl OpenAiCompatibleConfig {
     pub fn from_env() -> Result<Self, String> {
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-            "缺少 OPENAI_API_KEY 环境变量（或设置 OPENAI_BASE_URL 指向本地兼容端点）".to_string()
-        })?;
         let base_url = std::env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let api_key = match std::env::var("OPENAI_API_KEY") {
+            Ok(value) => value,
+            Err(_) if is_local_endpoint(&base_url) => String::new(),
+            Err(_) => {
+                return Err(
+                    "缺少 OPENAI_API_KEY 环境变量（或设置 OPENAI_BASE_URL 指向本地兼容端点）"
+                        .to_string(),
+                )
+            }
+        };
         let model =
             std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
         let cloud_enabled = std::env::var("OWO_CLOUD_ENABLED")
@@ -327,14 +334,16 @@ impl OpenAiCompatibleProvider {
             list
         };
         for (label, client) in attempts {
-            match client
+            let request = client
                 .post(url)
-                .bearer_auth(&self.config.api_key)
                 .json(body)
-                .timeout(std::time::Duration::from_secs(120))
-                .send()
-                .await
-            {
+                .timeout(std::time::Duration::from_secs(120));
+            let request = if self.config.api_key.is_empty() {
+                request
+            } else {
+                request.bearer_auth(&self.config.api_key)
+            };
+            match request.send().await {
                 Ok(response) if response.status().is_success() => return Ok(response),
                 Ok(response) => {
                     let status = response.status();
@@ -354,6 +363,9 @@ impl OpenAiCompatibleProvider {
 
     /// 数据出境开关：优先读运行时环境变量（支持设置页即时切换），缺省用启动配置。
     fn cloud_enabled(&self) -> bool {
+        if is_local_endpoint(&self.config.base_url) {
+            return true;
+        }
         std::env::var("OWO_CLOUD_ENABLED")
             .ok()
             .and_then(|value| value.parse::<bool>().ok())
@@ -420,6 +432,9 @@ impl OpenAiCompatibleProvider {
         });
         if !tool_payload.is_empty() {
             body["tools"] = Value::Array(tool_payload);
+        }
+        if stream {
+            body["stream_options"] = json!({ "include_usage": true });
         }
         body
     }
@@ -613,6 +628,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let mut buffer = String::new();
         let mut content = String::new();
         let mut accumulators: HashMap<usize, ToolCallAccumulator> = HashMap::new();
+        let mut utf8_pending = Vec::new();
+        let mut saw_sse = false;
 
         while let Some(chunk) =
             tokio::time::timeout(std::time::Duration::from_secs(60), stream.next())
@@ -620,39 +637,44 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 .map_err(|_| "模型流式输出空闲超时（60s 无数据）".to_string())?
         {
             let chunk = chunk.map_err(|e| format!("流式读取失败：{e}"))?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            let mut completed = true;
-            while completed {
-                match buffer.find('\n') {
-                    Some(newline) => {
-                        let line = buffer[..newline].trim().to_string();
-                        buffer.drain(..=newline);
-                        if let Some(payload) = line.strip_prefix("data:") {
-                            if payload.trim() == "[DONE]" {
-                                break;
-                            }
-                            if let Some(delta) = parse_sse_payload(payload) {
-                                if let Some(usage) = delta.usage {
-                                    self.record_usage(&json!({
-                                        "prompt_tokens": usage.prompt_tokens,
-                                        "completion_tokens": usage.completion_tokens,
-                                        "total_tokens": usage.total_tokens,
-                                    }));
-                                }
-                                if let Some(delta_content) = delta.content {
-                                    content.push_str(&delta_content);
-                                    on_delta(delta_content);
-                                }
-                                accumulate_tool_fragments(
-                                    &mut accumulators,
-                                    &delta.tool_call_fragments,
-                                );
-                            }
-                        }
-                    }
-                    None => completed = false,
-                }
+            append_utf8_chunk(&mut buffer, &mut utf8_pending, &chunk);
+            if let Some(usage) = consume_stream_buffer(
+                &mut buffer,
+                &mut content,
+                &mut accumulators,
+                on_delta,
+                &mut saw_sse,
+            ) {
+                self.record_usage(&json!({
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                }));
             }
+        }
+
+        if !utf8_pending.is_empty() {
+            buffer.push_str(&String::from_utf8_lossy(&utf8_pending));
+        }
+        if !buffer.trim().is_empty() {
+            buffer.push('\n');
+            if let Some(usage) = consume_stream_buffer(
+                &mut buffer,
+                &mut content,
+                &mut accumulators,
+                on_delta,
+                &mut saw_sse,
+            ) {
+                self.record_usage(&json!({
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                }));
+            }
+        }
+
+        if !saw_sse {
+            return Err("模型流式响应为空或不是 SSE 格式".to_string());
         }
 
         if let Some(tool_calls) = build_tool_calls(&mut accumulators) {
@@ -665,6 +687,76 @@ impl ModelProvider for OpenAiCompatibleProvider {
     fn usage_snapshot(&self) -> TokenUsage {
         self.usage.lock().map(|usage| *usage).unwrap_or_default()
     }
+}
+
+fn is_local_endpoint(base_url: &str) -> bool {
+    let authority = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    let host = if authority.starts_with('[') {
+        authority
+            .split(']')
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches('[')
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn append_utf8_chunk(buffer: &mut String, pending: &mut Vec<u8>, chunk: &[u8]) {
+    pending.extend_from_slice(chunk);
+    match String::from_utf8(std::mem::take(pending)) {
+        Ok(text) => buffer.push_str(&text),
+        Err(error) => {
+            let bytes = error.into_bytes();
+            let valid = std::str::from_utf8(&bytes)
+                .map(|_| bytes.len())
+                .unwrap_or_else(|error| error.valid_up_to());
+            buffer.push_str(std::str::from_utf8(&bytes[..valid]).unwrap_or_default());
+            pending.extend_from_slice(&bytes[valid..]);
+        }
+    }
+}
+
+fn consume_stream_buffer(
+    buffer: &mut String,
+    content: &mut String,
+    accumulators: &mut HashMap<usize, ToolCallAccumulator>,
+    on_delta: &mut (dyn FnMut(String) + Send),
+    saw_sse: &mut bool,
+) -> Option<TokenUsage> {
+    let mut usage = None;
+    while let Some(newline) = buffer.find('\n') {
+        let line = buffer[..newline].trim().to_string();
+        buffer.drain(..=newline);
+        let Some(payload) = line.strip_prefix("data:") else {
+            continue;
+        };
+        *saw_sse = true;
+        if payload.trim() == "[DONE]" {
+            continue;
+        }
+        if let Some(delta) = parse_sse_payload(payload) {
+            if delta.usage.is_some() {
+                usage = delta.usage;
+            }
+            if let Some(delta_content) = delta.content {
+                content.push_str(&delta_content);
+                on_delta(delta_content);
+            }
+            accumulate_tool_fragments(accumulators, &delta.tool_call_fragments);
+        }
+    }
+    usage
 }
 
 #[cfg(test)]
@@ -801,7 +893,7 @@ mod tests {
     async fn cloud_disabled_rejects_requests_before_network() {
         let _guard = ENV_LOCK.lock().await;
         std::env::set_var("OPENAI_API_KEY", "test");
-        std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9");
+        std::env::set_var("OPENAI_BASE_URL", "https://api.example.com/v1");
         std::env::set_var("OPENAI_MODEL", "mock");
         std::env::set_var("OWO_CLOUD_ENABLED", "false");
         let config = OpenAiCompatibleConfig::from_env().unwrap();
@@ -819,17 +911,13 @@ mod tests {
     async fn cloud_switch_applies_without_reconstruction() {
         let _guard = ENV_LOCK.lock().await;
         std::env::set_var("OPENAI_API_KEY", "test");
-        std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:9");
+        std::env::set_var("OPENAI_BASE_URL", "https://api.example.com/v1");
         std::env::set_var("OPENAI_MODEL", "mock");
         std::env::remove_var("OWO_CLOUD_ENABLED");
         let config = OpenAiCompatibleConfig::from_env().unwrap();
         assert!(config.cloud_enabled);
         let provider = OpenAiCompatibleProvider::new(config).unwrap();
-        let error = provider.complete(&[], &[]).await.unwrap_err();
-        assert!(
-            !error.contains("数据出境"),
-            "开关开启时应尝试联网，而不是被拒：{error}"
-        );
+        assert!(provider.cloud_enabled());
         std::env::set_var("OWO_CLOUD_ENABLED", "false");
         let error = provider.complete(&[], &[]).await.unwrap_err();
         assert!(error.contains("数据出境"));
@@ -837,6 +925,46 @@ mod tests {
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("OPENAI_BASE_URL");
         std::env::remove_var("OPENAI_MODEL");
+    }
+
+    #[tokio::test]
+    async fn local_endpoint_does_not_require_key_or_cloud_switch() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1");
+        std::env::set_var("OWO_CLOUD_ENABLED", "false");
+
+        let config = OpenAiCompatibleConfig::from_env().unwrap();
+        assert!(config.api_key.is_empty());
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+        assert!(provider.cloud_enabled());
+
+        std::env::remove_var("OWO_CLOUD_ENABLED");
+        std::env::remove_var("OPENAI_BASE_URL");
+    }
+
+    #[test]
+    fn stream_request_includes_usage_option() {
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
+            api_key: String::new(),
+            model: "local".to_string(),
+            cloud_enabled: false,
+        })
+        .unwrap();
+        let body = provider.request_body(&[], &[], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn utf8_chunks_are_reassembled_without_replacement_characters() {
+        let mut buffer = String::new();
+        let mut pending = Vec::new();
+        let bytes = "中".as_bytes();
+        append_utf8_chunk(&mut buffer, &mut pending, &bytes[..1]);
+        append_utf8_chunk(&mut buffer, &mut pending, &bytes[1..]);
+        assert_eq!(buffer, "中");
+        assert!(pending.is_empty());
     }
 
     #[tokio::test]
@@ -865,6 +993,20 @@ mod tests {
     #[test]
     fn provider_creates_direct_client_when_proxy_configured() {
         let _guard = ENV_LOCK.blocking_lock();
+        let proxy_envs = [
+            "OWO_HTTP_PROXY",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "https_proxy",
+            "http_proxy",
+        ];
+        let previous: Vec<_> = proxy_envs
+            .iter()
+            .map(|name| (*name, std::env::var(name).ok()))
+            .collect();
+        for name in proxy_envs {
+            std::env::remove_var(name);
+        }
         std::env::set_var("OWO_HTTP_PROXY", "http://127.0.0.1:9");
         let config = OpenAiCompatibleConfig {
             base_url: "http://127.0.0.1:9/v1".to_string(),
@@ -883,5 +1025,10 @@ mod tests {
         };
         let provider = OpenAiCompatibleProvider::new(config).expect("客户端创建成功");
         assert!(provider.direct_client.is_none());
+        for (name, value) in previous {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            }
+        }
     }
 }

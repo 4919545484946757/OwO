@@ -4,6 +4,8 @@
 //! Windows 实现走 UI Automation + SendInput；测试用脚本化假源覆盖全部逻辑。
 
 use crate::learn::{ActionGraph, ActionType, SemanticAnchor};
+use crate::locate::{locate, AnchorQuery};
+use crate::scene::{Evidence, EvidenceSource, GraphElement, SceneGraph};
 use crate::ElementRegistry;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -115,6 +117,18 @@ pub fn execute_graph(
             ActionType::Inject => source.type_text(0, &text),
             ActionType::Launch => source.launch(&text),
             ActionType::ClickAt => parse_click_at(&text).and_then(|(x, y)| source.click_at(x, y)),
+            // v0.5 M-B：新动作类型由动作程序解释器提供完整语义；
+            // 线性图兼容路径暂不执行，避免静默误操作。
+            ActionType::Scroll
+            | ActionType::Drag
+            | ActionType::Hover
+            | ActionType::RightClick
+            | ActionType::DoubleClick
+            | ActionType::Assert => Err(format!(
+                "动作类型 {:?} 需要动作程序解释器（action_program）执行",
+                node.action_type
+            )),
+            ActionType::Wait => Ok(()),
         };
         let mut ok = outcome.is_ok();
         let mut detail = outcome.err().unwrap_or_default();
@@ -334,6 +348,52 @@ pub(crate) fn registry_element_point(
     ))
 }
 
+/// 多源定位锚点（v0.5 M-A 收尾）：从元素注册表构建场景图并做加权打分。
+///
+/// 返回可信命中的元素中心；视觉-only/冲突/低于 min_confidence 的结果返回 None，
+/// 由调用方降级到 UIA 递归查找与 OCR 兜底（不硬猜）。
+pub(crate) fn locate_anchor_point(
+    registry: &ElementRegistry,
+    anchor: &SemanticAnchor,
+) -> Option<(i32, i32)> {
+    let mut graph = SceneGraph::new();
+    let mut elements: Vec<GraphElement> = registry
+        .list_all()
+        .into_iter()
+        .map(|element| {
+            let mut entry = GraphElement::from_element(element.clone());
+            let source = if element.sources.contains(&"uia".to_string()) {
+                EvidenceSource::Uia
+            } else if element.sources.contains(&"ocr".to_string()) {
+                EvidenceSource::Ocr
+            } else {
+                EvidenceSource::Vision
+            };
+            entry.add_evidence(Evidence::new(source, &element, element.confidence));
+            entry
+        })
+        .collect();
+    graph.update(None, None, std::mem::take(&mut elements));
+    let query = AnchorQuery {
+        app_id: anchor.app_id.clone(),
+        role: anchor.role.clone(),
+        name_pattern: Some(anchor.name.clone()),
+        parent: anchor.parent.clone(),
+        stable_id: anchor.element_id.clone(),
+        ..AnchorQuery::default()
+    };
+    let result = locate(&graph, &query);
+    if !result.is_reliable() {
+        return None;
+    }
+    result.best.map(|element| {
+        (
+            element.x + element.width / 2,
+            element.y + element.height / 2,
+        )
+    })
+}
+
 /// 在 OCR 行中找包含目标文本的首行中心（纯函数，供 OCR 锚点兜底与单测使用）。
 pub(crate) fn find_ocr_anchor_point(
     lines: &[crate::ocr::OcrLine],
@@ -365,6 +425,15 @@ impl UiActionSource for WindowsUiaSource {
             })?;
             keep.push(AnchorTarget::Point(point.0, point.1));
             return Ok((keep.len() - 1) as u64);
+        }
+        // v0.5 M-A：多源定位优先（注册表证据加权），不可信时再走 UIA/OCR 兜底。
+        if let Some(registry) = self.registry.as_ref() {
+            if let Ok(registry) = registry.lock() {
+                if let Some(point) = locate_anchor_point(&registry, anchor) {
+                    keep.push(AnchorTarget::Point(point.0, point.1));
+                    return Ok((keep.len() - 1) as u64);
+                }
+            }
         }
         if let Some(element) = self.find_recursive(&self.root, anchor, 0, &[]) {
             keep.push(AnchorTarget::Element(element));
@@ -1210,5 +1279,78 @@ mod tests {
             registry_element_point(&registry, "qq", "qq:button:999"),
             None
         );
+    }
+
+    #[test]
+    fn locate_anchor_point_resolves_by_name_with_uia_evidence() {
+        let mut registry = ElementRegistry::new();
+        let element = SceneElement {
+            id: String::new(),
+            app_id: "qq".into(),
+            name: "发送".into(),
+            role_hint: "button".into(),
+            sources: vec!["uia".into()],
+            x: 800,
+            y: 600,
+            width: 100,
+            height: 40,
+            confidence: 0.9,
+            stale_frames: 0,
+            updated_at: "2026-08-13T00:00:00Z".into(),
+        };
+        registry.update("qq", vec![element]);
+        let anchor = SemanticAnchor {
+            app_id: Some("qq".into()),
+            role: Some("button".into()),
+            name: "发送".into(),
+            parent: None,
+            element_id: None,
+        };
+        assert_eq!(locate_anchor_point(&registry, &anchor), Some((850, 620)));
+    }
+
+    #[test]
+    fn locate_anchor_point_refuses_unreliable_vision_only() {
+        let mut registry = ElementRegistry::new();
+        let element = SceneElement {
+            id: String::new(),
+            app_id: "qq".into(),
+            name: "表情面板".into(),
+            role_hint: "generic".into(),
+            sources: vec!["vision".into()],
+            x: 10,
+            y: 20,
+            width: 80,
+            height: 30,
+            confidence: 0.95,
+            stale_frames: 0,
+            updated_at: "2026-08-13T00:00:00Z".into(),
+        };
+        registry.update("qq", vec![element]);
+        let anchor = SemanticAnchor {
+            app_id: Some("qq".into()),
+            role: None,
+            name: "表情面板".into(),
+            parent: None,
+            element_id: None,
+        };
+        assert_eq!(
+            locate_anchor_point(&registry, &anchor),
+            None,
+            "未交叉验证的视觉-only 元素不应被直接点击"
+        );
+    }
+
+    #[test]
+    fn locate_anchor_point_returns_none_for_unknown_name() {
+        let registry = ElementRegistry::new();
+        let anchor = SemanticAnchor {
+            app_id: Some("qq".into()),
+            role: None,
+            name: "不存在的按钮".into(),
+            parent: None,
+            element_id: None,
+        };
+        assert_eq!(locate_anchor_point(&registry, &anchor), None);
     }
 }

@@ -200,6 +200,19 @@ impl SituationStore {
             self.enabled.insert(layer);
         } else {
             self.enabled.remove(&layer);
+            self.recent_actions.clear();
+            match layer {
+                PerceptionLayer::L0Event => {
+                    self.foreground = None;
+                    self.last_clipboard_sequence = 0;
+                }
+                PerceptionLayer::L1Ui => {
+                    self.ui = None;
+                    self.last_ui_key.clear();
+                }
+                PerceptionLayer::L2Visual => self.capture_ring.clear(),
+                PerceptionLayer::L3Semantic => self.hypothesis = None,
+            }
         }
     }
 
@@ -450,11 +463,20 @@ impl SituationStore {
             permission_level = "l3_semantic".to_string();
         }
         SituationSnapshot {
-            foreground_app: self.foreground.clone(),
+            foreground_app: self
+                .foreground
+                .clone()
+                .filter(|_| self.is_enabled(PerceptionLayer::L0Event)),
             permission_level,
-            ui_context: self.ui.clone(),
+            ui_context: self
+                .ui
+                .clone()
+                .filter(|_| self.is_enabled(PerceptionLayer::L1Ui)),
             content: self.content.clone(),
-            task_hypothesis: self.hypothesis.clone(),
+            task_hypothesis: self
+                .hypothesis
+                .clone()
+                .filter(|_| self.is_enabled(PerceptionLayer::L3Semantic)),
             recent_actions: self.recent_actions(),
             capture: self
                 .capture_ring
@@ -489,6 +511,48 @@ mod tests {
         assert!(snapshot.content.as_ref().unwrap().masked);
         assert!(snapshot.content.as_ref().unwrap().snippet.is_none());
         assert!(snapshot.capture.is_none());
+    }
+
+    #[test]
+    fn revoking_layers_clears_cached_data_and_filters_snapshot() {
+        let mut store = SituationStore::new();
+        store
+            .record_event(PerceptionEvent::ForegroundChanged { app: app() })
+            .unwrap();
+        store
+            .record_event(PerceptionEvent::UiChanged {
+                ui: UiContext {
+                    window: "VSCode".to_string(),
+                    active_view: "editor".to_string(),
+                    accessible: true,
+                    ui_tree: Vec::new(),
+                },
+            })
+            .unwrap();
+        store.set_layer_enabled(PerceptionLayer::L2Visual, true);
+        store
+            .record_event(PerceptionEvent::Capture {
+                frame: CaptureMeta {
+                    id: "frame-1".to_string(),
+                    captured_at: None,
+                    summary: Some("测试".to_string()),
+                },
+            })
+            .unwrap();
+        store.set_layer_enabled(PerceptionLayer::L3Semantic, true);
+        store.set_task_hypothesis("coding", 0.8);
+
+        store.set_layer_enabled(PerceptionLayer::L0Event, false);
+        store.set_layer_enabled(PerceptionLayer::L1Ui, false);
+        store.set_layer_enabled(PerceptionLayer::L2Visual, false);
+        store.set_layer_enabled(PerceptionLayer::L3Semantic, false);
+
+        let snapshot = store.snapshot();
+        assert!(snapshot.foreground_app.is_none());
+        assert!(snapshot.ui_context.is_none());
+        assert!(snapshot.task_hypothesis.is_none());
+        assert!(snapshot.capture.is_none());
+        assert_eq!(store.capture_ring_len(), 0);
     }
 
     #[test]
