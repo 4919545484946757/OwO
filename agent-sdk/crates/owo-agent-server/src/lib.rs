@@ -68,6 +68,9 @@ pub struct AppState {
     pub scene: Arc<Mutex<owo_agent_core::scene::SceneGraph>>,
     /// computer-use 任务注册表（任务级审批 + 熔断，m4d 前奏）。
     pub computer_tasks: Arc<owo_agent_core::ComputerTaskRegistry>,
+    /// 云端执行队列（/cloud/* 路由；懒初始化，传输由环境变量决定）。
+    /// tokio Mutex：异步 handler 内跨 await 持锁（std MutexGuard 非 Send）。
+    pub cloud_queue: Arc<tokio::sync::Mutex<Option<owo_agent_core::cloud_exec::CloudTaskQueue>>>,
 }
 
 impl AppState {
@@ -117,6 +120,7 @@ impl AppState {
             ))),
             scene: Arc::new(Mutex::new(owo_agent_core::scene::SceneGraph::new())),
             computer_tasks: Arc::new(owo_agent_core::ComputerTaskRegistry::new()),
+            cloud_queue: Arc::new(tokio::sync::Mutex::new(None)),
             data_root,
             elements,
         }
@@ -272,6 +276,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/computer-use/sensitive-check",
             post(computer_sensitive_check),
         )
+        .route("/computer-use/task/{id}/run", post(computer_task_run))
+        .route("/cloud/tasks", post(cloud_task_submit))
+        .route("/cloud/tasks/{id}", get(cloud_task_status))
+        .route("/cloud/tasks/{id}/result", get(cloud_task_result))
+        .route("/cloud/tasks/{id}/cancel", post(cloud_task_cancel))
         .fallback_service(ServeDir::new(desktop_web_dir()))
         .layer(CorsLayer::permissive())
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
@@ -383,7 +392,36 @@ async fn openapi_spec() -> Json<Value> {
             "/computer-use/task": { "post": { "operationId": "computerTaskCreate", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "target_app": { "type": "string" }, "description": { "type": "string" }, "allowed_actions": { "type": "array", "items": { "type": "string" } }, "max_duration_ms": { "type": "integer" } }, "required": ["target_app"] } } } }, "responses": { "200": { "description": "task created (Pending)" } } } },
             "/computer-use/task/{id}/{action}": { "post": { "operationId": "computerTaskTransition", "parameters": [path_param("id"), path_param("action")], "responses": { "200": { "description": "task state transitioned" } } } },
             "/computer-use/task/{id}/check/{action}": { "get": { "operationId": "computerTaskCheck", "parameters": [path_param("id"), path_param("action")], "responses": { "200": { "description": "task executable check" } } } },
-            "/computer-use/sensitive-check": { "post": { "operationId": "computerSensitiveCheck", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "role": { "type": "string" }, "ocr_text": { "type": "string" } }, "required": ["name"] } } } }, "responses": { "200": { "description": "sensitive ui detection" } } } }
+            "/computer-use/sensitive-check": { "post": { "operationId": "computerSensitiveCheck", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "role": { "type": "string" }, "ocr_text": { "type": "string" } }, "required": ["name"] } } } }, "responses": { "200": { "description": "sensitive ui detection" } } } },
+            "/computer-use/task/{id}/run": { "post": { "operationId": "computerTaskRun", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "goals": { "type": "array", "items": { "type": "object", "properties": { "anchor_text": { "type": "string" }, "action": { "type": "string" }, "value": { "type": "string" }, "verify_text": { "type": "string" } } } } } } } } }, "responses": { "200": { "description": "approved task executed (closed loop)" } } } },
+            "/cloud/tasks": { "post": { "operationId": "cloudTaskSubmit", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" }, "workspace_dir": { "type": "string" }, "commands": { "type": "array", "items": { "type": "string" } }, "env_passthrough": { "type": "array", "items": { "type": "string" } }, "timeout_secs": { "type": "integer" } } } } } }, "responses": { "200": { "description": "cloud task submitted and executed" } } } },
+            "/cloud/tasks/{id}": { "get": { "operationId": "cloudTaskStatus", "parameters": [path_param("id")], "responses": { "200": { "description": "cloud task status + usage" } } } },
+            "/cloud/tasks/{id}/result": { "get": { "operationId": "cloudTaskResult", "parameters": [path_param("id")], "responses": { "200": { "description": "cloud task result + diff summary" } } } },
+            "/cloud/tasks/{id}/cancel": { "post": { "operationId": "cloudTaskCancel", "parameters": [path_param("id")], "responses": { "200": { "description": "cloud task canceled" } } } },
+            "/openapi.json": { "get": { "operationId": "openapiSpec", "responses": { "200": { "description": "OpenAPI 3.1 spec" } } } },
+            "/perception/elements": { "post": { "operationId": "perceptionElements", "responses": { "200": { "description": "element registry snapshot" } } } },
+            "/perception/ocr/bytes": { "post": { "operationId": "perceptionOcrBytes", "responses": { "200": { "description": "OCR text from raw image bytes" } } } },
+            "/perception/window": { "post": { "operationId": "perceptionWindow", "responses": { "200": { "description": "active window info" } } } },
+            "/perception/template/build": { "post": { "operationId": "perceptionTemplateBuild", "responses": { "200": { "description": "window template built" } } } },
+            "/perception/template/build-ocr": { "post": { "operationId": "perceptionTemplateBuildOcr", "responses": { "200": { "description": "window template built with OCR" } } } },
+            "/perception/template/detect": { "post": { "operationId": "perceptionTemplateDetect", "responses": { "200": { "description": "template detection result" } } } },
+            "/perception/template/detect-ocr": { "post": { "operationId": "perceptionTemplateDetectOcr", "responses": { "200": { "description": "template detection with OCR" } } } },
+            "/perception/template/{app_id}": { "get": { "operationId": "perceptionTemplateGet", "parameters": [path_param("app_id")], "responses": { "200": { "description": "stored window template" } } } },
+            "/learn/status": { "get": { "operationId": "learnStatus", "responses": { "200": { "description": "learn pipeline state" } } } },
+            "/desktop/foreground": { "get": { "operationId": "desktopForeground", "responses": { "200": { "description": "foreground window info" } } } },
+            "/desktop/windows": { "get": { "operationId": "desktopWindows", "responses": { "200": { "description": "window list" } } } },
+            "/desktop/activate": { "post": { "operationId": "desktopActivate", "responses": { "200": { "description": "window activated" } } } },
+            "/desktop/click": { "post": { "operationId": "desktopClick", "responses": { "200": { "description": "mouse click performed" } } } },
+            "/desktop/type": { "post": { "operationId": "desktopType", "responses": { "200": { "description": "text typed" } } } },
+            "/desktop/key": { "post": { "operationId": "desktopKey", "responses": { "200": { "description": "key pressed" } } } },
+            "/desktop/shortcut": { "post": { "operationId": "desktopShortcut", "responses": { "200": { "description": "shortcut performed" } } } },
+            "/desktop/launch": { "post": { "operationId": "desktopLaunch", "responses": { "200": { "description": "app launched" } } } },
+            "/desktop/scroll": { "post": { "operationId": "desktopScroll", "responses": { "200": { "description": "scroll performed" } } } },
+            "/desktop/wait": { "post": { "operationId": "desktopWait", "responses": { "200": { "description": "wait performed" } } } },
+            "/vision/status": { "get": { "operationId": "visionStatus", "responses": { "200": { "description": "vision engine diagnostics" } } } },
+            "/vision/describe": { "post": { "operationId": "visionDescribe", "responses": { "200": { "description": "image description" } } } },
+            "/vision/verify": { "post": { "operationId": "visionVerify", "responses": { "200": { "description": "verification result" } } } },
+            "/vision/ground": { "post": { "operationId": "visionGround", "responses": { "200": { "description": "vision grounded location" } } } }
         },
         "components": {
             "schemas": {
@@ -1702,19 +1740,43 @@ async fn perception_window(
 }
 
 #[derive(serde::Deserialize)]
+struct SensitiveProbe {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    ocr_text: String,
+}
+
+#[derive(serde::Deserialize)]
 struct DesktopClickRequest {
     x: i32,
     y: i32,
+    /// 可选：computer-use 任务 id，提供时动作先过门禁（未批准/越界应用/敏感熔断拒绝）。
+    #[serde(default)]
+    task_id: Option<String>,
+    /// 可选：敏感 UI 探针（UI 属性/名称/OCR 关键词），门禁内熔断判定。
+    #[serde(default)]
+    sensitive: Option<SensitiveProbe>,
 }
 
 #[derive(serde::Deserialize)]
 struct DesktopTextRequest {
     text: String,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    sensitive: Option<SensitiveProbe>,
 }
 
 #[derive(serde::Deserialize)]
 struct DesktopKeyRequest {
     key: String,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    sensitive: Option<SensitiveProbe>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1725,6 +1787,8 @@ struct DesktopComboRequest {
 #[derive(serde::Deserialize)]
 struct DesktopTargetRequest {
     target: String,
+    #[serde(default)]
+    task_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1732,6 +1796,10 @@ struct DesktopScrollRequest {
     x: i32,
     y: i32,
     delta: i32,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    sensitive: Option<SensitiveProbe>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1784,6 +1852,39 @@ async fn desktop_windows() -> Json<Value> {
     Json(json!({ "windows": owo_agent_core::platform::window_list() }))
 }
 
+/// 可选 task_id 门禁：请求携带 task_id 时，动作执行前先过 computer-use 门禁
+/// （状态/超时/允许集/目标应用/敏感熔断/预算），拒绝返回 403 并写审计。
+fn gate_desktop_action(
+    state: &AppState,
+    task_id: &Option<String>,
+    action: &str,
+    probe: &Option<SensitiveProbe>,
+) -> Result<(), (StatusCode, String)> {
+    let Some(task_id) = task_id else {
+        return Ok(());
+    };
+    let app = owo_agent_core::platform::poll_foreground_app()
+        .map(|(app_id, _)| app_id)
+        .unwrap_or_default();
+    let sensitive = probe
+        .as_ref()
+        .map(|p| (p.name.as_str(), p.role.as_str(), p.ocr_text.as_str()));
+    let audit = state.agent.audit_log();
+    let mut log = audit
+        .lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "审计锁中毒".to_string()))?;
+    owo_agent_core::computer_use::task_gate_check(
+        &state.computer_tasks,
+        Some(&mut log),
+        "computer-use",
+        task_id,
+        action,
+        &app,
+        sensitive,
+    )
+    .map_err(|error| (StatusCode::FORBIDDEN, error))
+}
+
 async fn desktop_activate(
     Json(request): Json<DesktopActivateRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
@@ -1794,27 +1895,38 @@ async fn desktop_activate(
 }
 
 async fn desktop_click(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<DesktopClickRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     ensure_real_desktop("desktop_click")?;
+    gate_desktop_action(
+        &state,
+        &request.task_id,
+        "desktop_click",
+        &request.sensitive,
+    )?;
     owo_agent_core::computer_use::desktop_click(request.x, request.y)
         .map(|_| Json(json!({ "ok": true, "x": request.x, "y": request.y })))
         .map_err(|error| (StatusCode::BAD_REQUEST, error))
 }
 
 async fn desktop_type(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<DesktopTextRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     ensure_real_desktop("desktop_type")?;
+    gate_desktop_action(&state, &request.task_id, "desktop_type", &request.sensitive)?;
     owo_agent_core::computer_use::desktop_type(&request.text)
         .map(|_| Json(json!({ "ok": true, "typed_chars": request.text.chars().count() })))
         .map_err(|error| (StatusCode::BAD_REQUEST, error))
 }
 
 async fn desktop_key(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<DesktopKeyRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     ensure_real_desktop("desktop_key")?;
+    gate_desktop_action(&state, &request.task_id, "desktop_key", &request.sensitive)?;
     owo_agent_core::computer_use::desktop_key(&request.key)
         .map(|_| Json(json!({ "ok": true, "key": request.key })))
         .map_err(|error| (StatusCode::BAD_REQUEST, error))
@@ -1830,18 +1942,27 @@ async fn desktop_shortcut(
 }
 
 async fn desktop_launch(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<DesktopTargetRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     ensure_real_desktop("desktop_launch")?;
+    gate_desktop_action(&state, &request.task_id, "desktop_launch", &None)?;
     owo_agent_core::computer_use::desktop_launch(&request.target)
         .map(|_| Json(json!({ "ok": true, "target": request.target })))
         .map_err(|error| (StatusCode::BAD_REQUEST, error))
 }
 
 async fn desktop_scroll(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<DesktopScrollRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     ensure_real_desktop("desktop_scroll")?;
+    gate_desktop_action(
+        &state,
+        &request.task_id,
+        "desktop_scroll",
+        &request.sensitive,
+    )?;
     owo_agent_core::computer_use::desktop_scroll(request.x, request.y, request.delta)
         .map(|_| {
             Json(json!({ "ok": true, "x": request.x, "y": request.y, "delta": request.delta }))
@@ -4100,6 +4221,195 @@ async fn computer_sensitive_check(Json(request): Json<SensitiveCheckRequest>) ->
         Some(reason) => Json(json!({ "sensitive": true, "reason": reason })),
         None => Json(json!({ "sensitive": false })),
     }
+}
+
+// ---------- computer-use 审批版闭环执行（M4d，HTTP 接入） ----------
+
+#[derive(serde::Deserialize)]
+struct ComputerTaskRunRequest {
+    /// 闭环步骤（anchor_text/action/value/verify_text）。
+    goals: Vec<owo_agent_core::computer_use::TaskGoal>,
+}
+
+/// 执行已批准任务：`POST /computer-use/task/{id}/run`。
+///
+/// 感知→定位→门禁动作→验证 全闭环；模拟面（OWO_SIM_QQ_URL）走 owo-sim-qq，
+/// 否则走真实桌面面（RealTaskSurface）。任务未批准/越界应用/敏感熔断等门禁
+/// 失败返回 403 并写审计；每步动作均过 `task_gate_check`。
+async fn computer_task_run(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<ComputerTaskRunRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let task = state.computer_tasks.get(&id).ok_or((
+        StatusCode::NOT_FOUND,
+        format!("computer-use 任务 {id} 不存在"),
+    ))?;
+    if !task.state.can_execute() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "computer-use 任务 {id} 状态 {:?} 不可执行（需先 approve/start）",
+                task.state
+            ),
+        ));
+    }
+    // 用本地 scratch 审计跑闭环（std MutexGuard 不能跨 await），完成后合并回真实审计。
+    let mut scratch = owo_agent_core::audit::AuditLog::default();
+    let report = if owo_agent_core::computer_use::sim_base_url_configured() {
+        owo_agent_core::computer_use::run_approved_task(
+            &state.computer_tasks,
+            &mut scratch,
+            "computer-use",
+            &id,
+            &request.goals,
+        )
+        .await
+    } else {
+        let mut surface = owo_agent_core::computer_use::RealTaskSurface;
+        owo_agent_core::computer_use::run_approved_task_on(
+            &state.computer_tasks,
+            &mut scratch,
+            "computer-use",
+            &id,
+            &request.goals,
+            &mut surface,
+        )
+        .await
+    };
+    if let Ok(mut log) = state.agent.audit_log().lock() {
+        log.entries.extend(scratch.entries);
+    }
+    report
+        .map(|r| Json(json!(r)))
+        .map_err(|error| (StatusCode::FORBIDDEN, error))
+}
+
+// ---------- 云端执行（M4a，/cloud/*） ----------
+
+/// 懒初始化云端任务队列：传输按环境变量选择
+/// （OWO_CLOUD_BASE_URL → HttpTransport；缺省 MockRemoteTransport 本地模拟）。
+async fn cloud_queue(
+    state: &AppState,
+) -> Result<tokio::sync::MutexGuard<'_, Option<owo_agent_core::cloud_exec::CloudTaskQueue>>, String>
+{
+    let mut guard = state.cloud_queue.lock().await;
+    if guard.is_none() {
+        let dir = state.data_root.join("cloud").join("queue");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建云端队列目录失败：{e}"))?;
+        let transport: Box<dyn owo_agent_core::cloud_exec::CloudTransport> =
+            match std::env::var("OWO_CLOUD_BASE_URL") {
+                Ok(url) if !url.trim().is_empty() => Box::new(
+                    owo_agent_core::cloud_exec::HttpTransport::new(url)
+                        .map_err(|e| format!("云端传输初始化失败：{e}"))?,
+                ),
+                _ => Box::new(owo_agent_core::cloud_exec::MockRemoteTransport::new(
+                    state.data_root.join("cloud").join("scratch"),
+                )),
+            };
+        *guard = Some(owo_agent_core::cloud_exec::CloudTaskQueue::new(
+            dir, transport,
+        ));
+    }
+    Ok(guard)
+}
+
+/// 提交云端任务：`POST /cloud/tasks`（body = CloudTaskSpec；入队后立即执行一轮）。
+async fn cloud_task_submit(
+    State(state): State<Arc<AppState>>,
+    Json(spec): Json<owo_agent_core::cloud_exec::CloudTaskSpec>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut guard = cloud_queue(&state)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let queue = guard.as_mut().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "云端队列未初始化".to_string(),
+    ))?;
+    let task_id = queue
+        .submit(spec)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let sink = owo_agent_core::cloud_exec::NullSink;
+    queue
+        .run_next(&sink)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let record = queue
+        .record(&task_id)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, format!("任务 {task_id} 不存在")))?;
+    Ok(Json(
+        json!({ "ok": true, "task": record, "transport": queue.transport_kind() }),
+    ))
+}
+
+/// 查询云端任务：`GET /cloud/tasks/{id}`。
+async fn cloud_task_status(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let guard = cloud_queue(&state)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let queue = guard.as_ref().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "云端队列未初始化".to_string(),
+    ))?;
+    let record = queue
+        .record(&id)
+        .ok_or((StatusCode::NOT_FOUND, format!("云端任务 {id} 不存在")))?;
+    let usage = queue.usage(&id);
+    Ok(Json(json!({
+        "state": format!("{:?}", record.state),
+        "retry_count": record.retry_count,
+        "last_error": record.last_error,
+        "created_at": record.created_at,
+        "duration_ms": record.duration_ms,
+        "usage": usage,
+    })))
+}
+
+/// 获取云端任务结果：`GET /cloud/tasks/{id}/result`。
+async fn cloud_task_result(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let guard = cloud_queue(&state)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let queue = guard.as_ref().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "云端队列未初始化".to_string(),
+    ))?;
+    let record = queue
+        .record(&id)
+        .ok_or((StatusCode::NOT_FOUND, format!("云端任务 {id} 不存在")))?;
+    let result = record
+        .result
+        .clone()
+        .ok_or((StatusCode::CONFLICT, format!("云端任务 {id} 尚无结果")))?;
+    Ok(Json(
+        json!({ "ok": true, "result": result, "diff_summary": owo_agent_core::cloud_exec::describe_diff(&result.diff) }),
+    ))
+}
+
+/// 取消云端任务：`POST /cloud/tasks/{id}/cancel`。
+async fn cloud_task_cancel(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut guard = cloud_queue(&state)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let queue = guard.as_mut().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "云端队列未初始化".to_string(),
+    ))?;
+    queue
+        .cancel(&id)
+        .await
+        .map(|_| Json(json!({ "ok": true, "task_id": id })))
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
 
 fn to_event(sse: SseEvent) -> Result<Event, Infallible> {
