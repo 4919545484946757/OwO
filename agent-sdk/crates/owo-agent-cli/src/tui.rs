@@ -22,7 +22,7 @@ use ratatui::{Frame, Terminal};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -60,7 +60,10 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let discovered_plugins = discover_plugins(&workspace, &root);
-    crate::merge_plugin_mcp(&discovered_plugins, &mut mcp_configs);
+    let plugin_state = owo_agent_core::PluginStateStore::new(Some(root.join("plugin_state.json")));
+    let enabled_plugins =
+        owo_agent_core::plugin::discover_enabled_plugins(&workspace, &root, &plugin_state);
+    crate::merge_plugin_mcp(&enabled_plugins, &mut mcp_configs);
     let plugins: Vec<PluginManifest> = discovered_plugins
         .into_iter()
         .map(|(_, manifest)| manifest)
@@ -95,6 +98,7 @@ pub fn run(args: TuiArgs) -> Result<(), Box<dyn std::error::Error>> {
     let terminal = ratatui::init();
     let result = app.run(&runtime, terminal);
     ratatui::restore();
+    app.shutdown(&runtime);
     result
 }
 
@@ -130,6 +134,7 @@ impl Approver for TuiApprover {
 enum TuiMsg {
     Event(TurnEvent),
     Finished(Result<TurnOutcome, String>, Box<Session>),
+    SubagentFinished(Result<String, String>, bool),
 }
 
 struct TuiApp {
@@ -153,6 +158,7 @@ struct TuiApp {
     scroll: usize,
     running: bool,
     status: String,
+    should_exit: bool,
     mcp_configs: Vec<McpServerConfig>,
     mcp_clients: Vec<(String, Arc<tokio::sync::Mutex<McpClient>>)>,
     skills: SkillRegistry,
@@ -207,6 +213,7 @@ impl TuiApp {
             scroll: 0,
             running: false,
             status: "就绪".to_string(),
+            should_exit: false,
             mcp_configs,
             mcp_clients,
             skills,
@@ -238,6 +245,18 @@ impl TuiApp {
             }
         }
         Ok(())
+    }
+
+    fn shutdown(&mut self, runtime: &tokio::runtime::Runtime) {
+        self.abort.store(true, Ordering::Relaxed);
+        if let Some(session) = &self.session {
+            let _ = self.store.save(session);
+        }
+        runtime.block_on(async {
+            for (_, client) in &self.mcp_clients {
+                let _ = client.lock().await.shutdown().await;
+            }
+        });
     }
 
     fn draw(&self, frame: &mut Frame) {
@@ -423,7 +442,7 @@ impl TuiApp {
         if self.matches("toggle_diff", &key) && !self.diff_view.is_empty() {
             self.show_diff_panel = !self.show_diff_panel;
         }
-        Ok(false)
+        Ok(self.should_exit)
     }
 
     fn matches(&self, action: &str, key: &KeyEvent) -> bool {
@@ -464,21 +483,29 @@ impl TuiApp {
         prompt: &str,
         read_only: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.running {
+            self.push_system("当前已有任务运行中，请等待完成".to_string(), yellow());
+            return Ok(());
+        }
         let workspace = self.workspace.clone();
         let model = self.model.clone();
         let agent = Arc::clone(&self.agent);
-        let text = runtime.block_on(agent.run_subagent(&workspace, &model, prompt, read_only))?;
-        self.push_system(
-            format!(
-                "{}：{text}",
-                if read_only {
-                    "探索结果"
-                } else {
-                    "子代理结果"
-                }
-            ),
-            if read_only { cyan() } else { green() },
-        );
+        let prompt = prompt.to_string();
+        let (tx, rx) = mpsc::channel::<TuiMsg>();
+        self.event_rx = Some(rx);
+        self.running = true;
+        self.status = if read_only {
+            "只读探索进行中…".to_string()
+        } else {
+            "通用子代理进行中…".to_string()
+        };
+        runtime.spawn(async move {
+            let result = agent
+                .run_subagent(&workspace, &model, &prompt, read_only)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(TuiMsg::SubagentFinished(result, read_only));
+        });
         Ok(())
     }
 
@@ -537,8 +564,7 @@ impl TuiApp {
     }
 
     fn drain_events(&mut self) {
-        loop {
-            let message = self.event_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        while let Some(message) = self.next_event() {
             match message {
                 Some(TuiMsg::Event(event)) => self.push_event(event),
                 Some(TuiMsg::Finished(result, session)) => {
@@ -555,19 +581,8 @@ impl TuiApp {
                             if let Some(session) = &self.session {
                                 let trace = TraceRecord::from_outcome(session, &outcome);
                                 let _ = save_trace(&self.data_root.join("traces"), &trace);
-                                let audit_entries = self
-                                    .agent
-                                    .audit_log()
-                                    .lock()
-                                    .map(|guard| guard.entries.clone())
-                                    .unwrap_or_default();
-                                if audit_entries.len() > self.audit_flushed {
-                                    let _ = self
-                                        .store
-                                        .append_audit(&audit_entries[self.audit_flushed..]);
-                                    self.audit_flushed = audit_entries.len();
-                                }
                             }
+                            self.flush_audit();
                             let changed = self
                                 .session
                                 .as_ref()
@@ -586,12 +601,57 @@ impl TuiApp {
                             self.status = "就绪".to_string();
                         }
                         Err(error) => {
+                            self.flush_audit();
                             self.push_system(format!("回合失败：{error}"), red());
                             self.status = "出错".to_string();
                         }
                     }
                 }
+                Some(TuiMsg::SubagentFinished(result, read_only)) => {
+                    self.running = false;
+                    self.event_rx = None;
+                    match result {
+                        Ok(text) => self.push_system(
+                            format!(
+                                "{}：{text}",
+                                if read_only {
+                                    "探索结果"
+                                } else {
+                                    "子代理结果"
+                                }
+                            ),
+                            if read_only { cyan() } else { green() },
+                        ),
+                        Err(error) => {
+                            self.push_system(format!("子代理失败：{error}"), red());
+                            self.status = "出错".to_string();
+                        }
+                    }
+                    if self.status != "出错" {
+                        self.status = "就绪".to_string();
+                    }
+                }
                 None => break,
+            }
+        }
+    }
+
+    /// 从事件通道取下一条消息；通道断开时标记回合结束并返回 None。
+    fn next_event(&mut self) -> Option<Option<TuiMsg>> {
+        let rx = self.event_rx.as_ref()?;
+        match rx.try_recv() {
+            Ok(message) => Some(Some(message)),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.running = false;
+                self.event_rx = None;
+                self.pending_order.clear();
+                self.status = "回合通道已断开".to_string();
+                self.push_system(
+                    "回合通道已断开，当前回合未能返回结果，请重试".to_string(),
+                    red(),
+                );
+                None
             }
         }
     }
@@ -655,6 +715,25 @@ impl TuiApp {
         if !self.streaming.is_empty() {
             let text = std::mem::take(&mut self.streaming);
             self.push_line(text, default());
+        }
+    }
+
+    fn flush_audit(&mut self) {
+        let audit_entries = self
+            .agent
+            .audit_log()
+            .lock()
+            .map(|guard| guard.entries.clone())
+            .unwrap_or_default();
+        if audit_entries.len() <= self.audit_flushed {
+            return;
+        }
+        if self
+            .store
+            .append_audit(&audit_entries[self.audit_flushed..])
+            .is_ok()
+        {
+            self.audit_flushed = audit_entries.len();
         }
     }
 
@@ -724,7 +803,10 @@ impl TuiApp {
         let mut parts = command.split_whitespace();
         match parts.next().unwrap_or_default() {
             "help" => self.push_help(),
-            "exit" | "quit" => std::process::exit(0),
+            "exit" | "quit" => {
+                self.should_exit = true;
+                self.status = "正在退出…".to_string();
+            }
             "new" => {
                 if let Some(session) = &self.session {
                     let _ = self.store.save(session);
@@ -746,13 +828,22 @@ impl TuiApp {
                                 .as_ref()
                                 .map(|current| current.id == id)
                                 .unwrap_or(false);
+                            let mut badges = String::new();
+                            if session.pinned {
+                                badges.push_str(" 📌");
+                            }
+                            if session.archived {
+                                badges.push_str(" 🗄");
+                            }
                             self.push_line(
                                 format!(
-                                    "{}{}  model={}  msgs={}",
+                                    "{}{}{}  model={}  msgs={}  updated={}",
                                     if active { "▶ " } else { "  " },
-                                    id,
+                                    session.display_title(),
+                                    badges,
                                     session.model,
-                                    session.messages.len()
+                                    session.messages.len(),
+                                    session.updated_at,
                                 ),
                                 if active { green() } else { default() },
                             );
@@ -798,7 +889,7 @@ impl TuiApp {
             "fork" => self.fork_session(parts.next())?,
             "rewind" => {
                 let keep = parts.next().ok_or("用法：/rewind <保留消息数>")?;
-                self.rewind_session(keep)?;
+                self.rewind_session(keep, runtime)?;
             }
             "redo" => self.redo_session()?,
             "undo-msg" => self.undo_message(parts.next())?,
@@ -893,12 +984,19 @@ impl TuiApp {
         Ok(())
     }
 
-    fn rewind_session(&mut self, keep: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn rewind_session(
+        &mut self,
+        keep: &str,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let Some(session) = &mut self.session else {
             self.push_system("暂无会话".to_string(), dim());
             return Ok(());
         };
         let keep: usize = keep.parse().map_err(|_| "保留消息数需为数字".to_string())?;
+        if keep < session.messages.len() {
+            runtime.block_on(session.revert())?;
+        }
         let removed = session.rewind(keep);
         self.store.save(session)?;
         self.push_system(
@@ -1611,5 +1709,37 @@ mod tests {
         .unwrap();
 
         assert_eq!(app.input, "你好");
+    }
+
+    #[test]
+    fn exit_command_requests_clean_shutdown_instead_of_process_exit() {
+        let mut app = test_app();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        app.handle_command("exit", &runtime).unwrap();
+
+        assert!(app.should_exit);
+        assert_eq!(app.status, "正在退出…");
+    }
+
+    #[test]
+    fn disconnected_turn_channel_does_not_leave_app_running() {
+        let mut app = test_app();
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        app.event_rx = Some(rx);
+        app.running = true;
+
+        app.drain_events();
+
+        assert!(!app.running);
+        assert!(app.event_rx.is_none());
+        assert!(app
+            .transcript
+            .iter()
+            .any(|(line, _)| line.contains("回合通道已断开")));
     }
 }

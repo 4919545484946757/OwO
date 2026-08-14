@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
@@ -43,7 +43,10 @@ pub struct AppState {
     pub store: Arc<dyn SessionStore>,
     pub sessions: Arc<Mutex<HashMap<String, Session>>>,
     pub pending_approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Decision>>>>,
+    pub pending_approval_sessions: Arc<Mutex<HashMap<String, String>>>,
     pub aborts: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// 每个会话一个运行锁，避免并发回合覆盖消息、快照和审计状态。
+    pub turn_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     pub traces_dir: PathBuf,
     pub perception: Arc<Mutex<SituationStore>>,
     pub whitelist: Arc<Mutex<Whitelist>>,
@@ -56,6 +59,12 @@ pub struct AppState {
     pub workspace: PathBuf,
     pub data_root: PathBuf,
     pub elements: Arc<Mutex<owo_agent_core::ElementRegistry>>,
+    /// 插件启用状态（进程级热卸载的持久化基础）。
+    pub plugin_state: Arc<Mutex<owo_agent_core::plugin::PluginStateStore>>,
+    /// 持久场景图（跨请求保持模板命中率/历史命中先验；元素每请求从注册表刷新）。
+    pub scene: Arc<Mutex<owo_agent_core::scene::SceneGraph>>,
+    /// computer-use 任务注册表（任务级审批 + 熔断，m4d 前奏）。
+    pub computer_tasks: Arc<owo_agent_core::ComputerTaskRegistry>,
 }
 
 impl AppState {
@@ -80,7 +89,9 @@ impl AppState {
             store: Arc::new(store),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_approvals: Arc::new(Mutex::new(HashMap::new())),
+            pending_approval_sessions: Arc::new(Mutex::new(HashMap::new())),
             aborts: Arc::new(Mutex::new(HashMap::new())),
+            turn_locks: Arc::new(Mutex::new(HashMap::new())),
             traces_dir,
             perception: Arc::new(Mutex::new(SituationStore::new())),
             whitelist: Arc::new(Mutex::new(whitelist)),
@@ -98,6 +109,11 @@ impl AppState {
             ))),
             audit_flushed: Arc::new(Mutex::new(0)),
             workspace,
+            plugin_state: Arc::new(Mutex::new(owo_agent_core::plugin::PluginStateStore::new(
+                Some(data_root.join("plugin_state.json")),
+            ))),
+            scene: Arc::new(Mutex::new(owo_agent_core::scene::SceneGraph::new())),
+            computer_tasks: Arc::new(owo_agent_core::ComputerTaskRegistry::new()),
             data_root,
             elements,
         }
@@ -221,6 +237,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/settings/egress", post(settings_egress))
         .route("/whitelist", get(whitelist_list))
         .route("/whitelist/manage", post(whitelist_manage))
+        .route("/computer-use/tasks", get(computer_tasks_list))
+        .route("/computer-use/task", post(computer_task_create))
+        .route(
+            "/computer-use/task/{id}/{action}",
+            post(computer_task_transition),
+        )
+        .route(
+            "/computer-use/task/{id}/check/{action}",
+            get(computer_task_check),
+        )
+        .route(
+            "/computer-use/sensitive-check",
+            post(computer_sensitive_check),
+        )
         .fallback_service(ServeDir::new(desktop_web_dir()))
         .layer(CorsLayer::permissive())
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
@@ -388,6 +418,20 @@ fn load_session(state: &AppState, id: &str) -> Result<Session, (StatusCode, Stri
     })
 }
 
+async fn acquire_session_lock(
+    state: &AppState,
+    id: &str,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, (StatusCode, String)> {
+    let lock = {
+        let mut locks = state.turn_locks.lock().map_err(poison)?;
+        locks
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    Ok(lock.lock_owned().await)
+}
+
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         healthy: true,
@@ -442,9 +486,11 @@ fn flush_audit(state: &AppState) {
     };
     if audit.entries.len() > *flushed {
         let entries = audit.entries[*flushed..].to_vec();
-        *flushed = audit.entries.len();
+        let next = audit.entries.len();
         drop(audit);
-        let _ = state.store.append_audit(&entries);
+        if state.store.append_audit(&entries).is_ok() {
+            *flushed = next;
+        }
     }
 }
 
@@ -458,7 +504,28 @@ async fn audit_list(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(100)
         .min(500);
-    Ok(Json(state.store.recent_audit(limit)))
+    let query = owo_agent_core::sqlite_store::AuditQuery {
+        limit,
+        offset: params
+            .get("offset")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0),
+        event: params
+            .get("event")
+            .filter(|value| !value.trim().is_empty())
+            .cloned(),
+        tool: params
+            .get("tool")
+            .filter(|value| !value.trim().is_empty())
+            .cloned(),
+        approved: params.get("approved").and_then(|value| value.parse().ok()),
+        q: params
+            .get("q")
+            .filter(|value| !value.trim().is_empty())
+            .cloned(),
+    };
+    let (entries, _) = state.store.query_audit(&query);
+    Ok(Json(entries))
 }
 
 async fn list_sessions(
@@ -675,11 +742,11 @@ async fn turn(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<TurnRequest>,
-) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, String)> {
+) -> Result<Sse<UnboundedReceiverStream<Result<Event, Infallible>>>, (StatusCode, String)> {
     let session = load_session(&state, &id)?;
     let mut effective_prompt = request.prompt.clone();
     if !request.attachments.is_empty() {
-        let dir = attachment_dir(&state, &id);
+        let dir = attachment_dir(&session.workspace, &id);
         let mut lines = Vec::new();
         for attachment in &request.attachments {
             let safe = Path::new(attachment)
@@ -702,16 +769,31 @@ async fn turn(
         effective_prompt.push_str(&lines.join("\n"));
     }
 
-    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(128);
-    let approver = ChannelApprover {
-        pending: Arc::clone(&state.pending_approvals),
+    let turn_lock = {
+        let mut locks = state.turn_locks.lock().map_err(poison)?;
+        locks
+            .entry(id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     };
+    let turn_guard = turn_lock
+        .try_lock_owned()
+        .map_err(|_| (StatusCode::CONFLICT, "该会话已有回合正在运行".to_string()))?;
+
+    let (tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
     let abort_flag = {
         let mut aborts = state.aborts.lock().map_err(poison)?;
         aborts
             .entry(id.clone())
             .or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .clone()
+    };
+    abort_flag.store(false, Ordering::Relaxed);
+    let approver = ChannelApprover {
+        pending: Arc::clone(&state.pending_approvals),
+        pending_sessions: Arc::clone(&state.pending_approval_sessions),
+        session_id: id.clone(),
+        abort: Arc::clone(&abort_flag),
     };
 
     let agent = Arc::clone(&state.agent);
@@ -720,10 +802,15 @@ async fn turn(
     let traces_dir = state.traces_dir.clone();
     let state_for_audit = Arc::clone(&state);
     tokio::spawn(async move {
+        let _turn_guard = turn_guard;
         let mut current = session;
+        let stream_abort = Arc::clone(&abort_flag);
         let mut on_event = |event: &owo_agent_core::TurnEvent| {
             if let Some(sse) = to_sse(event) {
-                let _ = tx.try_send(to_event(sse));
+                if tx.send(to_event(sse)).is_err() {
+                    // 客户端断开后尽快停止后续模型/工具调用，避免无主任务继续消耗资源。
+                    stream_abort.store(true, Ordering::Relaxed);
+                }
             }
         };
         match agent
@@ -767,7 +854,7 @@ async fn turn(
                 }
             }
             Err(error) => {
-                let _ = tx.try_send(to_event(SseEvent::Progress {
+                let _ = tx.send(to_event(SseEvent::Progress {
                     message: format!("turn failed: {error}"),
                 }));
             }
@@ -776,18 +863,26 @@ async fn turn(
             sessions.insert(current.id.clone(), current.clone());
         }
         if let Err(error) = store.save(&current) {
-            let _ = tx.try_send(to_event(SseEvent::Progress {
+            let _ = tx.send(to_event(SseEvent::Progress {
                 message: format!("session save failed: {error}"),
             }));
+        }
+        if let Ok(mut aborts) = state_for_audit.aborts.lock() {
+            if aborts
+                .get(&current.id)
+                .is_some_and(|registered| Arc::ptr_eq(registered, &abort_flag))
+            {
+                aborts.remove(&current.id);
+            }
         }
         flush_audit(&state_for_audit);
     });
 
-    Ok(Sse::new(ReceiverStream::new(rx)))
+    Ok(Sse::new(UnboundedReceiverStream::new(rx)))
 }
 
-fn attachment_dir(state: &AppState, session_id: &str) -> std::path::PathBuf {
-    state.workspace.join(".owo-attachments").join(session_id)
+fn attachment_dir(workspace: &Path, session_id: &str) -> std::path::PathBuf {
+    workspace.join(".owo-attachments").join(session_id)
 }
 
 fn sanitize_attachment_name(name: &str) -> Option<String> {
@@ -822,7 +917,8 @@ async fn attachment_upload(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<AttachmentUploadRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    load_session(&state, &id)?;
+    let _session_guard = acquire_session_lock(&state, &id).await?;
+    let session = load_session(&state, &id)?;
     let safe_name = sanitize_attachment_name(&request.name)
         .ok_or((StatusCode::BAD_REQUEST, "附件名非法".to_string()))?;
     use base64::Engine as _;
@@ -837,7 +933,7 @@ async fn attachment_upload(
     if bytes.len() > 50 * 1024 * 1024 {
         return Err((StatusCode::BAD_REQUEST, "附件超过 50MB 上限".to_string()));
     }
-    let dir = attachment_dir(&state, &id);
+    let dir = attachment_dir(&session.workspace, &id);
     std::fs::create_dir_all(&dir)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     let path = dir.join(&safe_name);
@@ -865,8 +961,9 @@ async fn attachments_list(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
-    load_session(&state, &id)?;
-    let dir = attachment_dir(&state, &id);
+    let _session_guard = acquire_session_lock(&state, &id).await?;
+    let session = load_session(&state, &id)?;
+    let dir = attachment_dir(&session.workspace, &id);
     let mut attachments = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -885,9 +982,22 @@ async fn attachments_list(
 
 async fn respond_permission(
     State(state): State<Arc<AppState>>,
-    AxumPath((_session_id, request_id)): AxumPath<(String, String)>,
+    AxumPath((session_id, request_id)): AxumPath<(String, String)>,
     Json(response): Json<PermissionResponse>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let belongs_to_session = state
+        .pending_approval_sessions
+        .lock()
+        .map_err(poison)?
+        .get(&request_id)
+        .map(|pending_session| pending_session == &session_id)
+        .unwrap_or(false);
+    if !belongs_to_session {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("审批请求不存在：{request_id}"),
+        ));
+    }
     let sender = state
         .pending_approvals
         .lock()
@@ -899,6 +1009,11 @@ async fn respond_permission(
                 format!("审批请求不存在：{request_id}"),
             )
         })?;
+    state
+        .pending_approval_sessions
+        .lock()
+        .map_err(poison)?
+        .remove(&request_id);
     let decision = if response.allow {
         Decision::Allow
     } else {
@@ -914,14 +1029,9 @@ async fn abort_turn(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let flag = {
-        let mut aborts = state.aborts.lock().map_err(poison)?;
-        aborts
-            .entry(id)
-            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-            .clone()
-    };
-    flag.store(true, Ordering::Relaxed);
+    if let Some(flag) = state.aborts.lock().map_err(poison)?.get(&id).cloned() {
+        flag.store(true, Ordering::Relaxed);
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -937,6 +1047,7 @@ async fn revert(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let _session_guard = acquire_session_lock(&state, &id).await?;
     let mut session = load_session(&state, &id)?;
     let restored = session
         .revert()
@@ -978,7 +1089,16 @@ async fn rewind_session(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<RewindRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let _session_guard = acquire_session_lock(&state, &id).await?;
     let mut session = load_session(&state, &id)?;
+    if request.keep < session.messages.len() {
+        session.revert().await.map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("回滚失败：{error}"),
+            )
+        })?;
+    }
     let removed = session.rewind(request.keep);
     state
         .store
@@ -996,6 +1116,7 @@ async fn redo_session(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let _session_guard = acquire_session_lock(&state, &id).await?;
     let mut session = load_session(&state, &id)?;
     let restored = session.redo().map(|tail| tail.len()).unwrap_or(0);
     state
@@ -1030,6 +1151,7 @@ async fn session_rename(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<RenameRequest>,
 ) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let _session_guard = acquire_session_lock(&state, &id).await?;
     let mut session = load_session(&state, &id)?;
     session.rename(request.title);
     state
@@ -1049,6 +1171,7 @@ async fn session_archive(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<ArchiveRequest>,
 ) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let _session_guard = acquire_session_lock(&state, &id).await?;
     let mut session = load_session(&state, &id)?;
     session.set_archived(request.archived);
     state
@@ -1068,6 +1191,7 @@ async fn session_pin(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PinRequest>,
 ) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let _session_guard = acquire_session_lock(&state, &id).await?;
     let mut session = load_session(&state, &id)?;
     session.set_pinned(request.pinned);
     state
@@ -1253,8 +1377,10 @@ fn default_tree_nodes() -> usize {
 
 /// 深度 UI 树转储（computer-use 调试：找深层语义锚点，如 QQ 工具栏按钮）。
 async fn perception_tree(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<TreeDumpRequest>,
 ) -> Result<Json<Vec<owo_agent_core::UiNode>>, (StatusCode, String)> {
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L1Ui)?;
     let tree = match request.hwnd {
         Some(hwnd) => {
             owo_agent_core::ui_tree_for_hwnd(hwnd as isize, request.max_depth, request.max_nodes)
@@ -1275,6 +1401,7 @@ async fn perception_template_build(
     State(state): State<Arc<AppState>>,
     Json(request): Json<TemplateBuildRequest>,
 ) -> Result<Json<owo_agent_core::WindowTemplate>, (StatusCode, String)> {
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L1Ui)?;
     let tree = owo_agent_core::ui_tree_for_hwnd(request.hwnd as isize, 14, 10000)
         .ok_or((StatusCode::BAD_REQUEST, "无法获取窗口 UI 树".to_string()))?;
     let template = owo_agent_core::build_template(&request.app_id, &tree);
@@ -1315,6 +1442,7 @@ async fn perception_template_detect(
     State(state): State<Arc<AppState>>,
     Json(request): Json<TemplateDetectRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L1Ui)?;
     let template = owo_agent_core::load_template(&state.data_root, &request.app_id).ok_or((
         StatusCode::NOT_FOUND,
         format!("窗口模板不存在：{}", request.app_id),
@@ -1329,6 +1457,7 @@ async fn perception_template_build_ocr(
     State(state): State<Arc<AppState>>,
     Json(request): Json<TemplateBuildRequest>,
 ) -> Result<Json<owo_agent_core::WindowTemplate>, (StatusCode, String)> {
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L2Visual)?;
     let (bmp, _rect) = owo_agent_core::platform::capture_window_bmp_deep(request.hwnd as isize)
         .ok_or((StatusCode::BAD_REQUEST, "窗口截图失败".to_string()))?;
     let summary = owo_agent_core::ocr_preferred(&bmp)
@@ -1345,6 +1474,7 @@ async fn perception_template_detect_ocr(
     State(state): State<Arc<AppState>>,
     Json(request): Json<TemplateDetectRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L2Visual)?;
     let template = owo_agent_core::load_template(&state.data_root, &request.app_id).ok_or((
         StatusCode::NOT_FOUND,
         format!("窗口模板不存在：{}", request.app_id),
@@ -1373,6 +1503,8 @@ async fn perception_elements(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ElementsRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L1Ui)?;
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L2Visual)?;
     let tree =
         owo_agent_core::ui_tree_for_hwnd(request.hwnd as isize, 14, 10000).unwrap_or_default();
     let (bmp, rect) = owo_agent_core::platform::capture_window_bmp_deep(request.hwnd as isize)
@@ -1494,8 +1626,10 @@ struct WindowOcrRequest {
 
 /// 窗口级 OCR：PrintWindow 后台只读抓取指定窗口 → PP-OCRv6/Media 识别，返回窗口矩形与文本行。
 async fn perception_window(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<WindowOcrRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L2Visual)?;
     let (bmp, rect) = owo_agent_core::platform::capture_window_bmp_deep(request.hwnd as isize)
         .ok_or((StatusCode::BAD_REQUEST, "窗口截图失败".to_string()))?;
     let summary = owo_agent_core::ocr_preferred(&bmp)
@@ -1709,8 +1843,10 @@ struct VisionDescribeRequest {
 }
 
 async fn vision_describe(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<VisionDescribeRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L2Visual)?;
     let (png, surface) = match (request.x, request.y, request.width, request.height) {
         (Some(x), Some(y), Some(width), Some(height)) => owo_agent_core::capture_vision_png_region(
             x,
@@ -1762,8 +1898,10 @@ struct VisionVerifyRequest {
 
 /// 视觉完成验证：对当前截图回答 yes/no 问题，返回 answer + confidence。
 async fn vision_verify(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<VisionVerifyRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L2Visual)?;
     let (png, surface) = match (request.x, request.y, request.width, request.height) {
         (Some(x), Some(y), Some(width), Some(height)) => owo_agent_core::capture_vision_png_region(
             x,
@@ -1809,6 +1947,7 @@ async fn vision_ground(
     State(state): State<Arc<AppState>>,
     Json(request): Json<VisionGroundRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    require_perception_layer(&state, owo_agent_core::PerceptionLayer::L2Visual)?;
     let mut result = owo_agent_core::ground_element(&request.description)
         .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
@@ -2076,6 +2215,7 @@ async fn learn_packages(
                 "variables": package.manifest.variables,
                 "sensitivity": package.manifest.sensitivity,
                 "version": package.manifest.version,
+                "health": pipeline.store.health_state(&name),
             }));
         }
     }
@@ -2184,6 +2324,10 @@ async fn learn_execute_package(
         let pipeline = state.pipeline.lock().map_err(poison)?;
         pipeline
             .store
+            .execution_gate(&request.name, false)
+            .map_err(|error| (StatusCode::CONFLICT, error))?;
+        pipeline
+            .store
             .load(&request.name)
             .map_err(|error| (StatusCode::NOT_FOUND, error))?
     };
@@ -2200,6 +2344,18 @@ async fn learn_execute_package(
         &request.variables,
         request.max_steps.unwrap_or(20),
     );
+    {
+        let pipeline = state.pipeline.lock().map_err(poison)?;
+        let failed = report.steps.iter().find(|step| step.status != "ok");
+        let _ = pipeline.store.record_execution(
+            &request.name,
+            report.ok,
+            failed
+                .map(|step| step.node_id.as_str())
+                .unwrap_or("completed"),
+            failed.map(|step| step.detail.as_str()).unwrap_or(""),
+        );
+    }
     if let Ok(mut audit) = state.agent.audit_log().lock() {
         if package.manifest.sensitivity == Sensitivity::High {
             audit.record(
@@ -2357,7 +2513,8 @@ async fn proactive_decide(
     let mut response = json!({ "ok": true });
     if request.action == owo_agent_core::SuggestionAction::Learn {
         // 用户确认“学习”：把建议动作序列沉淀为 active 流程技能包（D24 一键学习）。
-        let name = format!("proactive-{}", &suggestion.id[..8.min(suggestion.id.len())]);
+        let short_id: String = suggestion.id.chars().take(8).collect();
+        let name = format!("proactive-{short_id}");
         let samples = owo_agent_core::recorded_actions_from_sequence(
             &suggestion.app_id,
             &suggestion.sequence,
@@ -2405,14 +2562,14 @@ async fn stt_transcribe(
     let wav_path = std::env::temp_dir().join(format!("owo-stt-{}.wav", uuid::Uuid::new_v4()));
     std::fs::write(&wav_path, &body)
         .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
-    let (outcome, engine) = {
-        let stt = state.stt.lock().map_err(poison)?;
-        let outcome = stt
+    let result = match state.stt.lock() {
+        Ok(stt) => stt
             .transcribe_wav(&wav_path)
-            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-        (outcome, stt.engine().to_string())
+            .map(|outcome| (outcome, stt.engine().to_string())),
+        Err(_) => Err("状态锁中毒".to_string()),
     };
     let _ = std::fs::remove_file(&wav_path);
+    let (outcome, engine) = result.map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     Ok(Json(json!({
         "ok": true,
         "text": outcome.text,
@@ -2496,7 +2653,18 @@ async fn automations_clear_reminders(
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_approve_enabled, sanitize_attachment_name};
+    use super::{
+        auto_approve_enabled, rewind_session, sanitize_attachment_name, AppState, RewindRequest,
+    };
+    use async_trait::async_trait;
+    use base64::Engine;
+    use owo_agent_core::permissions::Policy;
+    use owo_agent_core::{
+        Agent, AgentConfig, ChatMessage, ModelOutput, ModelProvider, Session, ToolRegistry,
+        ToolSpec,
+    };
+    use serde_json::json;
+    use std::sync::Arc;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -2538,6 +2706,76 @@ mod tests {
         std::env::set_var("OWO_AUTO_APPROVE", "0");
         assert!(!auto_approve_enabled());
         std::env::remove_var("OWO_AUTO_APPROVE");
+    }
+
+    struct IdleProvider;
+
+    #[async_trait]
+    impl ModelProvider for IdleProvider {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<ModelOutput, String> {
+            Err("测试 Provider 不应被调用".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn rewind_endpoint_restores_files_before_saving_session() {
+        let root = std::env::temp_dir().join(format!("owo-server-rewind-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let data_root = root.join("data");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&data_root).unwrap();
+        let path = workspace.join("changed.txt");
+        std::fs::write(&path, "after").unwrap();
+
+        let agent = Agent::new(
+            Arc::new(IdleProvider),
+            ToolRegistry::new(),
+            Policy::new(&workspace),
+            AgentConfig::default(),
+        );
+        let store_root = root.join("sessions");
+        let state = Arc::new(AppState::new(
+            agent,
+            owo_agent_core::JsonSessionStore::new(&store_root),
+            data_root.join("traces"),
+            data_root,
+            workspace.clone(),
+        ));
+        let mut session = Session::new(&workspace, "mock", None);
+        session.push(ChatMessage::user("first".to_string()));
+        session.push(ChatMessage::assistant_text("reply".to_string()));
+        session.snapshots.insert(
+            path.to_string_lossy().replace('\\', "/"),
+            owo_agent_core::session::SnapshotEntry {
+                original_b64: Some(base64::engine::general_purpose::STANDARD.encode("before")),
+            },
+        );
+        state.store.save(&session).unwrap();
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(session.id.clone(), session.clone());
+
+        let id = session.id.clone();
+        let response = rewind_session(
+            axum::extract::State(Arc::clone(&state)),
+            axum::extract::Path(id.clone()),
+            axum::Json(RewindRequest { keep: 1 }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(response["ok"], json!(true));
+        assert_eq!(response["removed"], json!(1));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before");
+        assert_eq!(state.store.load(&id).unwrap().messages.len(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 
@@ -2687,6 +2925,9 @@ async fn settings_update(
         .save(&state.workspace)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     settings.apply_usage_env();
+    state
+        .agent
+        .apply_policy_settings(settings.read_only, &settings.deny_commands);
     if let Some(model) = &settings.model {
         if !model.trim().is_empty() {
             std::env::set_var("OPENAI_MODEL", model);
@@ -2807,6 +3048,9 @@ async fn whitelist_manage(
 
 struct ChannelApprover {
     pending: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Decision>>>>,
+    pending_sessions: Arc<Mutex<HashMap<String, String>>>,
+    session_id: String,
+    abort: Arc<AtomicBool>,
 }
 
 impl ChannelApprover {
@@ -2817,6 +3061,9 @@ impl ChannelApprover {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(request.request_id.clone(), tx);
+        }
+        if let Ok(mut sessions) = self.pending_sessions.lock() {
+            sessions.insert(request.request_id.clone(), self.session_id.clone());
         }
         rx
     }
@@ -2829,10 +3076,27 @@ impl Approver for ChannelApprover {
             return Decision::Allow;
         }
         let rx = self.spawn_request(request);
-        match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
-            Ok(Ok(decision)) => decision,
-            _ => Decision::Deny,
+        let mut rx = rx;
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(300));
+        tokio::pin!(deadline);
+        let decision = loop {
+            tokio::select! {
+                result = &mut rx => break result.unwrap_or(Decision::Deny),
+                _ = &mut deadline => break Decision::Deny,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                    if self.abort.load(Ordering::Relaxed) {
+                        break Decision::Deny;
+                    }
+                }
+            }
+        };
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&request.request_id);
         }
+        if let Ok(mut sessions) = self.pending_sessions.lock() {
+            sessions.remove(&request.request_id);
+        }
+        decision
     }
 }
 
@@ -2883,6 +3147,18 @@ fn to_sse(event: &owo_agent_core::TurnEvent) -> Option<SseEvent> {
 
 fn poison<T>(_error: std::sync::PoisonError<T>) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, "状态锁中毒".to_string())
+}
+
+fn require_perception_layer(
+    state: &AppState,
+    layer: owo_agent_core::PerceptionLayer,
+) -> Result<(), (StatusCode, String)> {
+    let perception = state.perception.lock().map_err(poison)?;
+    if perception.is_enabled(layer) {
+        Ok(())
+    } else {
+        Err((StatusCode::FORBIDDEN, format!("感知层未授权：{layer:?}")))
+    }
 }
 
 /// P3 录制自动观察：录制中每 2s 采样前台应用/剪贴板事件（掩码）进入样本。
@@ -2952,6 +3228,149 @@ pub async fn start_observer(state: Arc<AppState>) {
                 });
             }
         }
+    }
+}
+
+// ---------- computer-use 任务级审批（m4d 前奏，文档 7.3） ----------
+/// 任务列表：`GET /computer-use/tasks`。
+async fn computer_tasks_list(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let tasks = state.computer_tasks.list();
+    Json(json!({ "count": tasks.len(), "tasks": tasks }))
+}
+
+#[derive(serde::Deserialize)]
+struct ComputerTaskCreateRequest {
+    target_app: String,
+    description: String,
+    #[serde(default)]
+    allowed_actions: Vec<String>,
+    #[serde(default = "default_task_duration_ms")]
+    max_duration_ms: u64,
+}
+
+fn default_task_duration_ms() -> u64 {
+    300_000
+}
+
+/// 创建任务：`POST /computer-use/task`（Pending，等待审批）。
+async fn computer_task_create(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ComputerTaskCreateRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let target_app = request.target_app.trim().to_string();
+    if target_app.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "缺少 target_app".to_string()));
+    }
+    let task = owo_agent_core::ComputerTask {
+        id: uuid::Uuid::new_v4().to_string(),
+        target_app,
+        description: request.description,
+        allowed_actions: request.allowed_actions,
+        max_duration_ms: request.max_duration_ms,
+        state: owo_agent_core::TaskState::Pending,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        fuse_reason: None,
+    };
+    state
+        .computer_tasks
+        .create(task.clone())
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "computer-use",
+            "task-create",
+            Some(task.id.clone()),
+            Some(true),
+            format!(
+                "创建 computer-use 任务：{}（{}ms，动作 {:?}）",
+                task.target_app, task.max_duration_ms, task.allowed_actions
+            ),
+        );
+    }
+    Ok(Json(json!({ "ok": true, "task": task })))
+}
+
+/// 状态迁移：`POST /computer-use/task/{id}/{action}`。
+///
+/// action ∈ approve/reject/cancel/start/pause/fuse/resume/complete。
+async fn computer_task_transition(
+    State(state): State<Arc<AppState>>,
+    AxumPath((id, action)): AxumPath<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let reason = payload
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("人工接管")
+        .to_string();
+    let next = match action.as_str() {
+        "approve" => state.computer_tasks.approve(&id),
+        "reject" => state.computer_tasks.reject(&id),
+        "cancel" => state.computer_tasks.cancel(&id),
+        "start" => state.computer_tasks.start(&id),
+        "pause" => state.computer_tasks.pause(&id, &reason),
+        "fuse" => state.computer_tasks.fuse(&id, &reason),
+        "resume" => state.computer_tasks.resume(&id),
+        "complete" => state.computer_tasks.complete(&id),
+        other => Err(format!(
+            "未知动作：{other}（approve/reject/cancel/start/pause/fuse/resume/complete）"
+        )),
+    }
+    .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    if let Ok(mut audit) = state.agent.audit_log().lock() {
+        audit.record(
+            "computer-use",
+            &format!("task-{action}"),
+            Some(id.clone()),
+            Some(true),
+            format!("computer-use 任务 {id} {action} → {:?}", next),
+        );
+    }
+    Ok(Json(
+        json!({ "ok": true, "id": id, "action": action, "state": format!("{next:?}") }),
+    ))
+}
+
+/// 执行前检查：`GET /computer-use/task/{id}/check/{action}`（状态 + 超时 + 动作白名单）。
+async fn computer_task_check(
+    State(state): State<Arc<AppState>>,
+    AxumPath((id, action)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    state
+        .computer_tasks
+        .check_can_execute(&id)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    state
+        .computer_tasks
+        .check_action_allowed(&id, &action)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let task = state
+        .computer_tasks
+        .get(&id)
+        .ok_or((StatusCode::NOT_FOUND, format!("任务 {id} 不存在")))?;
+    Ok(Json(json!({
+        "ok": true,
+        "id": id,
+        "action": action,
+        "state": format!("{:?}", task.state),
+        "target_app": task.target_app,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct SensitiveCheckRequest {
+    name: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    ocr_text: String,
+}
+
+/// 敏感 UI 检测：`POST /computer-use/sensitive-check`（熔断判断，纯函数）。
+async fn computer_sensitive_check(Json(request): Json<SensitiveCheckRequest>) -> Json<Value> {
+    match owo_agent_core::sensitive_ui_hit(&request.name, &request.role, &request.ocr_text) {
+        Some(reason) => Json(json!({ "sensitive": true, "reason": reason })),
+        None => Json(json!({ "sensitive": false })),
     }
 }
 

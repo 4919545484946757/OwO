@@ -8,7 +8,7 @@
 </head>
 <body>
   <header>
-    <h1>OwO Agent 工作台 <span class="tag">v0.4 P1</span></h1>
+    <h1>OwO Agent 工作台 <span class="tag">本地优先</span></h1>
     <div class="header-right">
       <span id="health" class="pill">连接中…</span>
       <span id="permission" class="pill">感知：—</span>
@@ -19,7 +19,7 @@
   <aside id="sidebar">
     <section>
       <h2>工作区</h2>
-      <input id="workspace" value="D:\大创\智能输入法\OwO-master\agent-sdk" placeholder="工作区绝对路径">
+      <input id="workspace" placeholder="工作区绝对路径（新建会话时填写）">
     </section>
     <section>
       <h2>任务</h2>
@@ -31,6 +31,60 @@
       <h2>技能中心</h2>
       <ul id="skillList" class="list"></ul>
       <details><summary>技能 SKILL.md</summary><pre id="skillDetail">—</pre></details>
+      <details><summary>技能健康度</summary><div id="healthList">—</div></details>
+    </section>
+    <section>
+      <h2>Eval 评估</h2>
+      <div class="inline">
+        <select id="evalSuite">
+          <option value="builtin">内置套件（builtin）</option>
+        </select>
+        <button id="evalRunBtn">运行</button>
+      </div>
+      <pre id="evalReport" class="sub">—</pre>
+    </section>
+    <section>
+      <h2>Traces（回合轨迹）</h2>
+      <button id="tracesRefreshBtn">刷新</button>
+      <ul id="traceList" class="list"></ul>
+      <details><summary>轨迹回放</summary><pre id="traceReplay" class="sub">点击上方轨迹查看</pre></details>
+    </section>
+    <section>
+      <h2>子代理（@explore / @subagent）</h2>
+      <select id="subagentMode">
+        <option value="read_only">只读探索（explore）</option>
+        <option value="full">通用子代理（subagent）</option>
+      </select>
+      <textarea id="subagentPrompt" rows="3" placeholder="子代理任务，如：调查 crates 目录结构并汇报"></textarea>
+      <button id="subagentRunBtn" class="primary">运行子代理</button>
+      <pre id="subagentResult" class="sub">—</pre>
+    </section>
+    <section>
+      <h2>项目规则（AGENTS.md）</h2>
+      <div id="projectRulesInfo" class="sub">—</div>
+      <div class="inline" style="margin-bottom:6px">
+        <button id="agentsTemplateBtn" title="生成 AGENTS.md 模板（不存在时）">生成模板</button>
+      </div>
+      <textarea id="agentsEditor" rows="8" spellcheck="false" placeholder="# 项目规则&#10;&#10;- 工具调用必须经审批"></textarea>
+      <button id="agentsSaveBtn">保存 AGENTS.md</button>
+    </section>
+    <section>
+      <h2>MCP 服务器</h2>
+      <ul id="mcpList" class="list"></ul>
+      <form id="mcpForm" class="stack">
+        <input id="mcpName" placeholder="名称（如 my-files）" required>
+        <select id="mcpTransport">
+          <option value="stdio">stdio</option>
+          <option value="http">http</option>
+        </select>
+        <input id="mcpCommand" placeholder="命令（stdio，如 npx -y @modelcontextprotocol/server-filesystem）">
+        <input id="mcpUrl" placeholder="URL（http 传输）">
+        <button type="submit">添加并连接</button>
+      </form>
+    </section>
+    <section>
+      <h2>插件</h2>
+      <ul id="pluginList" class="list"></ul>
     </section>
     <section>
       <h2>操作学习</h2>
@@ -102,6 +156,10 @@
   </aside>
 
   <main>
+    <div id="contextBar" class="hidden" title="会话上下文状态">
+      <span id="contextLabel"></span>
+      <div id="contextMeter"><div id="contextFill"></div></div>
+    </div>
     <div id="approvalBar" class="hidden">
       <span id="approvalText"></span>
       <button id="approveBtn" class="allow">允许</button>
@@ -113,6 +171,7 @@
       <input type="file" id="attachmentInput" multiple hidden>
       <button type="button" id="attachmentBtn" title="添加附件（图片/文件）">📎</button>
       <textarea id="prompt" rows="3" placeholder="输入任务，Enter 发送（Shift+Enter 换行）；/new 建新会话"></textarea>
+      <button type="button" id="abortBtn" title="中断当前回合">⏹</button>
       <button type="button" id="micBtn" title="语音输入（系统语音服务）">🎤</button>
       <button type="submit" class="primary">发送</button>
     </form>
@@ -128,13 +187,32 @@
       <ul id="suggestionList" class="list"></ul>
     </section>
     <section>
+      <h2>情景记忆</h2>
+      <div class="inline">
+        <input id="recallQ" placeholder="语义检索关键词">
+        <button id="recallBtn">检索</button>
+      </div>
+      <details><summary>最近观察（observations）</summary><ul id="observationList" class="list"></ul></details>
+      <details><summary>检索结果（recall）</summary><ul id="recallList" class="list"></ul></details>
+    </section>
+    <section>
       <h2>审计日志</h2>
+      <div class="inline">
+        <input id="auditEvent" placeholder="事件过滤（permission/tool_call/model…）">
+        <input id="auditTool" placeholder="工具过滤（read_file…）">
+        <input id="auditQ" placeholder="关键词搜索">
+        <button id="auditFilterBtn">应用</button>
+      </div>
       <ul id="auditList" class="list"></ul>
     </section>
     <section>
       <h2>diff 审阅</h2>
       <ul id="diffList" class="list"></ul>
-      <button id="revertBtn">回滚全部改动</button>
+      <div class="inline">
+        <button id="revertBtn">回滚全部改动</button>
+        <button id="exportMdBtn" title="导出会话为 Markdown">导出 MD</button>
+        <button id="exportHtmlBtn" title="导出会话为 HTML">导出 HTML</button>
+      </div>
     </section>
   </aside>
 

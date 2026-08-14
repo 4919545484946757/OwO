@@ -6,11 +6,13 @@ const state = {
   pendingApproval: null,
   reading: false,
   attachments: [],
+  abortController: null,
+  selectionVersion: 0,
 };
 
 const $ = (id) => document.getElementById(id);
 // 由 Tauri 壳注入核心服务地址；经核心服务同源托管时为空字符串。
-const API_BASE = window.OWO_API_BASE || "";
+const API_BASE = (window.OWO_API_BASE || "").replace(/\/+$/, "");
 
 let recognition = null;
 let listening = false;
@@ -98,9 +100,13 @@ async function startLocalRecording() {
 }
 
 async function api(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (options.body != null && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   const response = await fetch(API_BASE + path, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers,
   });
   if (!response.ok) {
     const body = await response.text();
@@ -118,16 +124,194 @@ function addMessage(kind, text, meta = "") {
     span.textContent = meta;
     div.appendChild(span);
   }
-  div.appendChild(document.createTextNode(text));
+  if (kind === "assistant" || kind === "user") {
+    div.innerHTML = renderMarkdown(text);
+  } else {
+    div.appendChild(document.createTextNode(text));
+  }
+  bindCopyButtons(div);
   $("messages").appendChild(div);
   $("messages").scrollTop = $("messages").scrollHeight;
   return div;
+}
+
+function bindCopyButtons(root) {
+  for (const button of root.querySelectorAll(".md-copy")) {
+    button.addEventListener("click", () => {
+      const code = decodeURIComponent(button.dataset.code || "");
+      navigator.clipboard.writeText(code).then(() => {
+        button.textContent = "已复制";
+        setTimeout(() => {
+          button.textContent = "复制";
+        }, 1200);
+      });
+    });
+  }
 }
 
 function esc(text) {
   const div = document.createElement("div");
   div.textContent = text;
   return div.innerHTML;
+}
+
+// ---------- 轻量 Markdown 渲染（对标 Codex 桌面：代码块/标题/列表/表格/行内样式） ----------
+
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeAttribute(text) {
+  return escapeHtml(text).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function safeMarkdownHref(raw) {
+  const href = raw.replace(/&amp;/g, "&").trim();
+  if (!href || /^(?:javascript|data|vbscript):/i.test(href)) return "";
+  try {
+    const url = new URL(href, window.location.href);
+    if (["http:", "https:", "mailto:"].includes(url.protocol)) return url.href;
+  } catch (_) {
+    // 无法解析的链接按普通文本显示。
+  }
+  return /^(?:\.|\/|#)/.test(href) ? href : "";
+}
+
+function inlineMarkdown(text) {
+  let out = escapeHtml(text);
+  out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, rawHref) => {
+    const href = safeMarkdownHref(rawHref);
+    return href
+      ? `<a href="${escapeAttribute(href)}" target="_blank" rel="noopener">${label}</a>`
+      : label;
+  });
+  return out;
+}
+
+// 把 markdown 文本渲染为 HTML。代码块保留原样（pre/code），行内元素转义。
+function renderMarkdown(text) {
+  if (!text) return "";
+  const lines = text.split("\n");
+  const html = [];
+  let inCode = false;
+  let codeLang = "";
+  let codeLines = [];
+  let inList = false;
+  let inTable = false;
+  let tableHeader = null;
+  let tableAlign = null;
+
+  const flushCode = () => {
+    if (codeLines.length) {
+      html.push(
+        `<pre class="md-code"><div class="md-code-head"><span>${escapeHtml(codeLang || "code")}</span><button class="md-copy" data-code="${encodeURIComponent(codeLines.join("\n"))}">复制</button></div><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`
+      );
+      codeLines = [];
+    }
+    inCode = false;
+    codeLang = "";
+  };
+  const flushList = () => {
+    if (inList) {
+      html.push("</ul>");
+      inList = false;
+    }
+  };
+  const flushTable = () => {
+    if (inTable) {
+      html.push("</table>");
+      inTable = false;
+    }
+    tableHeader = null;
+    tableAlign = null;
+  };
+
+  for (const line of lines) {
+    const fence = line.match(/^```(\w*)\s*$/);
+    if (fence) {
+      if (inCode) flushCode();
+      else {
+        flushList();
+        flushTable();
+        inCode = true;
+        codeLang = fence[1];
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+    if (/^\s*$/.test(line)) {
+      flushList();
+      flushTable();
+      html.push("");
+      continue;
+    }
+    const heading = line.match(/^(#{1,4})\s+(.*)$/);
+    if (heading) {
+      flushList();
+      flushTable();
+      const level = heading[1].length;
+      html.push(`<h${level} class="md-h${level}">${inlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+    const hr = line.match(/^\s*(-{3,}|\*{3,})\s*$/);
+    if (hr) {
+      flushList();
+      flushTable();
+      html.push('<hr class="md-hr">');
+      continue;
+    }
+    const li = line.match(/^\s*[-*+]\s+(.*)$/) || line.match(/^\s*\d+\.\s+(.*)$/);
+    if (li) {
+      flushTable();
+      if (!inList) {
+        html.push("<ul class=\"md-list\">");
+        inList = true;
+      }
+      html.push(`<li>${inlineMarkdown(li[1])}</li>`);
+      continue;
+    }
+    flushList();
+    const tableLine = line.match(/^\|?\s*(.*?)\s*\|?$/);
+    const cells = line.split("|").slice(1, -1);
+    const allCells = line.split("|").filter((cell) => cell.trim() !== "");
+    if (allCells.length > 1 && !tableHeader) {
+      tableHeader = allCells.map((cell) => cell.trim());
+      inTable = true;
+      html.push('<table class="md-table"><thead><tr>');
+      for (const cell of tableHeader) {
+        html.push(`<th>${inlineMarkdown(cell)}</th>`);
+      }
+      html.push("</tr></thead><tbody>");
+      continue;
+    }
+    if (inTable) {
+      if (tableHeader && allCells.every((cell) => /^:?-{2,}:?$/.test(cell.trim()))) {
+        tableAlign = allCells.map((cell) => cell.trim());
+        continue;
+      }
+      if (allCells.length) {
+        html.push("<tr>");
+        for (let index = 0; index < allCells.length; index++) {
+          html.push(`<td>${inlineMarkdown(allCells[index])}</td>`);
+        }
+        html.push("</tr>");
+        continue;
+      }
+      flushTable();
+      tableHeader = null;
+    }
+    html.push(`<div class="md-p">${inlineMarkdown(line)}</div>`);
+  }
+  flushCode();
+  flushList();
+  flushTable();
+  return html.join("\n");
 }
 
 // ---------- 头部状态 ----------
@@ -189,6 +373,46 @@ async function sinkSkill() {
   }
 }
 
+async function refreshPlugins() {
+  try {
+    const data = await api("/plugins");
+    const list = $("pluginList");
+    list.innerHTML = "";
+    const plugins = data.plugins || [];
+    for (const plugin of plugins) {
+      const li = document.createElement("li");
+      const enabled = plugin.enabled !== false;
+      const mcp = plugin.mcp
+        ? `${esc(plugin.mcp.transport)}｜${esc(plugin.mcp.command)}`
+        : "无 MCP 服务器";
+      li.innerHTML =
+        `<strong>${esc(plugin.name)}</strong>` +
+        `<span class="sub">${enabled ? "已启用" : "已禁用"} ｜ ${esc(plugin.id)} v${esc(plugin.version)}</span>` +
+        `<span class="sub">${esc(plugin.description || "")}</span>` +
+        `<span class="sub">权限：${esc((plugin.permissions || []).join(", ") || "无")} ｜ ${mcp}</span>`;
+      const toggleBtn = document.createElement("button");
+      toggleBtn.textContent = enabled ? "禁用" : "启用";
+      toggleBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        try {
+          await api(`/plugins/${encodeURIComponent(plugin.id)}/enabled`, {
+            method: "POST",
+            body: JSON.stringify({ enabled: !enabled }),
+          });
+          await refreshPlugins();
+        } catch (error) {
+          addMessage("system", `插件切换失败：${error.message || error}`);
+        }
+      });
+      li.appendChild(toggleBtn);
+      list.appendChild(li);
+    }
+    if (!plugins.length) list.innerHTML = '<li class="sub">未发现插件</li>';
+  } catch (_) {
+    $("pluginList").innerHTML = '<li class="sub">插件读取失败</li>';
+  }
+}
+
 async function refreshPackages() {
   try {
     const packages = await api("/learn/packages");
@@ -196,8 +420,26 @@ async function refreshPackages() {
     list.innerHTML = "";
     for (const pkg of packages) {
       const li = document.createElement("li");
-      li.innerHTML = `<strong>${esc(pkg.name)}</strong><span class="sub">目标：${esc(pkg.target_apps.join(","))} ｜ 变量：${esc(pkg.variables.join(",")) || "无"}</span>`;
+      const health = pkg.health || "active";
+      li.innerHTML = `<strong>${esc(pkg.name)}</strong><span class="sub">健康：${esc(health)} ｜ 目标：${esc(pkg.target_apps.join(","))} ｜ 变量：${esc(pkg.variables.join(",")) || "无"}</span>`;
       li.addEventListener("click", () => executePackage(pkg));
+      if (health === "degraded") {
+        const resetBtn = document.createElement("button");
+        resetBtn.textContent = "重置健康";
+        resetBtn.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          try {
+            await api(`/skills/health/${encodeURIComponent(pkg.name)}/reset`, {
+              method: "POST",
+            });
+            await refreshPackages();
+            addMessage("system", `已重置 ${pkg.name} 健康度`);
+          } catch (error) {
+            addMessage("system", `重置失败：${error.message || error}`);
+          }
+        });
+        li.appendChild(resetBtn);
+      }
       const exportBtn = document.createElement("button");
       exportBtn.textContent = "导出";
       exportBtn.addEventListener("click", async (event) => {
@@ -477,7 +719,14 @@ async function refreshSuggestions() {
 
 async function refreshAudit() {
   try {
-    const entries = await api("/audit?limit=50");
+    const params = new URLSearchParams({ limit: "50" });
+    const eventFilter = $("auditEvent").value.trim();
+    const toolFilter = $("auditTool").value.trim();
+    const qFilter = $("auditQ").value.trim();
+    if (eventFilter) params.set("event", eventFilter);
+    if (toolFilter) params.set("tool", toolFilter);
+    if (qFilter) params.set("q", qFilter);
+    const entries = await api(`/audit?${params.toString()}`);
     const list = $("auditList");
     list.innerHTML = "";
     for (const entry of entries) {
@@ -496,6 +745,14 @@ async function refreshAudit() {
 // ---------- 会话 / 任务 ----------
 
 async function refreshSessions(selectId) {
+  try {
+    await refreshSessionsImpl(selectId);
+  } catch (error) {
+    $("sessionList").innerHTML = `<li class="sub">会话读取失败：${esc(error.message || error)}</li>`;
+  }
+}
+
+async function refreshSessionsImpl(selectId) {
   const sessions = await api("/sessions");
   const showArchived = $("showArchived").checked;
   const visible = sessions.filter((session) => showArchived || !session.archived);
@@ -598,11 +855,13 @@ async function refreshSessions(selectId) {
 }
 
 async function selectSession(id) {
+  const selectionVersion = ++state.selectionVersion;
   state.sessionId = id;
   state.attachments = [];
   renderAttachmentChips();
   try {
     const detail = await api(`/session/${id}`);
+    if (selectionVersion !== state.selectionVersion) return;
     $("messages").innerHTML = "";
     for (const message of detail.messages || []) {
       if (!message.content) continue;
@@ -610,11 +869,42 @@ async function selectSession(id) {
     }
     addMessage("system", `已恢复会话：${detail.title || id.slice(0, 12)}`);
   } catch (error) {
+    if (selectionVersion !== state.selectionVersion) return;
     $("messages").innerHTML = "";
     addMessage("system", `会话加载失败：${error.message || error}`);
   }
   await refreshSessions(id);
   await refreshDiff(id);
+  await refreshSessionContext(id);
+}
+
+// ---------- 会话上下文仪表（v0.5.7，对标 Codex 上下文状态显示） ----------
+
+async function refreshSessionContext(sessionId) {
+  const bar = $("contextBar");
+  if (!sessionId) {
+    bar.classList.add("hidden");
+    return;
+  }
+  try {
+    const ctx = await api(`/session/${sessionId}/context`);
+    const fill = $("contextFill");
+    const ratio = ctx.token_budget > 0 ? ctx.estimated_tokens / ctx.token_budget : 0;
+    fill.style.width = `${Math.min(100, Math.round(ratio * 100))}%`;
+    fill.className = ratio > 1 ? "over" : ratio > 0.8 ? "warn" : "";
+    const rulesBadge = ctx.rules_injected ? "规则注入 ✅" : "无规则";
+    const compactionBadge = ctx.last_compaction ? "已压缩" : "未压缩";
+    $("contextLabel").textContent =
+      `上下文 ${ctx.messages} 条 ｜ 估算 ${ctx.estimated_tokens}/${ctx.token_budget} tokens` +
+      ` ｜ ${rulesBadge} ｜ ${compactionBadge}` +
+      (ctx.compaction_enabled ? "" : "（压缩关闭）");
+    bar.title = ctx.last_compaction
+      ? `最近压缩摘要：\n${ctx.last_compaction.slice(0, 300)}`
+      : "会话上下文状态";
+    bar.classList.remove("hidden");
+  } catch (_) {
+    bar.classList.add("hidden");
+  }
 }
 
 async function newSession() {
@@ -623,6 +913,7 @@ async function newSession() {
     alert("请先填写工作区绝对路径");
     return;
   }
+  localStorage.setItem("owo.workspace", workspace);
   const session = await api("/session", {
     method: "POST",
     body: JSON.stringify({ workspace }),
@@ -657,62 +948,88 @@ async function sendPrompt() {
     addMessage("system", `附带 ${attachments.length} 个附件`);
   }
   const streaming = addMessage("assistant", "");
+  let assistantText = "";
+  let finished = false;
+  let reader = null;
 
   state.reading = true;
+  state.abortController = new AbortController();
+  $("abortBtn").disabled = false;
   try {
     const response = await fetch(`${API_BASE}/session/${state.sessionId}/turn`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt, attachments }),
+      signal: state.abortController.signal,
     });
     if (!response.ok || !response.body) {
       throw new Error(await response.text());
     }
-    const reader = response.body.getReader();
+    reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    let assistantText = "";
-    let finished = false;
+
+    const handleBlock = (block) => {
+      const { event, data } = parseSseBlock(block);
+      if (!data) return;
+      let payload;
+      try {
+        payload = JSON.parse(data);
+      } catch (_) {
+        return;
+      }
+      switch (event) {
+        case "token_delta":
+          assistantText += payload.delta || "";
+          streaming.innerHTML = renderMarkdown(assistantText);
+          bindCopyButtons(streaming);
+          $("messages").scrollTop = $("messages").scrollHeight;
+          break;
+        case "progress":
+          addMessage("system", `[${payload.message || "处理中"}]`);
+          break;
+        case "tool_use":
+          addMessage("tool", `▶ ${payload.tool}`, "工具调用");
+          break;
+        case "tool_result":
+          addMessage(
+            "tool",
+            payload.ok ? `✔ ${payload.tool}` : `✘ ${payload.tool}：${payload.error || ""}`,
+            "工具结果",
+          );
+          break;
+        case "permission_request":
+          showApproval(payload);
+          break;
+        case "final":
+          assistantText = payload.text || assistantText;
+          streaming.innerHTML = renderMarkdown(assistantText);
+          bindCopyButtons(streaming);
+          finished = true;
+          break;
+        case "compaction":
+          addMessage("system", `上下文已压缩：${payload.summary}`);
+          break;
+      }
+    };
+
+    const consumeBlocks = (text, flush) => {
+      const blocks = text.split(/\r?\n\r?\n/);
+      const remainder = flush ? "" : blocks.pop() || "";
+      for (const block of blocks) handleBlock(block);
+      return remainder;
+    };
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const blocks = buffer.split("\n\n");
-      buffer = blocks.pop() || "";
-      for (const block of blocks) {
-        const { event, data } = parseSseBlock(block);
-        if (!data) continue;
-        let payload;
-        try { payload = JSON.parse(data); } catch (_) { continue; }
-        switch (event) {
-          case "token_delta":
-            assistantText += payload.delta || "";
-            streaming.textContent = assistantText;
-            $("messages").scrollTop = $("messages").scrollHeight;
-            break;
-          case "progress":
-            streaming.textContent = (streaming.textContent || "") + `\n[${payload.message}]`;
-            break;
-          case "tool_use":
-            addMessage("tool", `▶ ${payload.tool}`, "工具调用");
-            break;
-          case "tool_result":
-            addMessage("tool", payload.ok ? `✔ ${payload.tool}` : `✘ ${payload.tool}：${payload.error || ""}`, "工具结果");
-            break;
-          case "permission_request":
-            showApproval(payload);
-            break;
-          case "final":
-            assistantText = payload.text || assistantText;
-            streaming.textContent = assistantText;
-            finished = true;
-            break;
-          case "compaction":
-            addMessage("system", `上下文已压缩：${payload.summary}`);
-            break;
-        }
+      if (done) {
+        buffer += decoder.decode();
+        if (buffer.trim()) consumeBlocks(buffer, true);
+        buffer = "";
+        break;
       }
+      buffer += decoder.decode(value, { stream: true });
+      buffer = consumeBlocks(buffer, false);
     }
     if (!finished && !assistantText) streaming.remove();
     hideApproval();
@@ -720,10 +1037,20 @@ async function sendPrompt() {
     renderAttachmentChips();
     await refreshSessions(state.sessionId);
     await refreshDiff(state.sessionId);
+    await refreshSessionContext(state.sessionId);
   } catch (error) {
-    addMessage("error", `回合失败：${error.message}`);
+    if (!assistantText) streaming.remove();
+    if (error.name !== "AbortError") {
+      addMessage("error", `回合失败：${error.message}`);
+    } else {
+      addMessage("system", "已中断回合");
+    }
   } finally {
+    reader?.releaseLock();
+    hideApproval();
     state.reading = false;
+    state.abortController = null;
+    $("abortBtn").disabled = true;
   }
 }
 
@@ -817,13 +1144,43 @@ async function refreshDiff(sessionId) {
       const li = document.createElement("li");
       li.className = "diff-item";
       const changed = diff.before != null && diff.after != null ? "修改" : diff.after != null ? "新增" : "删除";
-      li.innerHTML = `<strong>${esc(diff.path)}</strong><span class="sub">${changed}</span>`;
+      const marker = changed === "删除" ? "🗑" : changed === "新增" ? "➕" : "✏️";
+      li.innerHTML = `<strong>${marker} ${esc(diff.path)}</strong><span class="sub">${changed}</span>`;
+      const body = document.createElement("pre");
+      body.className = "diff-body hidden";
+      body.textContent = diffText(diff);
+      li.appendChild(body);
+      li.addEventListener("click", (event) => {
+        if (event.target.tagName === "BUTTON") return;
+        body.classList.toggle("hidden");
+      });
       list.appendChild(li);
     }
     if (!diffs.length) list.innerHTML = '<li class="sub">暂无改动</li>';
   } catch (_) {
     list.innerHTML = '<li class="sub">无会话或读取失败</li>';
   }
+}
+
+// 生成行级 diff 文本（统一格式，参照 git diff 风格）。
+function diffText(diff) {
+  const beforeLines = diff.before != null ? diff.before.split("\n") : [];
+  const afterLines = diff.after != null ? diff.after.split("\n") : [];
+  const lines = [];
+  const maxLen = Math.max(beforeLines.length, afterLines.length);
+  for (let index = 0; index < maxLen; index++) {
+    const before = index < beforeLines.length ? beforeLines[index] : null;
+    const after = index < afterLines.length ? afterLines[index] : null;
+    if (before === null) lines.push(`+ ${after}`);
+    else if (after === null) lines.push(`- ${before}`);
+    else if (before !== after) {
+      lines.push(`- ${before}`);
+      lines.push(`+ ${after}`);
+    } else {
+      lines.push(`  ${before}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 async function revertAll() {
@@ -906,6 +1263,318 @@ async function refreshSkills() {
   }
 }
 
+// ---------- 情景记忆 ----------
+
+async function refreshObservations() {
+  try {
+    const data = await api("/memory/observations?limit=30");
+    const list = $("observationList");
+    list.innerHTML = "";
+    for (const observation of data.observations || []) {
+      const li = document.createElement("li");
+      li.innerHTML =
+        `<strong>${esc(observation.app_id)}｜${esc(observation.kind)}</strong>` +
+        `<span class="sub">${esc(observation.summary)}</span>` +
+        `<span class="sub">${esc((observation.ts || "").slice(0, 19).replace("T", " "))}</span>`;
+      list.appendChild(li);
+    }
+    if (!(data.observations || []).length) list.innerHTML = '<li class="sub">暂无观察记录</li>';
+  } catch (_) {
+    $("observationList").innerHTML = '<li class="sub">读取失败</li>';
+  }
+}
+
+async function recallMemory() {
+  const query = $("recallQ").value.trim();
+  if (!query) return;
+  try {
+    const data = await api(`/memory/recall?q=${encodeURIComponent(query)}&top_k=8`);
+    const list = $("recallList");
+    list.innerHTML = "";
+    for (const hit of data.hits || []) {
+      const li = document.createElement("li");
+      const score = hit.confidence != null ? `（${(hit.confidence * 100).toFixed(0)}%）` : "";
+      li.innerHTML =
+        `<strong>${esc(hit.app_id || "")} ${score}</strong>` +
+        `<span class="sub">${esc(hit.summary || "")}</span>` +
+        `<span class="sub">${esc((hit.ts || "").slice(0, 19).replace("T", " "))}</span>`;
+      list.appendChild(li);
+    }
+    if (!(data.hits || []).length) list.innerHTML = '<li class="sub">无匹配结果</li>';
+  } catch (error) {
+    $("recallList").innerHTML = `<li class="sub">检索失败：${esc(error.message)}</li>`;
+  }
+}
+
+// ---------- 技能健康度 ----------
+
+async function refreshSkillHealth() {
+  try {
+    const data = await api("/skills/health");
+    const container = $("healthList");
+    container.innerHTML = "";
+    const skills = data.skills || [];
+    for (const skill of skills) {
+      const row = document.createElement("div");
+      row.className = "health-row";
+      const stateBadge = skill.state === "active" ? "✅" : skill.state === "degraded" ? "⚠️" : "⛔";
+      row.innerHTML =
+        `<span>${stateBadge} <strong>${esc(skill.name)}</strong> ` +
+        `${esc(skill.state)}（${skill.successes}/${skill.attempts}，成功率 ${(skill.success_rate * 100).toFixed(0)}%）` +
+        ` ｜ 连续失败 ${skill.consecutive_failures} ｜ 模板命中 ${(skill.template_hit_rate * 100).toFixed(0)}%</span>`;
+      container.appendChild(row);
+    }
+    if (!skills.length) container.textContent = "暂无技能健康度数据";
+  } catch (_) {
+    $("healthList").textContent = "读取失败";
+  }
+}
+
+// ---------- Eval 评估 ----------
+
+async function runEval() {
+  const suiteId = $("evalSuite").value;
+  const button = $("evalRunBtn");
+  button.disabled = true;
+  button.textContent = "运行中…";
+  $("evalReport").textContent = "评估运行中（调用真实模型，请稍候）…";
+  try {
+    const report = await api("/eval/run", {
+      method: "POST",
+      body: JSON.stringify({ suite_id: suiteId }),
+    });
+    const lines = [
+      `套件：${report.suite}`,
+      `通过率：${report.passed}/${report.total}（${(report.pass_rate * 100).toFixed(1)}%）`,
+      `总耗时：${(report.total_duration_ms / 1000).toFixed(1)}s`,
+      "",
+    ];
+    for (const caseResult of report.cases || []) {
+      lines.push(
+        `${caseResult.passed ? "✅" : "❌"} ${caseResult.name}（${(caseResult.duration_ms / 1000).toFixed(1)}s，${caseResult.steps} 步）${caseResult.error ? `：${caseResult.error}` : ""}`
+      );
+    }
+    $("evalReport").textContent = lines.join("\n");
+  } catch (error) {
+    $("evalReport").textContent = `评估失败：${error.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = "运行";
+  }
+}
+
+// ---------- Traces 可观测（v0.5.6） ----------
+
+async function refreshTraces() {
+  try {
+    const data = await api("/traces");
+    const list = $("traceList");
+    list.innerHTML = "";
+    const traces = data.traces || [];
+    for (let index = 0; index < traces.length; index++) {
+      const trace = traces[index];
+      const li = document.createElement("li");
+      const final = trace.has_final ? "✅" : "—";
+      const usage = trace.usage && trace.usage.total_tokens ? ` ｜ ${trace.usage.total_tokens} tokens` : "";
+      li.innerHTML =
+        `<strong>${index} ${esc(trace.prompt_preview || trace.prompt || "")}</strong>` +
+        `<span class="sub">${final} ${(trace.duration_ms / 1000).toFixed(1)}s ｜ ${trace.steps} 步 ｜ ${esc(trace.model)}${usage}</span>` +
+        `<span class="sub">${esc((trace.started_at || "").slice(0, 19).replace("T", " "))}</span>`;
+      li.addEventListener("click", () => showTrace(index));
+      list.appendChild(li);
+    }
+    if (!traces.length) list.innerHTML = '<li class="sub">暂无轨迹（完成回合后自动记录）</li>';
+  } catch (_) {
+    $("traceList").innerHTML = '<li class="sub">读取失败</li>';
+  }
+}
+
+async function showTrace(index) {
+  try {
+    const trace = await api(`/traces/${index}`);
+    const lines = [
+      `prompt：${trace.prompt}`,
+      `model：${trace.model} ｜ ${trace.duration_ms}ms ｜ ${trace.steps} 步`,
+      `final：${trace.final_text || "（无）"}`,
+      `usage：${JSON.stringify(trace.usage || {})}`,
+      "",
+      "── 事件回放 ──",
+    ];
+    for (const event of trace.events || []) {
+      const type = event.type || "?";
+      if (type === "model_call") lines.push("· 模型调用");
+      else if (type === "token_delta") lines.push(`· token：${(event.delta || "").slice(0, 60)}`);
+      else if (type === "tool_start") lines.push(`▶ 工具开始：${event.tool}`);
+      else if (type === "tool_result") lines.push(`✔ 工具结果：${event.tool}${event.ok ? "" : "（失败）"}`);
+      else if (type === "permission_request") lines.push(`⛔ 审批请求：${event.tool}（${event.reason || ""}）`);
+      else if (type === "compaction") lines.push(`📦 上下文压缩：${event.summary}`);
+      else if (type === "final") lines.push(`✔ 最终：${(event.text || "").slice(0, 120)}`);
+      else lines.push(`· ${type}`);
+    }
+    $("traceReplay").textContent = lines.join("\n");
+  } catch (error) {
+    $("traceReplay").textContent = `回放失败：${error.message}`;
+  }
+}
+
+async function exportSession(format) {
+  if (!state.sessionId) return;
+  try {
+    const response = await fetch(
+      `${API_BASE}/session/${state.sessionId}/export/${format}`,
+      { method: "GET" }
+    );
+    if (!response.ok) throw new Error(await response.text());
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `session-${state.sessionId.slice(0, 8)}.${format === "html" ? "html" : "md"}`;
+    link.click();
+    URL.revokeObjectURL(url);
+    addMessage("system", `已导出会话为 ${format.toUpperCase()}`);
+  } catch (error) {
+    addMessage("error", `导出失败：${error.message}`);
+  }
+}
+
+// ---------- 子代理 / 项目规则 / MCP 管理（v0.5.5，对标 Codex @explore/@subagent、AGENTS.md、/mcp） ----------
+
+async function runSubagent() {
+  const prompt = $("subagentPrompt").value.trim();
+  if (!prompt) {
+    addMessage("system", "请输入子代理任务");
+    return;
+  }
+  const readOnly = $("subagentMode").value === "read_only";
+  const button = $("subagentRunBtn");
+  button.disabled = true;
+  button.textContent = "运行中…";
+  $("subagentResult").textContent = "子代理执行中（调用真实模型，请稍候）…";
+  try {
+    const result = await api("/subagent/run", {
+      method: "POST",
+      body: JSON.stringify({ prompt, read_only: readOnly }),
+    });
+    $("subagentResult").textContent =
+      `${result.read_only ? "只读探索" : "通用子代理"}完成（${(result.duration_ms / 1000).toFixed(1)}s）：\n\n${result.text}`;
+  } catch (error) {
+    $("subagentResult").textContent = `子代理失败：${error.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = "运行子代理";
+  }
+}
+
+async function refreshProjectRules() {
+  try {
+    const data = await api("/project/rules");
+    const info = $("projectRulesInfo");
+    info.innerHTML = "";
+    for (const rule of data.rules || []) {
+      const badge = rule.exists ? (rule.injected ? "✅ 注入" : "⚠️ 未注入") : "— 不存在";
+      const div = document.createElement("div");
+      div.textContent = `${rule.name}：${badge}`;
+      info.appendChild(div);
+      if (rule.name === "AGENTS.md") {
+        const editor = $("agentsEditor");
+        if (!editor.dataset.seeded) {
+          editor.value = rule.content || "";
+          editor.dataset.seeded = "1";
+        }
+      }
+    }
+  } catch (_) {
+    $("projectRulesInfo").textContent = "读取失败";
+  }
+}
+
+async function saveAgentsRules() {
+  const content = $("agentsEditor").value;
+  try {
+    const result = await api("/project/rules", {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
+    addMessage("system", `已保存 AGENTS.md（${result.chars} 字符），下次会话注入生效`);
+    await refreshProjectRules();
+  } catch (error) {
+    addMessage("error", `保存失败：${error.message}`);
+  }
+}
+
+async function generateAgentsTemplate() {
+  try {
+    const result = await api("/project/rules/template", { method: "POST" });
+    addMessage("system", `已生成 AGENTS.md 模板（${result.chars} 字符）`);
+    $("agentsEditor").dataset.seeded = "0";
+    await refreshProjectRules();
+  } catch (error) {
+    addMessage("error", `生成失败：${error.message}`);
+  }
+}
+
+async function refreshMcp() {
+  try {
+    const data = await api("/mcp");
+    const list = $("mcpList");
+    list.innerHTML = "";
+    for (const server of data.servers || []) {
+      const li = document.createElement("li");
+      const target = server.transport === "http" ? server.url : server.command;
+      li.innerHTML = `<strong>${esc(server.name)}</strong><span class="sub">${esc(server.transport)} ｜ ${esc(target || "")}${server.args && server.args.length ? " " + esc(server.args.join(" ")) : ""}</span>`;
+      const removeBtn = document.createElement("button");
+      removeBtn.textContent = "移除";
+      removeBtn.addEventListener("click", async () => {
+        try {
+          await api("/mcp/remove", {
+            method: "POST",
+            body: JSON.stringify({ name: server.name }),
+          });
+          await refreshMcp();
+          addMessage("system", `已移除 MCP 服务器 ${server.name}`);
+        } catch (error) {
+          addMessage("error", `移除失败：${error.message}`);
+        }
+      });
+      li.appendChild(removeBtn);
+      list.appendChild(li);
+    }
+    if (!(data.servers || []).length) list.innerHTML = '<li class="sub">暂无 MCP 服务器</li>';
+  } catch (_) {
+    $("mcpList").innerHTML = '<li class="sub">读取失败</li>';
+  }
+}
+
+async function addMcpServer() {
+  const name = $("mcpName").value.trim();
+  const transport = $("mcpTransport").value;
+  const command = $("mcpCommand").value.trim();
+  const url = $("mcpUrl").value.trim();
+  if (!name) return;
+  if (transport === "stdio" && !command) {
+    addMessage("error", "stdio 传输需要填写启动命令");
+    return;
+  }
+  if (transport === "http" && !url) {
+    addMessage("error", "http 传输需要填写 URL");
+    return;
+  }
+  try {
+    const result = await api("/mcp/add", {
+      method: "POST",
+      body: JSON.stringify({ name, transport, command, url: url || null }),
+    });
+    addMessage("system", `MCP 服务器 ${name} 已连接（${result.tools} 个工具）`);
+    $("mcpName").value = "";
+    $("mcpCommand").value = "";
+    $("mcpUrl").value = "";
+    await refreshMcp();
+  } catch (error) {
+    addMessage("error", `添加失败：${error.message}`);
+  }
+}
+
 // ---------- 白名单 ----------
 
 async function refreshWhitelist() {
@@ -917,11 +1586,15 @@ async function refreshWhitelist() {
       const li = document.createElement("li");
       li.innerHTML = `<strong>${esc(entry.name)}</strong><span class="sub">${esc(entry.app_id)} ｜ ${esc(entry.tier)} ｜ 操作:${entry.auto_ops_allowed ? "开" : "关"}</span>`;
       li.addEventListener("dblclick", async () => {
-        await api("/whitelist/manage", {
-          method: "POST",
-          body: JSON.stringify({ action: "remove", app_id: entry.app_id }),
-        });
-        refreshWhitelist();
+        try {
+          await api("/whitelist/manage", {
+            method: "POST",
+            body: JSON.stringify({ action: "remove", app_id: entry.app_id }),
+          });
+          await refreshWhitelist();
+        } catch (error) {
+          addMessage("error", `白名单删除失败：${error.message || error}`);
+        }
       });
       list.appendChild(li);
     }
@@ -932,7 +1605,15 @@ async function refreshWhitelist() {
 
 // ---------- 事件绑定 ----------
 
-$("newSession").addEventListener("click", newSession);
+const savedWorkspace = localStorage.getItem("owo.workspace");
+if (savedWorkspace) $("workspace").value = savedWorkspace;
+$("workspace").addEventListener("change", () => {
+  const workspace = $("workspace").value.trim();
+  if (workspace) localStorage.setItem("owo.workspace", workspace);
+});
+$("newSession").addEventListener("click", () => {
+  newSession().catch((error) => addMessage("error", `创建会话失败：${error.message || error}`));
+});
 $("showArchived").addEventListener("change", () => refreshSessions(state.sessionId));
 $("attachmentBtn").addEventListener("click", () => $("attachmentInput").click());
 $("attachmentInput").addEventListener("change", () => uploadAttachments($("attachmentInput").files));
@@ -942,7 +1623,17 @@ $("chatForm").addEventListener("submit", (event) => {
 });
 $("approveBtn").addEventListener("click", () => respondApproval(true));
 $("denyBtn").addEventListener("click", () => respondApproval(false));
+$("abortBtn").addEventListener("click", async () => {
+  if (!state.reading || !state.sessionId) return;
+  try {
+    await api(`/session/${state.sessionId}/abort`, { method: "POST" });
+  } catch (_) {
+    // 服务端可能已结束回合，忽略
+  }
+  if (state.abortController) state.abortController.abort();
+});
 $("revertBtn").addEventListener("click", revertAll);
+$("auditFilterBtn").addEventListener("click", () => refreshAudit());
 $("learnStart").addEventListener("click", () => learnControl("start"));
 $("learnPause").addEventListener("click", () => learnControl("pause"));
 $("learnResume").addEventListener("click", () => learnControl("resume"));
@@ -966,17 +1657,25 @@ $("automationForm").addEventListener("submit", (event) => {
   createAutomation();
 });
 $("clearReminders").addEventListener("click", async () => {
-  await api("/automations/reminders/clear", { method: "POST" });
-  await refreshReminders();
+  try {
+    await api("/automations/reminders/clear", { method: "POST" });
+    await refreshReminders();
+  } catch (error) {
+    addMessage("error", `清除提醒失败：${error.message || error}`);
+  }
 });
 $("egressToggle").addEventListener("click", async () => {
   const enabled = $("egressToggle").dataset.enabled !== "true";
-  await api("/settings/egress", {
-    method: "POST",
-    body: JSON.stringify({ cloud_enabled: enabled }),
-  });
-  await refreshSettings();
-  addMessage("system", `云端模型已${enabled ? "开启" : "关闭"}（已即时生效）`);
+  try {
+    await api("/settings/egress", {
+      method: "POST",
+      body: JSON.stringify({ cloud_enabled: enabled }),
+    });
+    await refreshSettings();
+    addMessage("system", `云端模型已${enabled ? "开启" : "关闭"}（已即时生效）`);
+  } catch (error) {
+    addMessage("error", `切换云端模型失败：${error.message || error}`);
+  }
 });
 $("settingsSave").addEventListener("click", async () => {
   try {
@@ -991,27 +1690,46 @@ $("settingsSave").addEventListener("click", async () => {
     addMessage("system", `设置保存失败：${error.message || error}`);
   }
 });
+$("recallBtn").addEventListener("click", () => recallMemory());
+$("recallQ").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") recallMemory();
+});
+$("evalRunBtn").addEventListener("click", () => runEval());
+$("tracesRefreshBtn").addEventListener("click", () => refreshTraces());
+$("exportMdBtn").addEventListener("click", () => exportSession("md"));
+$("exportHtmlBtn").addEventListener("click", () => exportSession("html"));
+$("subagentRunBtn").addEventListener("click", () => runSubagent());
+$("agentsSaveBtn").addEventListener("click", () => saveAgentsRules());
+$("agentsTemplateBtn").addEventListener("click", () => generateAgentsTemplate());
+$("mcpForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  addMcpServer();
+});
 $("whitelistForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const appId = $("wlAppId").value.trim();
   if (!appId) return;
-  await api("/whitelist/manage", {
-    method: "POST",
-    body: JSON.stringify({
-      action: "upsert",
-      entry: {
-        app_id: appId,
-        name: appId,
-        tier: "productivity",
-        learn_allowed: true,
-        auto_ops_allowed: true,
-        chat_authorized: false,
-        sensitive: false,
-      },
-    }),
-  });
-  $("wlAppId").value = "";
-  refreshWhitelist();
+  try {
+    await api("/whitelist/manage", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "upsert",
+        entry: {
+          app_id: appId,
+          name: appId,
+          tier: "productivity",
+          learn_allowed: true,
+          auto_ops_allowed: true,
+          chat_authorized: false,
+          sensitive: false,
+        },
+      }),
+    });
+    $("wlAppId").value = "";
+    await refreshWhitelist();
+  } catch (error) {
+    addMessage("error", `白名单更新失败：${error.message || error}`);
+  }
 });
 $("prompt").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -1085,6 +1803,7 @@ async function boot() {
   await Promise.all([
     refreshSessions(),
     refreshSkills(),
+    refreshPlugins(),
     refreshPackages(),
     refreshSuggestions(),
     refreshAutomations(),
@@ -1095,9 +1814,15 @@ async function boot() {
     refreshWhitelist(),
     refreshPerception(),
     refreshLearn(),
+    refreshObservations(),
+    refreshSkillHealth(),
+    refreshProjectRules(),
+    refreshMcp(),
+    refreshTraces(),
   ]);
   setInterval(refreshPerception, 3000);
   setInterval(refreshLearn, 5000);
+  setInterval(refreshPlugins, 15000);
   setInterval(refreshPackages, 10000);
   setInterval(refreshSuggestions, 10000);
   setInterval(refreshAudit, 5000);
@@ -1105,7 +1830,11 @@ async function boot() {
   setInterval(refreshReminders, 5000);
   setInterval(refreshSettings, 15000);
   setInterval(refreshUsage, 10000);
-  setInterval(refreshHealth, 15000);
+  setInterval(refreshHealth, 30000);
+  setInterval(refreshSkillHealth, 15000);
+  setInterval(refreshObservations, 30000);
+  setInterval(refreshMcp, 20000);
+  setInterval(refreshTraces, 15000);
 }
 
 boot();

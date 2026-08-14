@@ -330,14 +330,6 @@ fn build_agent_with_mcp(
     for fragment in deny_commands {
         policy.add_deny_command(fragment.clone());
     }
-    let mut registry = ToolRegistry::new();
-    for (server_name, client) in mcp_clients {
-        let tools = client
-            .try_lock()
-            .map_err(|_| format!("MCP 客户端 {server_name} 忙碌"))?
-            .tools();
-        registry.register_mcp_tools(server_name, Arc::clone(client), tools);
-    }
     let mut config = AgentConfig::default();
     if let Ok(value) = std::env::var("OWO_TOKEN_BUDGET") {
         if let Ok(budget) = value.parse() {
@@ -349,9 +341,49 @@ fn build_agent_with_mcp(
             config.keep_recent = keep;
         }
     }
-    let mut agent = Agent::new(provider, registry, policy, config);
+    let mut agent = Agent::new(provider, ToolRegistry::new(), policy, config);
+    // 统一走 Agent::register_mcp_tools：记录客户端到进程生命周期注册表（进程级热卸载），
+    // 同时把工具挂进 Agent 注册表。
+    for (server_name, client) in mcp_clients {
+        let tools = client
+            .try_lock()
+            .map_err(|_| format!("MCP 客户端 {server_name} 忙碌"))?
+            .tools();
+        agent.register_mcp_tools(server_name, Arc::clone(client), tools);
+    }
     agent.set_skills(skills.clone());
+    attach_auto_review(&mut agent, model);
     Ok(agent)
+}
+
+/// 独立审批模型（Auto-review）：
+/// - 默认只挂启发式预筛（零模型成本，命中已知注入/高危模式直接 Deny）；
+/// - `OWO_AUTO_REVIEW=1` 时追加独立模型复审（`OWO_REVIEW_MODEL` 可选覆盖）。
+fn attach_auto_review(agent: &mut Agent, model: &str) {
+    if std::env::var("OWO_AUTO_REVIEW").as_deref() == Ok("1") {
+        let mut config = match OpenAiCompatibleConfig::from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("警告：Auto-review 模型初始化失败（{error}），仅启用启发式预筛");
+                agent.set_reviewer(Some(Arc::new(owo_agent_core::AutoReviewChain::new(None))));
+                return;
+            }
+        };
+        config.model = std::env::var("OWO_REVIEW_MODEL").unwrap_or_else(|_| model.to_string());
+        let provider = match OpenAiCompatibleProvider::new(config) {
+            Ok(provider) => Arc::new(provider),
+            Err(error) => {
+                eprintln!("警告：Auto-review 模型初始化失败（{error}），仅启用启发式预筛");
+                agent.set_reviewer(Some(Arc::new(owo_agent_core::AutoReviewChain::new(None))));
+                return;
+            }
+        };
+        agent.set_reviewer(Some(Arc::new(owo_agent_core::AutoReviewChain::from_model(
+            provider,
+        ))));
+    } else {
+        agent.set_reviewer(Some(Arc::new(owo_agent_core::AutoReviewChain::new(None))));
+    }
 }
 
 async fn connect_mcp_clients(
@@ -496,16 +528,19 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     settings.apply_usage_env();
     let model = resolve_model(None, settings.model.as_deref());
     let root = ensure_data_root(None, &workspace);
-    let plugins = discover_plugins(&workspace, &root);
+    let plugin_state = owo_agent_core::PluginStateStore::new(Some(root.join("plugin_state.json")));
+    let plugins =
+        owo_agent_core::plugin::discover_enabled_plugins(&workspace, &root, &plugin_state);
     let mut mcp_configs = load_mcp_configs(&root);
     merge_plugin_mcp(&plugins, &mut mcp_configs);
     let mcp_clients = connect_mcp_clients(&mcp_configs).await;
     let _ = install_builtin_packages(&builtin_skills_root(), &root);
-    let skills = SkillRegistry::discover(&workspace, &root);
+    let mut skills = SkillRegistry::discover(&workspace, &root);
+    apply_disabled_skills(&mut skills, &settings);
     let agent = build_agent_with_mcp(
         &workspace,
         &model,
-        false,
+        settings.read_only,
         &mcp_clients,
         &skills,
         &settings.deny_commands,
@@ -518,6 +553,13 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         root.clone(),
         workspace.clone(),
     ));
+    // 启动时同步插件禁用状态到 Agent 工具前缀（热卸载重启后仍生效）。
+    if let Ok(plugin_state) = state.plugin_state.lock() {
+        for id in plugin_state.disabled_ids() {
+            let prefix = owo_agent_core::tools::mcp_tool_prefix(&id);
+            state.agent.set_tool_prefix_enabled(&prefix, false);
+        }
+    }
     let observer_state = Arc::clone(&state);
     tokio::spawn(async move {
         owo_agent_server::start_observer(observer_state).await;
@@ -530,11 +572,17 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         owo_agent_server::start_memory_observer(memory_state).await;
     });
-    let app = owo_agent_server::build_router(state);
+    let app = owo_agent_server::build_router(Arc::clone(&state));
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("owo-agent server listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    let result = axum::serve(listener, app).await;
+    // 服务退出：终止全部 MCP stdio 子进程，不留孤儿进程。
+    let shutdown_errors = state.agent.shutdown_all_mcp().await;
+    for (name, error) in shutdown_errors {
+        tracing::warn!("MCP 服务器 {name} 关闭失败：{error}");
+    }
+    result?;
     Ok(())
 }
 
@@ -543,18 +591,7 @@ fn merge_plugin_mcp(
     configs: &mut Vec<McpServerConfig>,
 ) {
     for (manifest_path, manifest) in plugins {
-        if let Some(mcp) = &manifest.mcp {
-            let mut config = mcp.clone();
-            config.name = manifest.id.clone();
-            let command_path = std::path::Path::new(&config.command);
-            if command_path.is_relative() {
-                if let Some(base) = manifest_path.parent() {
-                    let resolved = base.join(command_path);
-                    if resolved.exists() {
-                        config.command = resolved.to_string_lossy().into_owned();
-                    }
-                }
-            }
+        if let Some(config) = owo_agent_core::plugin_mcp_config(manifest_path, manifest) {
             if !configs.iter().any(|existing| existing.name == config.name) {
                 configs.push(config);
             }
@@ -680,7 +717,11 @@ impl Repl {
             }
         }
         let discovered_plugins = discover_plugins(&workspace, &root);
-        merge_plugin_mcp(&discovered_plugins, &mut mcp_configs);
+        let plugin_state =
+            owo_agent_core::PluginStateStore::new(Some(root.join("plugin_state.json")));
+        let enabled_plugins =
+            owo_agent_core::plugin::discover_enabled_plugins(&workspace, &root, &plugin_state);
+        merge_plugin_mcp(&enabled_plugins, &mut mcp_configs);
         let plugins: Vec<PluginManifest> = discovered_plugins
             .into_iter()
             .map(|(_, manifest)| manifest)
@@ -1109,6 +1150,9 @@ impl Repl {
             return Ok(());
         };
         let keep: usize = keep.parse().map_err(|_| "保留消息数需为数字".to_string())?;
+        if keep < session.messages.len() {
+            session.revert().await?;
+        }
         let removed = session.rewind(keep);
         self.store.save(session)?;
         println!(
@@ -1317,14 +1361,24 @@ impl Repl {
                         .as_ref()
                         .map(|s| s.id == session.id)
                         .unwrap_or(false);
+                    let mut badges = String::new();
+                    if session.pinned {
+                        badges.push_str(" 📌");
+                    }
+                    if session.archived {
+                        badges.push_str(" 🗄");
+                    }
+                    let short_id: String = id.chars().take(8).collect();
                     println!(
-                        "{} {}  model={}  msgs={}  updated={}",
+                        "{} {}{}  {}  model={}  msgs={}  updated={}",
                         if active {
                             "▶".green().to_string()
                         } else {
                             "  ".to_string()
                         },
-                        id.dimmed(),
+                        session.display_title(),
+                        badges,
+                        short_id.dimmed(),
                         session.model,
                         session.messages.len(),
                         session.updated_at,
@@ -1635,27 +1689,16 @@ impl Repl {
         let (outcome, session) = task
             .await
             .map_err(|error| std::io::Error::other(format!("回合任务失败：{error}")))?;
-        let outcome = outcome?;
         self.session = Some(session);
         if let Some(session) = &self.session {
             self.store.save(session)?;
         }
+        self.flush_audit();
+        let outcome = outcome?;
         let trace =
             TraceRecord::from_outcome(self.session.as_ref().expect("session saved"), &outcome);
         if let Ok(path) = save_trace(&self.data_root.join("traces"), &trace) {
             println!("[trace] {}", display_path(&path));
-        }
-        let audit_entries = self
-            .agent
-            .audit_log()
-            .lock()
-            .map(|guard| guard.entries.clone())
-            .unwrap_or_default();
-        if audit_entries.len() > self.audit_flushed {
-            let _ = self
-                .store
-                .append_audit(&audit_entries[self.audit_flushed..]);
-            self.audit_flushed = audit_entries.len();
         }
         println!(
             "{} 工具步数 {}，审计 {} 条，改动 {} 个文件（/diff 查看，/undo 回滚）",
@@ -1669,6 +1712,25 @@ impl Repl {
             self.session.as_ref().map(|s| s.diff().len()).unwrap_or(0),
         );
         Ok(())
+    }
+
+    fn flush_audit(&mut self) {
+        let audit_entries = self
+            .agent
+            .audit_log()
+            .lock()
+            .map(|guard| guard.entries.clone())
+            .unwrap_or_default();
+        if audit_entries.len() <= self.audit_flushed {
+            return;
+        }
+        if self
+            .store
+            .append_audit(&audit_entries[self.audit_flushed..])
+            .is_ok()
+        {
+            self.audit_flushed = audit_entries.len();
+        }
     }
 
     async fn run_at_subagent(
