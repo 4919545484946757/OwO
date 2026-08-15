@@ -11,6 +11,13 @@
 > 　新增 §12 面向生产力的远期设计（v2→v3+ 技术构想，2026-08-13）  
 > 读者：产品与工程团队、SDK 开发者、插件生态开发者
 
+> 📌 **v0.5.9 状态注（2026-08-14/15）**：四条核心库主线落地——多格式笔记 v1（`notes.rs`，M4c）、
+> 插件市场治理骨架（`plugin.rs`，M4b）、.owflow 工作流引擎 v1（`workflow.rs`，§12 支柱1）、
+> Goal/Plan 多 Agent 编排（`goal.rs`+`plan.rs`，§12 底座）；云端执行升级 v0.2（`cloud_exec.rs`
+> CloudTransport 抽象 + HTTP 远端契约 + 任务队列/恢复/重试 + CLI `owo-agent cloud`）。
+> 全量门禁 429 项全绿（见附录 C.3 与 `agent-sdk/ACCEPTANCE.md` 五十三节）；HTTP/UI 面
+> （/notes/*、/workflow/*、/goal/*、/plugins/market/*、云端 SSE）留待下一轮统一接入。
+
 > 📌 **v0.4 范围说明（2026-08-12）**：在 v0.3 Agent SDK 基础上新增三条主线——
 > **Codex 式桌面主客户端**（任务/审批/diff/技能中心/感知状态/自动化）、**全域情景感知**
 >（L0 事件 / L1 界面 / L2 视觉 / L3 语义四层）与**操作学习**（示范学习 + 受限自主探索双轨、
@@ -1289,21 +1296,22 @@ v0.3 的 M1/M2（SDK 核心、CLI/TUI、HTTP、权限、AGENTS.md/Skills/子代�
 | M4 全域感知 + 语音 | ✅ | L0/L1/L2 + 窗口级 OCR + PP-OCRv6；STT TTS CER 0.00%、真实人声 CER 13.64%、缓存 0.93s；VSCode 语音改代码 30/30=100% |
 | M5 操作学习 + 主动建议 | ✅ | 示范/受限探索、动作图执行、流程技能包（.owskill）、审批审计、主动建议四选；Notepad 示范→换参复用 2/2 |
 | M6 输入法融合 | 占位 | 前置条件 2 满足 / 3 部分 / 1 未启动，不实施 |
-| M4 前奏骨架 + TS SDK（2026-08-14 现状） | 🟡 骨架 | 云端执行骨架 `cloud_exec.rs`（v0.1 `LocalSimExecutor`：仓库快照 → 隔离执行 → diff 回传 → revert，凭据不落盘、审计完整；远端容器实现待后续）；computer-use 任务级审批（7.3 语义：`/computer-use/tasks|task|task/{id}/{action}|check|sensitive-check`，任务注册表 + 熔断 + CLI/桌面配套）；TypeScript SDK `clients/ts`（openapi.json → `schema.d.ts` → openapi-fetch 客户端，typecheck/build/test:unit 门禁） |
+| M4 前奏骨架 + TS SDK（2026-08-14 现状） | 🟡 骨架 | 云端执行 `cloud_exec.rs`（v0.2：`CloudTransport` 传输抽象——`MockRemoteTransport` 不联网替身 + `HttpTransport` HTTP 远端，协议契约：POST /cloud/tasks、GET /cloud/tasks/{id}[/result]、POST /cloud/tasks/{id}/cancel；任务队列/状态机/JSON 持久化/重启恢复/重试退避/进度事件流 `CloudProgress` + `ProgressSink`；凭据仅经 `OWO_CLOUD_TOKEN` 环境变量入请求头、永不落盘；命令白名单/危险黑名单/超时熔断；CLI `owo-agent cloud` submit/list/status/diff/apply/revert 全子命令）；computer-use 任务级审批（7.3 语义：`/computer-use/tasks|task|task/{id}/{action}|check|sensitive-check`，任务注册表 + 熔断 + CLI/桌面配套）；TypeScript SDK `clients/ts`（openapi.json → `schema.d.ts` → openapi-fetch 客户端，typecheck/build/test:unit 门禁） |
+| v0.5.9 四线核心库（2026-08-14/15） | ✅ | 多格式笔记 v1 `notes.rs`（块树/11 类块/doc.json 原子持久化/MD 往返/HTML 消毒/画布/FTS5 trigram 索引/零丢失，27/27）；插件市场治理 `plugin.rs`（Ed25519 签名 `verify_plugin_signature`/静态扫描/versions.json 兼容选择/安装更新回滚/审计，17/17）；.owflow 工作流引擎 v1 `workflow.rs`（触发器/步骤图/子流程/条件/人审/回滚点，DSL 校验+编译到 action_program+SkillHealth 门禁+权限 deny，30/30）；Goal/Plan 编排 `goal.rs`+`plan.rs`（DAG/并行限流/重试/replan/恢复幂等/预算/审计，21/21）；lib.rs 顶层导出统一（含 CloudTaskState/WorkflowStepRecord 重名处理） |
 
-### C.3 质量门禁（2026-08-14 实测）
+### C.3 质量门禁（2026-08-15 实测）
 
 | 门禁 | 结果 |
 |---|---|
 | `cargo fmt --all -- --check` | ✅ 干净 |
 | `cargo clippy --workspace --all-targets -D warnings` | ✅ 0 警告 |
-| `cargo test --workspace` | ✅ 全绿 294 项（core lib 220 + 集成 61 + server 6 + CLI 7；集成=audit 3/cloud_exec 7/eval 3/loop 20/mcp 13/memory_health 6/plugin_lifecycle 3/scene_locate 6） |
-| `scripts/skill-gate.ps1` | ✅ 四技能 12 用例 PASS |
+| `cargo test --workspace` | ✅ 全绿 429 项（core lib 238 + 集成 191 = audit_search 7/cloud_exec 21/computer_use 11/eval 3/goal_plan 21/loop 20/mcp 13/memory_health 6/notes 27/plugin_lifecycle 17/scene_locate 6/workflow 30 + server 6 = 单测 3/route_contract 3 + CLI 7） |
+| `scripts/skill-gate.ps1` | ✅ 四技能 12 用例 PASS（2026-08-14） |
 | `scripts/run-eval-gate.ps1 -Threshold 0.8` | ⏭️ 本轮未跑（需 OPENAI_API_KEY，外部依赖；历史 20/20 = 100% 记录于 2026-08-13） |
-| `scripts/sim-regression.py` | ✅ qq-learn + qq-observe 2/2 PASS |
+| `scripts/sim-regression.py` | ✅ qq-learn + qq-observe 2/2 PASS（2026-08-14） |
 | 路由面契约测试 | ✅ `route_contract_tests` 3/3：契约快照全路径非 404/405（资源型 404 白名单 8 项）+ /openapi.json 覆盖断言 + 真实 HTTP smoke；/openapi.json 106 路径与路由一致 |
-| 新契约测试 | ✅ `scene_locate_tests` 6/6、`memory_health_tests` 6/6、`audit_search_tests` 3/3、`plugin_lifecycle_tests` 3/3、`mcp_tests` 13/13、`loop_tests` 20/20、`cloud_exec_tests` 7/7 |
-| HTTP 冒烟 | ✅ 会话/审批/diff/感知/学习/分享/STT/自动化/执行 全链路；桌面面板 33 项接口矩阵非 404 |
+| 新契约测试 | ✅ `scene_locate_tests` 6/6、`memory_health_tests` 6/6、`audit_search_tests` 3/3（2026-08-14 基线）；v0.5.9 新增：`notes_tests` 27/27、`workflow_tests` 30/30、`goal_plan_tests` 21/21、`plugin_lifecycle_tests` 17/17、`cloud_exec_tests` 21/21、`computer_use_tests` 11/11 |
+| HTTP 冒烟 | ✅ 会话/审批/diff/感知/学习/分享/STT/自动化/执行 全链路；桌面面板 33 项接口矩阵非 404（2026-08-14） |
 | 打包自检 | ✅ 便携 zip 解包：/health 200、onnx_models_present=true、OWO_OCR_STRICT=onnx 下 provider=onnx-v4（2026-08-14 产物） |
 | TS SDK | ✅ clients/ts typecheck 0 错误 / build 通过 / test:unit 3/3（schema.d.ts 与 openapi.json 一致） |
 

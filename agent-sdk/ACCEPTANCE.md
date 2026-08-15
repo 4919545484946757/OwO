@@ -738,3 +738,21 @@ M2 验收项"trace 可回放"补齐 HTTP 面；桌面端 P0 补会话导出入�
 | 质量门禁 | ✅ | cargo test --workspace 294 项全绿（core lib 220 + 集成 61 = audit 3/cloud_exec 7/eval 3/loop 20/mcp 13/memory_health 6/plugin_lifecycle 3/scene_locate 6 + server 6 = 单测 3/route_contract 3 + CLI 7）；cargo fmt --all -- --check 干净；cargo clippy --workspace --all-targets -D warnings 0 警告；node --check 0 错误；TS SDK typecheck 0 错误 / build 通过 / test:unit 3/3 |
 
 说明：全量门禁由 D 收尾统一执行（详见 `.coord/GATES.md`）；eval-gate（需 OPENAI_API_KEY）未纳入本轮实测，C.4 外部验收项保持"开放"。修复过程中 A 的 `route_contract_tests.rs` 白名单缺 `/perception/template/{app_id}`（资源型 404），经协调由 D 补 1 行后全绿。
+
+## 五十三、v0.5.9 四条核心库主线落地（2026-08-14/15）
+
+按技术文档 §9 M4 里程碑 + §12 v2 底座推进四线：多格式笔记 v1（M4c）、插件市场治理骨架（M4b）、.owflow 工作流引擎 v1（§12 支柱1）、Goal/Plan 多 Agent 编排（§12 底座）。协调协议 `.coord3/`（OWNERSHIP/GATES/COMMIT-PLAN/DEPENDENCIES/STATUS-T1~T4）。
+
+| 线 | 状态 | 证据 |
+|---|---|---|
+| T1 多格式笔记 v1（M4c） | ✅ | `notes.rs`（46KB）：块树模型（11 类块：段落/标题/列表/代码/表格/图片/文件/引用/HTML嵌入/画布/AI生成，稳定 id+attrs+有序子块，纯函数 add/insert/remove/move 含环检测）；`<dir>/doc.json` 原子写+assets/ 目录往返无损；Markdown 导入/导出（MD 可表达元素往返不动点）；`sanitize_html`（标签白名单、script/style/iframe 整体剥离、事件属性/`javascript:`/`data:`/style 剥离、安全 URL 保留）；画布数据模型（rects/notes/layers）；全文索引（内存分词 + SQLite FTS5 trigram 中文子串检索，<3 字符 LIKE 回退）；零丢失验收（10 次改→存→读哈希稳定 + 100 份程序化混合样例磁盘/MD 往返）；`notes_tests` 27/27 |
+| T2 插件市场治理（M4b） | ✅ | `plugin.rs` 扩展：PluginManifest 签名可选字段（serde default 向后兼容）、VersionsJson 解析 + version_cmp/version_gte/resolve_compatible（版本→App 最低版本映射，不兼容拒绝）；Ed25519 签名（`plugin-sign.ps1`/`plugin-sign.py` 密钥生成/签名/校验，摘要=sha256(id\|name\|version\|entry[+文件])，`verify_plugin_signature` 缺失/不匹配拒绝加载）；静态扫描（危险 API 黑名单 + http(s) URL 提取 + allowlist 域校验）；PluginManager 安装/更新/回滚状态机（install→verify→activate，update 先备份旧版失败自动回滚，全程审计）；三个示例插件补 entry/versions.json/README 签名流程说明；P2 预留 PluginSubmission/MarketUpdateManifest；`plugin_lifecycle_tests` 17/17 |
+| T3 .owflow 工作流 v1（§12） | ✅ | `workflow.rs`（50KB）：JSON 声明式 DSL（触发器：前台应用/文件/剪贴板/定时/手动；步骤：感知/定位/动作/断言/调用技能包/调用 MCP/人审/通知/子流程/条件分支/回滚点/前置条件）；`validate_definition` schema 校验非法定义明确报错；`compile_to_program` 编译到 action_program 执行；人审节点 approve/reject；失败自动回滚到最近回滚点（快照目录在 work_root 外部，回滚先删后建不会丢失快照源）；权限声明默认 deny 经 Policy 校验；SkillHealth 门禁（Disabled 拒绝/Degraded 确认 + 执行后回写）；`workflow_tests` 30/30 |
+| T4 Goal/Plan 编排（§12） | ✅ | `goal.rs` + `plan.rs`：Goal 状态机（Pending→Planning→Running→Verifying→Succeeded/Failed/Aborted + 预算）；Plan DAG（步骤前置依赖/可并行标记/worker 规格/验证断言/重试策略，非法环检测，序列化持久化重启恢复）；调度器拓扑排序 + 并行度上限（JoinSet + max_parallel 限流）；Worker trait（MockWorker 测试，真实 Agent::run_subagent 接线留主控）；验证断言失败重试（预算内）或 replan（只重建未完成子图）；恢复幂等（已完成步骤不重跑）；abort 立即停止保留现场；全程审计；`goal_plan_tests` 21/21 |
+| 云端执行 v0.2 延续（M4a） | ✅ | `cloud_exec.rs` 在上轮基础上补 P2：`validate_batch`（diff 批量应用前校验）、`describe_diff`（多文件合并展示文本）、UsageMetrics 成本/时长计量；CLI `owo-agent cloud` 全子命令可用；`cloud_exec_tests` 21/21 |
+| computer-use 闭环延续（M4d） | ✅ | 上轮基础上 `computer_use_tests` 11/11（动作门禁/敏感熔断/闭环/超时预算） |
+| lib.rs 模块登记与顶层导出 | ✅ | `pub mod notes/workflow/goal/plan`；新增 `pub use` 顶层导出 6 组（cloud_exec/computer_use/goal/notes/plan/workflow）+ plugin 扩展导出（PluginManager/verify_plugin_signature/VersionsJson 等）；重名处理：cloud_exec::TaskState → `CloudTaskState`、workflow::StepRecord → `WorkflowStepRecord` |
+| 依赖合并 | ✅ | workspace + core 新增 `ed25519-dalek = "2"`、`sha2 = "0.10"`（T2 签名需要，已去重 T2 误加行）；server dev-deps 保持 tower/tempfile |
+| 主控收尾修复 | ✅ | 全量门禁 429 项全绿（core lib 238 + notes 27 + workflow 30 + goal_plan 21 + cloud_exec 21 + plugin_lifecycle 17 + computer_use 11 + 其余 64）；fmt/clippy 0 警告；workflow rollback 快照目录位置 bug 修复（快照在 work_root 内会被回滚删除）；goal WorkerRegistry 借用修复；编码损坏恢复（workflow_tests 19 行 GBK 双重编码） |
+
+说明：HTTP/UI 面（/notes/*、/workflow/*、/goal/*、/plugins/market/*、云端 SSE 进度流）按计划留待下一轮由单一人统一接入；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。

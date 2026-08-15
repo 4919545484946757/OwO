@@ -59,7 +59,19 @@ pub use automation::{AutomationAction, AutomationStore, AutomationTask, Schedule
 pub use autoreview::{
     parse_verdict, AutoReviewChain, HeuristicReviewer, ModelReviewer, ReviewVerdict, Reviewer,
 };
+pub use cloud_exec::{
+    backoff_delay, cloud_token_from_env, describe_diff, validate_batch, validate_commands,
+    CloudProgress, CloudTask, CloudTaskQueue, CloudTaskResult, CloudTaskSpec, CloudTransport,
+    CollectingSink, DiffKind, FileDiff, HttpTransport, LocalSimExecutor, MockRemoteTransport,
+    NullSink, ProgressSink, RemoteStatus, TaskRecord, TaskState as CloudTaskState, UsageMetrics,
+};
 pub use computer_task::{sensitive_ui_hit, ComputerTask, ComputerTaskRegistry, TaskState};
+pub use computer_use::{
+    desktop_click, desktop_click_gated, desktop_key, desktop_key_gated, desktop_launch,
+    desktop_launch_gated, desktop_scroll, desktop_scroll_gated, desktop_shortcut, desktop_type,
+    desktop_type_gated, run_approved_task, run_approved_task_on, scan_ui_sensitive,
+    sim_base_url_configured, task_gate_check, SimTaskSurface, TaskGoal, TaskReport, TaskSurface,
+};
 pub use context::load_project_rules;
 pub use element_registry::{
     fuse_sources, fuse_sources_with_vision, register_vision_grounding, ElementRegistry,
@@ -72,6 +84,9 @@ pub use gateway::{
     budget_violation, parse_usage_value, ChatMessage, ModelOutput, ModelProvider,
     OpenAiCompatibleConfig, OpenAiCompatibleProvider, TokenUsage, ToolCall,
 };
+pub use goal::{
+    Goal, GoalBudget, GoalRunState, GoalRunner, GoalStatus, RunnerConfig, Worker, WorkerRegistry,
+};
 pub use injection::{sanitize_tool_result, InjectionGuard, InjectionHit, InjectionSeverity};
 pub use learn::{
     generalize_to_graph, recorded_actions_from_sequence, ActionGraph, ActionNode, ActionType,
@@ -80,6 +95,12 @@ pub use learn::{
     SuggestionAction,
 };
 pub use mcp::{McpClient, McpRegistry, McpServerConfig, McpTool};
+pub use notes::{
+    add_block, append_child, block_text, doc_title, doc_to_md, generate_mixed_doc, get_block,
+    insert_child, load_doc, md_to_doc, move_block, new_doc, remove_block, sanitize_html, save_doc,
+    search_notes, walk, Block, BlockId, BlockKind, CanvasBlockData, CanvasNote, CanvasRect,
+    FtsNoteIndex, InMemoryNoteIndex, NoteDoc, NoteIndex, NoteIndexer, SearchHit,
+};
 pub use observe::{
     desktop_observation, map_sim_events_to_actions, observation_from_sim_event, sample_desktop,
     value_hash, DesktopSnapshot, MemoryStore, Observation,
@@ -94,8 +115,14 @@ pub use perception::{
     SituationStore, TaskHypothesis, UiContext,
 };
 pub use permissions::{Approver, Decision, Level, PermissionRequest, Policy};
+pub use plan::{verify_output, Plan, StepSpec, StepStatus, VerificationSpec};
 pub use platform::{capture_screen, clipboard_sequence, poll_foreground_app};
-pub use plugin::{discover_plugins, plugin_mcp_config, PluginManifest, PluginStateStore};
+pub use plugin::{
+    discover_plugins, plugin_mcp_config, scan_plugin_for_risks, verify_plugin_signature,
+    MarketPluginEntry, MarketUpdateManifest, PluginInstallReport, PluginInstallState,
+    PluginManager, PluginManifest, PluginReviewState, PluginSignature, PluginStateStore,
+    PluginSubmission, VersionsJson,
+};
 pub use session::{JsonSessionStore, Session, SessionStore};
 pub use settings::{EgressSettings, Settings};
 pub use share::{export_html, export_markdown};
@@ -119,4 +146,10 @@ pub use whitelist::{AppTier, Whitelist, WhitelistEntry};
 pub use window_template::{
     build_template, build_template_from_ocr, detect_template, detect_template_ocr, load_template,
     save_template, WindowRoi, WindowTemplate,
+};
+pub use workflow::{
+    compile_to_program, eval_expr, validate_definition, ActSpec, ActionBackend, Approval,
+    AutoApprover, CheckpointRef, HumanApprover, LocateSpec, MockBackend, PermMode, PermissionClaim,
+    SenseSpec, StepRecord as WorkflowStepRecord, TriggerKind, WorkflowDefinition, WorkflowEngine,
+    WorkflowOutcome, WorkflowState, WorkflowStep, WorkflowTrigger,
 };
