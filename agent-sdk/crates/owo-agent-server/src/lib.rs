@@ -3,6 +3,21 @@
 //! OwO Agent SDK HTTP 服务（M1 + v0.4）：session/turn/permission/diff/revert/abort + SSE，
 //! 以及 v0.4 接口：context.snapshot / perception.subscribe / learn.* / skill.verify /
 //! proactive.suggest / whitelist.manage。
+//!
+//! 第四轮核心模块 HTTP/UI 集成：notes_api / plugin_market_api / workflow_api / goal_api /
+//! sse（云端任务进度 SSE 集线器）四个模块路由并入 build_router；cloud_task_submit 的
+//! ProgressSink 接 sse::sink(task_id) 使 /cloud/tasks/{id}/events 收到真实进度。
+
+mod goal_api;
+mod notes_api;
+mod plugin_market_api;
+mod sse;
+mod workflow_api;
+
+/// 协议约束：新模块（notes_api 等）一律写全限定名 `owo_agent_server::AppState`，
+/// 以便测试以 `#[path = "../src/xxx.rs"] mod` 独立编译；此处建立 crate 自别名，
+/// 使该路径在库内（含子模块）同样可解析。
+extern crate self as owo_agent_server;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
@@ -284,7 +299,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .fallback_service(ServeDir::new(desktop_web_dir()))
         .layer(CorsLayer::permissive())
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        .with_state(state)
+        .with_state(state.clone())
+        // 第四轮核心模块 HTTP/UI 集成：四个 lane 的 router 内部已 with_state，
+        // 返回 Router<()>（无缺失状态），故在此处（with_state 之后）merge 对齐。
+        .merge(notes_api::router(state.clone()))
+        .merge(plugin_market_api::router(state.clone()))
+        .merge(workflow_api::router(state.clone()))
+        .merge(goal_api::router(state.clone()))
+        .merge(sse::router(state.clone()))
 }
 
 /// 开发环境下的桌面工作台静态目录：`<repo>/agent-sdk/desktop/web`。
@@ -421,7 +443,42 @@ async fn openapi_spec() -> Json<Value> {
             "/vision/status": { "get": { "operationId": "visionStatus", "responses": { "200": { "description": "vision engine diagnostics" } } } },
             "/vision/describe": { "post": { "operationId": "visionDescribe", "responses": { "200": { "description": "image description" } } } },
             "/vision/verify": { "post": { "operationId": "visionVerify", "responses": { "200": { "description": "verification result" } } } },
-            "/vision/ground": { "post": { "operationId": "visionGround", "responses": { "200": { "description": "vision grounded location" } } } }
+            "/vision/ground": { "post": { "operationId": "visionGround", "responses": { "200": { "description": "vision grounded location" } } } },
+            "/notes": { "get": { "operationId": "notesList", "responses": { "200": { "description": "note list" } } }, "post": { "operationId": "notesCreate", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "title": { "type": "string" }, "markdown": { "type": "string" } }, "required": ["title"] } } } }, "responses": { "201": { "description": "note created" } } } },
+            "/notes/{id}": { "get": { "operationId": "notesGet", "parameters": [path_param("id")], "responses": { "200": { "description": "note block tree" } } }, "put": { "operationId": "notesReplace", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "title": { "type": "string" }, "blocks": { "type": "array", "items": { "type": "object" } } } } } } }, "responses": { "200": { "description": "note replaced" } } }, "delete": { "operationId": "notesDelete", "parameters": [path_param("id")], "responses": { "200": { "description": "note deleted" } } } },
+            "/notes/import": { "post": { "operationId": "notesImport", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "title": { "type": "string" }, "markdown": { "type": "string" } }, "required": ["title", "markdown"] } } } }, "responses": { "201": { "description": "note imported from markdown" } } } },
+            "/notes/search": { "get": { "operationId": "notesSearch", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "cross-document search hits" } } } },
+            "/notes/{id}/export/{format}": { "get": { "operationId": "notesExport", "parameters": [path_param("id"), path_param("format")], "responses": { "200": { "description": "note exported as md or html" } } } },
+            "/notes/{id}/blocks": { "post": { "operationId": "notesAddBlock", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "parent": { "type": "string" }, "after": { "type": "string" }, "kind": { "type": "string" }, "text": { "type": "string" }, "data": { "type": "object" } }, "required": ["kind"] } } } }, "responses": { "201": { "description": "block added" } } } },
+            "/notes/{id}/blocks/move": { "post": { "operationId": "notesMoveBlock", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "block_id": { "type": "string" }, "parent": { "type": "string" }, "after": { "type": "string" } }, "required": ["block_id"] } } } }, "responses": { "200": { "description": "block moved" } } } },
+            "/notes/{id}/blocks/{block_id}": { "patch": { "operationId": "notesUpdateBlock", "parameters": [path_param("id"), path_param("block_id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "text": { "type": "string" }, "data": { "type": "object" } } } } } }, "responses": { "200": { "description": "block updated" } } }, "delete": { "operationId": "notesDeleteBlock", "parameters": [path_param("id"), path_param("block_id")], "responses": { "200": { "description": "removed block subtree ids" } } } },
+            "/notes/{id}/reindex": { "post": { "operationId": "notesReindex", "parameters": [path_param("id")], "responses": { "200": { "description": "full-text index rebuilt" } } } },
+            "/workflow": { "get": { "operationId": "workflowList", "responses": { "200": { "description": "discovered .owflow flows" } } } },
+            "/workflow/validate": { "post": { "operationId": "workflowValidate", "requestBody": { "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "definition validation report" } } } },
+            "/workflow/{name}": { "get": { "operationId": "workflowGet", "parameters": [path_param("name")], "responses": { "200": { "description": "flow definition with validation" } } } },
+            "/workflow/{name}/run": { "post": { "operationId": "workflowRun", "parameters": [path_param("name")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "ctx": { "type": "object" } } } } } }, "responses": { "201": { "description": "workflow run started" } } } },
+            "/workflow/{name}/runs": { "get": { "operationId": "workflowRuns", "parameters": [path_param("name")], "responses": { "200": { "description": "run list for flow" } } } },
+            "/workflow/run/{run_id}": { "get": { "operationId": "workflowRunSnapshot", "parameters": [path_param("run_id")], "responses": { "200": { "description": "run snapshot" } } } },
+            "/workflow/run/{run_id}/abort": { "post": { "operationId": "workflowRunAbort", "parameters": [path_param("run_id")], "responses": { "200": { "description": "abort requested" } } } },
+            "/workflow/run/{run_id}/audit": { "get": { "operationId": "workflowRunAudit", "parameters": [path_param("run_id")], "responses": { "200": { "description": "run audit tail" } } } },
+            "/goal": { "get": { "operationId": "goalList", "responses": { "200": { "description": "goal list" } } }, "post": { "operationId": "goalCreate", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "objective": { "type": "string" }, "budget": { "type": "object", "properties": { "max_steps": { "type": "integer" }, "max_replans": { "type": "integer" } } } }, "required": ["objective"] } } } }, "responses": { "201": { "description": "goal created" } } } },
+            "/goal/{id}": { "get": { "operationId": "goalGet", "parameters": [path_param("id")], "responses": { "200": { "description": "goal detail" } } } },
+            "/goal/{id}/plan": { "get": { "operationId": "goalPlanGet", "parameters": [path_param("id")], "responses": { "200": { "description": "goal plan" } } }, "post": { "operationId": "goalPlanCreate", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "steps": { "type": "array", "items": { "type": "object" } } }, "required": ["steps"] } } } }, "responses": { "201": { "description": "plan created with waves preview" } } } },
+            "/goal/{id}/run": { "post": { "operationId": "goalRun", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "config": { "type": "object", "properties": { "parallelism": { "type": "integer" }, "allow_replan": { "type": "boolean" } } } } } } } }, "responses": { "202": { "description": "run started" } } } },
+            "/goal/{id}/status": { "get": { "operationId": "goalStatus", "parameters": [path_param("id")], "responses": { "200": { "description": "goal run state snapshot" } } } },
+            "/goal/{id}/abort": { "post": { "operationId": "goalAbort", "parameters": [path_param("id")], "responses": { "200": { "description": "abort requested" } } } },
+            "/goal/{id}/audit": { "get": { "operationId": "goalAudit", "parameters": [path_param("id")], "responses": { "200": { "description": "goal audit tail" } } } },
+            "/goal/{id}/runs": { "get": { "operationId": "goalRuns", "parameters": [path_param("id")], "responses": { "200": { "description": "goal run list" } } } },
+            "/cloud/tasks/{id}/events": { "get": { "operationId": "cloudTaskEvents", "parameters": [path_param("id")], "responses": { "200": { "description": "SSE progress stream for cloud task" } } } },
+            "/plugins/market": { "get": { "operationId": "pluginMarketCatalog", "responses": { "200": { "description": "plugin market catalog merged with local" } } } },
+            "/plugins/market/seed": { "post": { "operationId": "pluginMarketSeed", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "entries": { "type": "array", "items": { "type": "object" } } }, "required": ["entries"] } } } }, "responses": { "200": { "description": "market seeded" } } } },
+            "/plugins/market/versions": { "get": { "operationId": "pluginMarketVersions", "parameters": [{ "name": "id", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "app", "in": "query", "required": false, "schema": { "type": "string" } }], "responses": { "200": { "description": "compatible version resolution" } } } },
+            "/plugins/market/verify": { "post": { "operationId": "pluginMarketVerify", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "dir": { "type": "string" } }, "required": ["dir"] } } } }, "responses": { "200": { "description": "plugin dir verified" } } } },
+            "/plugins/market/install": { "post": { "operationId": "pluginMarketInstall", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "dir": { "type": "string" } }, "required": ["dir"] } } } }, "responses": { "200": { "description": "plugin installed" } } } },
+            "/plugins/market/update": { "post": { "operationId": "pluginMarketUpdate", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string" }, "dir": { "type": "string" } }, "required": ["id", "dir"] } } } }, "responses": { "200": { "description": "plugin updated" } } } },
+            "/plugins/market/uninstall": { "post": { "operationId": "pluginMarketUninstall", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } } } }, "responses": { "200": { "description": "plugin uninstalled" } } } },
+            "/plugins/market/scan": { "get": { "operationId": "pluginMarketScan", "parameters": [{ "name": "dir", "in": "query", "required": false, "schema": { "type": "string" } }], "responses": { "200": { "description": "risk scan summary" } } } },
+            "/plugins/market/audit": { "get": { "operationId": "pluginMarketAudit", "parameters": [{ "name": "n", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "plugin market audit tail" } } } }
         },
         "components": {
             "schemas": {
@@ -4329,7 +4386,9 @@ async fn cloud_task_submit(
     let task_id = queue
         .submit(spec)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let sink = owo_agent_core::cloud_exec::NullSink;
+    // 第四轮接线：进度经 SSE 集线器发布，前端以同一 task_id 订阅
+    // /cloud/tasks/{id}/events（历史重放 + 实时帧）。
+    let sink = sse::sink(task_id.clone());
     queue
         .run_next(&sink)
         .await

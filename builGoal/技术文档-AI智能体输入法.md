@@ -1298,6 +1298,7 @@ v0.3 的 M1/M2（SDK 核心、CLI/TUI、HTTP、权限、AGENTS.md/Skills/子代�
 | M6 输入法融合 | 占位 | 前置条件 2 满足 / 3 部分 / 1 未启动，不实施 |
 | M4 前奏骨架 + TS SDK（2026-08-14 现状） | 🟡 骨架 | 云端执行 `cloud_exec.rs`（v0.2：`CloudTransport` 传输抽象——`MockRemoteTransport` 不联网替身 + `HttpTransport` HTTP 远端，协议契约：POST /cloud/tasks、GET /cloud/tasks/{id}[/result]、POST /cloud/tasks/{id}/cancel；任务队列/状态机/JSON 持久化/重启恢复/重试退避/进度事件流 `CloudProgress` + `ProgressSink`；凭据仅经 `OWO_CLOUD_TOKEN` 环境变量入请求头、永不落盘；命令白名单/危险黑名单/超时熔断；CLI `owo-agent cloud` submit/list/status/diff/apply/revert 全子命令）；computer-use 任务级审批（7.3 语义：`/computer-use/tasks|task|task/{id}/{action}|check|sensitive-check`，任务注册表 + 熔断 + CLI/桌面配套）；TypeScript SDK `clients/ts`（openapi.json → `schema.d.ts` → openapi-fetch 客户端，typecheck/build/test:unit 门禁） |
 | v0.5.9 四线核心库（2026-08-14/15） | ✅ | 多格式笔记 v1 `notes.rs`（块树/11 类块/doc.json 原子持久化/MD 往返/HTML 消毒/画布/FTS5 trigram 索引/零丢失，27/27）；插件市场治理 `plugin.rs`（Ed25519 签名 `verify_plugin_signature`/静态扫描/versions.json 兼容选择/安装更新回滚/审计，17/17）；.owflow 工作流引擎 v1 `workflow.rs`（触发器/步骤图/子流程/条件/人审/回滚点，DSL 校验+编译到 action_program+SkillHealth 门禁+权限 deny，30/30）；Goal/Plan 编排 `goal.rs`+`plan.rs`（DAG/并行限流/重试/replan/恢复幂等/预算/审计，21/21）；lib.rs 顶层导出统一（含 CloudTaskState/WorkflowStepRecord 重名处理） |
+| 第四轮核心模块 HTTP/UI 集成（2026-08-15） | ✅ | 五十三轮 core 层全部接 HTTP 与桌面：`notes_api.rs`（/notes 14 路由：CRUD/块增删移动/import/export md+html/search 合并检索/reindex，13 用例）；`plugin_market_api.rs`（/plugins/market 9 路由：目录合并/seed/versions/verify/install/update 回滚/uninstall/scan/audit，9 用例）；`workflow_api.rs`（/workflow 8 路由：发现/validate/run MockBackend 沙箱/runs/snapshot/abort/audit，18 用例）；`goal_api.rs` + `sse.rs`（/goal 8 路由：plan 环检测 400+waves/run/status/abort/audit/runs + /cloud/tasks/{id}/events SSE 集线器：历史重放+实时帧，echo/sleep/fail worker，18 用例）；桌面四个 panel（notes/plugin-market/workflow/goal，IIFE 注册 OwoPanels + helpers 防御性降级）；lib.rs 合并五个 router + cloud_task_submit 接 `sse::sink(task_id)`（实测六帧进度）；openapi_spec 146 路径 / 路由契约 3/3 |
 
 ### C.3 质量门禁（2026-08-15 实测）
 
@@ -1305,13 +1306,13 @@ v0.3 的 M1/M2（SDK 核心、CLI/TUI、HTTP、权限、AGENTS.md/Skills/子代�
 |---|---|
 | `cargo fmt --all -- --check` | ✅ 干净 |
 | `cargo clippy --workspace --all-targets -D warnings` | ✅ 0 警告 |
-| `cargo test --workspace` | ✅ 全绿 429 项（core lib 238 + 集成 191 = audit_search 7/cloud_exec 21/computer_use 11/eval 3/goal_plan 21/loop 20/mcp 13/memory_health 6/notes 27/plugin_lifecycle 17/scene_locate 6/workflow 30 + server 6 = 单测 3/route_contract 3 + CLI 7） |
+| `cargo test --workspace` | ✅ 全绿 487 项（core lib 238 + 集成 249 = audit_search 7/cloud_exec 21/cloud_sse 6/computer_use 11/eval 3/goal_api 12/goal_plan 21/loop 20/mcp 13/memory_health 6/notes 27/notes_api 13/plugin_lifecycle 17/plugin_market_api 9/scene_locate 6/workflow 30/workflow_api 18 + server 6 = 单测 3/route_contract 3 + CLI 7） |
 | `scripts/skill-gate.ps1` | ✅ 四技能 12 用例 PASS（2026-08-14） |
 | `scripts/run-eval-gate.ps1 -Threshold 0.8` | ⏭️ 本轮未跑（需 OPENAI_API_KEY，外部依赖；历史 20/20 = 100% 记录于 2026-08-13） |
 | `scripts/sim-regression.py` | ✅ qq-learn + qq-observe 2/2 PASS（2026-08-14） |
-| 路由面契约测试 | ✅ `route_contract_tests` 3/3：契约快照全路径非 404/405（资源型 404 白名单 8 项）+ /openapi.json 覆盖断言 + 真实 HTTP smoke；/openapi.json 106 路径与路由一致 |
-| 新契约测试 | ✅ `scene_locate_tests` 6/6、`memory_health_tests` 6/6、`audit_search_tests` 3/3（2026-08-14 基线）；v0.5.9 新增：`notes_tests` 27/27、`workflow_tests` 30/30、`goal_plan_tests` 21/21、`plugin_lifecycle_tests` 17/17、`cloud_exec_tests` 21/21、`computer_use_tests` 11/11 |
-| HTTP 冒烟 | ✅ 会话/审批/diff/感知/学习/分享/STT/自动化/执行 全链路；桌面面板 33 项接口矩阵非 404（2026-08-14） |
+| 路由面契约测试 | ✅ `route_contract_tests` 3/3：契约快照全路径非 404/405（资源型 404 白名单 29 项，含 notes 6 + goal 7 + workflow 6 + plugins/market/uninstall）+ /openapi.json 覆盖断言 + 真实 HTTP smoke；/openapi.json 146 路径与路由一致 |
+| 新契约测试 | ✅ `scene_locate_tests` 6/6、`memory_health_tests` 6/6、`audit_search_tests` 3/3（2026-08-14 基线）；v0.5.9 新增：`notes_tests` 27/27、`workflow_tests` 30/30、`goal_plan_tests` 21/21、`plugin_lifecycle_tests` 17/17、`cloud_exec_tests` 21/21、`computer_use_tests` 11/11；第四轮新增：`notes_api_tests` 13/13、`plugin_market_api_tests` 9/9、`workflow_api_tests` 18/18、`goal_api_tests` 12/12、`cloud_sse_tests` 6/6 |
+| HTTP 冒烟 | ✅ 会话/审批/diff/感知/学习/分享/STT/自动化/执行 全链路；桌面面板 33 项接口矩阵非 404（2026-08-14）；第四轮四 lane 端点冒烟 + SSE 端到端六帧验证（2026-08-15） |
 | 打包自检 | ✅ 便携 zip 解包：/health 200、onnx_models_present=true、OWO_OCR_STRICT=onnx 下 provider=onnx-v4（2026-08-14 产物） |
 | TS SDK | ✅ clients/ts typecheck 0 错误 / build 通过 / test:unit 3/3（schema.d.ts 与 openapi.json 一致） |
 

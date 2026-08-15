@@ -154,6 +154,11 @@
       </form>
     </section>
     <section>
+      <h2>扩展面板</h2>
+      <div id="panelNav" class="inline"></div>
+      <div id="panelRoot"></div>
+    </section>
+    <section>
       <h2>设置与诊断</h2>
       <div class="inline">
         <span>云端模型（数据出境）</span>
@@ -233,6 +238,10 @@
     // Tauri 壳内加载时指向常驻核心服务；经核心服务同源托管时保持同源。
     window.OWO_API_BASE = window.OWO_API_BASE || (window.__TAURI_INTERNALS__ ? "http://127.0.0.1:4096" : "");
   </script>
+  <script src="panels/notes.panel.js"></script>
+  <script src="panels/plugin-market.panel.js"></script>
+  <script src="panels/workflow.panel.js"></script>
+  <script src="panels/goal.panel.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

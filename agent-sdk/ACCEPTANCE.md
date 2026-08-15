@@ -756,3 +756,22 @@ M2 验收项"trace 可回放"补齐 HTTP 面；桌面端 P0 补会话导出入�
 | 主控收尾修复 | ✅ | 全量门禁 429 项全绿（core lib 238 + notes 27 + workflow 30 + goal_plan 21 + cloud_exec 21 + plugin_lifecycle 17 + computer_use 11 + 其余 64）；fmt/clippy 0 警告；workflow rollback 快照目录位置 bug 修复（快照在 work_root 内会被回滚删除）；goal WorkerRegistry 借用修复；编码损坏恢复（workflow_tests 19 行 GBK 双重编码） |
 
 说明：HTTP/UI 面（/notes/*、/workflow/*、/goal/*、/plugins/market/*、云端 SSE 进度流）按计划留待下一轮由单一人统一接入；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。
+
+## 五十四、第四轮：核心模块 HTTP/UI 集成（2026-08-15）
+
+把五十三轮已交付且测试全绿的 core 层（notes/workflow/goal/plan/plugin/cloud_exec）接到 HTTP API 与桌面工作台。四条 lane 并行（只新建文件），主控统一收尾接线（lib.rs 合并 router、openapi_spec/快照、route_contract 契约、index.html/app.js 挂载面板、全量门禁、文档）。协调协议 `.coord4/`（OWNERSHIP/PROTOCOL/GATES/DEPENDENCIES/STATUS-*）。
+
+| lane | 状态 | 证据 |
+|---|---|---|
+| A 笔记 HTTP API + 面板 | ✅ 13 用例 | `notes_api.rs`（模块内 data_root 键控注册表，不给 AppState 加字段）：/notes 列表/创建（markdown 走 md_to_doc）、/notes/{id} 读取/整文档替换（孤儿块拒绝）/删除、块增删移动（环检测复用 core）、import/export（md 往返零丢块、html 经 sanitize_html 无 script）、search（每文档独立 fts.db 合并检索）、reindex；写操作审计；`notes.panel.js`：列表/新建/搜索/块树/导出/内联编辑 |
+| B 插件市场 API + 面板 | ✅ 9 用例（~16 断言） | `plugin_market_api.rs`：目录合并（discover_plugins + market.json 含 has_update/risks）、seed、versions 兼容解析、verify/install（高危扫描拒绝）/update（备份+失败回滚）/uninstall、scan、audit 尾部；require_signature 默认 true（OWO_PLUGIN_REQUIRE_SIGNATURE=0 关闭）；签名语义测试串行化（env 进程级）；`plugin-market.panel.js` |
+| C 工作流 API + 面板 | ✅ 18 用例 | `workflow_api.rs`：发现（深度上限 3）/加载+validate/内联校验（非法 400）/run（MockBackend 沙箱 + 20ms abort 窗口）/runs/snapshot/abort/audit；outcome 落盘 data_root/workflow-runs/<run_id>/；`workflow.panel.js`：列表/定义预览/validate/ctx+运行/步骤时间线/abort/audit |
+| D Goal/Plan API + 云端 SSE + 面板 | ✅ 18 用例（12 goal + 6 SSE） | `goal_api.rs`：goal 创建/列表/plan（环检测 400 + topological_waves 预览）/run（GoalRunner + attach_audit，echo/sleep/fail 演示 worker）/status/abort/audit/runs；运行态注册表 + 落盘恢复；`sse.rs`：CloudSseHub（task_id→broadcast + 历史 ≤512 重放）、SseHubSink（CloudProgress 九变体→JSON 帧）、GET /cloud/tasks/{id}/events text/event-stream；`goal.panel.js`（含 EventSource 云端进度区） |
+| 主控接线：lib.rs | ✅ | `mod notes_api/plugin_market_api/workflow_api/goal_api/sse`；`extern crate self as owo_agent_server`（协议全限定名在 crate 内可解析）；build_router 在 with_state 后 merge 五个 router（lane router 内部已 with_state，返回 Router\<()\>）；cloud_task_submit 的 ProgressSink 由 NullSink 换 `sse::sink(task_id)`（实测 /cloud/tasks/cloud-0001/events 收到 snapshotting→submitting→submitted→executing→fetching→succeeded 六帧） |
+| 主控接线：OpenAPI | ✅ | openapi_spec 登记 35 条新路径（/notes 9、/workflow 8、/goal 9、/plugins/market 9、/cloud/tasks/{id}/events）；clients/ts/openapi.json 快照重新抓取（146 路径，git-ignored 生成物） |
+| 主控接线：路由契约 | ✅ 3/3 | route_contract_tests：新 POST 路由 sample_body（含 /workflow/validate 最小合法定义）、{block_id}/{run_id} 路径占位、资源型 404 白名单新增 21 项（notes 6 + goal 7 + workflow 6 + plugins/market/uninstall）；SSE 端点 stream 立即返回 200，遍历无需特判 |
+| 主控接线：桌面挂载 | ✅ | index.html 引入四个 panel 脚本 + "扩展面板"区；app.js 注入 helpers（baseUrl/get/post/esc/friendlyError/renderMarkdown）按序挂载 OwoPanels.notes/plugin-market/workflow/goal；node --check 5 文件 0 错误 |
+| 工程问题修复 | ✅ | Windows 下 FTS SQLite 句柄占用导致 DELETE 返回 404（remove_dir_all 失败）——删除笔记目录前先释放索引器句柄；core `FtsNoteIndex::index_doc` 为单文档语义，多文档检索采用每文档独立 fts.db 后合并（记录于 STATUS-notes.md） |
+| 质量门禁 | ✅ | cargo test --workspace 487 项全绿（较上轮 429 新增 58：notes 13 + plugin_market 9 + workflow 18 + goal 12 + sse 6）；cargo fmt --all -- --check 干净；cargo clippy --workspace --all-targets -D warnings 0 警告；node --check 0 错误；serve 冒烟（/notes /workflow /goal /plugins/market /openapi.json / 桌面页/面板脚本）+ SSE 端到端帧验证通过 |
+
+说明：四个 lane 面板依赖后端同源托管（build_router permissive CORS）；run 级进度 SSE 与真实 ActionBackend（工作流）留待后续轮次；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。

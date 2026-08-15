@@ -1743,6 +1743,58 @@ async function createComputerTask() {
   }
 }
 
+// ---------- 扩展面板（第四轮：notes / plugin-market / workflow / goal） ----------
+
+// 挂载顺序（与 index.html 的 script 引入顺序一致）。
+const PANEL_ORDER = ["notes", "plugin-market", "workflow", "goal"];
+
+function panelHelpers() {
+  return {
+    baseUrl: API_BASE,
+    get(path) {
+      return api(path);
+    },
+    post(path, body) {
+      return api(path, { method: "POST", body: JSON.stringify(body || {}) });
+    },
+    esc,
+    friendlyError,
+    renderMarkdown,
+  };
+}
+
+let currentPanel = null;
+
+function mountPanel(id) {
+  const panel = window.OwoPanels && window.OwoPanels[id];
+  const root = $("panelRoot");
+  if (!panel || !root) return;
+  currentPanel = id;
+  for (const button of document.querySelectorAll("#panelNav button")) {
+    button.classList.toggle("active", button.dataset.panel === id);
+  }
+  panel.mount(root, panelHelpers());
+}
+
+function initPanels() {
+  const nav = $("panelNav");
+  if (!nav) return;
+  window.OwoPanels = window.OwoPanels || {};
+  window.OwoPanels.baseUrl = API_BASE;
+  nav.innerHTML = "";
+  for (const id of PANEL_ORDER) {
+    const panel = window.OwoPanels[id];
+    if (!panel) continue;
+    const button = document.createElement("button");
+    button.textContent = panel.title || id;
+    button.dataset.panel = id;
+    button.addEventListener("click", () => mountPanel(id));
+    nav.appendChild(button);
+  }
+  const first = PANEL_ORDER.find((id) => window.OwoPanels[id]);
+  if (first) mountPanel(first);
+}
+
 // ---------- 事件绑定 ----------
 
 const savedWorkspace = localStorage.getItem("owo.workspace");
@@ -1943,6 +1995,7 @@ $("micBtn").addEventListener("click", async () => {
 
 async function boot() {
   initSpeech();
+  initPanels();
   await refreshHealth();
   await Promise.all([
     refreshSessions(),

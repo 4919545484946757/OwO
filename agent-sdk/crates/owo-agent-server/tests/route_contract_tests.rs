@@ -130,6 +130,24 @@ fn sample_body(path: &str) -> Option<&'static str> {
         "/computer-use/task" => Some(r#"{"target_app":"notepad","description":"d"}"#),
         "/computer-use/task/{id}/{action}" => Some(r#"{"reason":"r"}"#),
         "/computer-use/sensitive-check" => Some(r#"{"name":"PasswordBox"}"#),
+        "/notes" => Some(r#"{"title":"契约测试笔记"}"#),
+        "/notes/import" => Some(r##"{"title":"t","markdown":"# hi"}"##),
+        "/notes/{id}/blocks" => Some(r#"{"kind":"paragraph","text":"t"}"#),
+        "/notes/{id}/blocks/move" => Some(r#"{"block_id":"no-such-block"}"#),
+        "/goal" => Some(r#"{"objective":"契约测试目标"}"#),
+        "/goal/{id}/plan" => Some(r#"{"steps":[{"id":"a","worker":"echo"}]}"#),
+        "/goal/{id}/run" => Some(r#"{}"#),
+        "/goal/{id}/abort" => Some(r#"{}"#),
+        "/plugins/market/seed" => Some(r#"{"entries":[]}"#),
+        "/plugins/market/verify" => Some(r#"{"dir":"."}"#),
+        "/plugins/market/install" => Some(r#"{"dir":"."}"#),
+        "/plugins/market/update" => Some(r#"{"id":"x","dir":"."}"#),
+        "/plugins/market/uninstall" => Some(r#"{"id":"x"}"#),
+        "/workflow/validate" => Some(
+            r#"{"id":"ct","name":"ct-flow","version":1,"triggers":[{"id":"t1","kind":{"kind":"manual"}}],"permissions":[{"scope":"fs.write","mode":"allow"}],"preconditions":[],"rollback_points":[],"max_steps":100,"subflow_depth_limit":5,"steps":[{"kind":"notify","id":"n1","message":"ok"}]}"#,
+        ),
+        "/workflow/{name}/run" => Some(r#"{}"#),
+        "/workflow/run/{run_id}/abort" => Some(r#"{}"#),
         _ => Some(r#"{}"#),
     }
 }
@@ -143,6 +161,8 @@ fn sample_path(path: &str, session_id: &str) -> String {
         .replace("{app_id}", "no-such-app")
         .replace("{format}", "md")
         .replace("{action}", "cancel")
+        .replace("{block_id}", "no-such-block")
+        .replace("{run_id}", "no-such-run")
 }
 
 /// 资源型 404 白名单：路由已注册且方法匹配，但目标资源不存在时 handler 正确地返回 404。
@@ -161,6 +181,26 @@ fn resource_404_ok(path: &str) -> bool {
             | "/computer-use/task/{id}/run"
             | "/cloud/tasks/{id}"
             | "/cloud/tasks/{id}/result"
+            | "/notes/{id}"
+            | "/notes/{id}/export/{format}"
+            | "/notes/{id}/blocks"
+            | "/notes/{id}/blocks/move"
+            | "/notes/{id}/blocks/{block_id}"
+            | "/notes/{id}/reindex"
+            | "/goal/{id}"
+            | "/goal/{id}/plan"
+            | "/goal/{id}/run"
+            | "/goal/{id}/status"
+            | "/goal/{id}/abort"
+            | "/goal/{id}/audit"
+            | "/goal/{id}/runs"
+            | "/workflow/{name}"
+            | "/workflow/{name}/run"
+            | "/workflow/{name}/runs"
+            | "/workflow/run/{run_id}"
+            | "/workflow/run/{run_id}/abort"
+            | "/workflow/run/{run_id}/audit"
+            | "/plugins/market/uninstall"
     )
 }
 
