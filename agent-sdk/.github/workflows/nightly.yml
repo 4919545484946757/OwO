@@ -1,0 +1,94 @@
+# Nightly 工作流（agent-sdk）：每日依赖安全审计 + 较重测试 + 可控 runtime 入口
+# 触发：schedule 每晚 02:00 UTC + workflow_dispatch（可在 dispatch 时挑选 runtime 入口）
+# 供应链：cargo-audit（RUSTSEC）与 cargo-deny（deny.toml）为真实门禁，高危漏洞不静默忽略。
+# 受控入口：soak/fault-inject/sim-e2e/skill-gate 在 ci-nightly.ps1 内先探测前置条件，
+# 缺失即显式 SKIP（写日志、不 panic、不伪造通过）；bench 自包含可在托管 runner 执行。
+name: CI - Nightly (agent-sdk)
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      include_bench:
+        type: boolean
+        default: true
+        description: 运行性能护栏 bench-metrics（自包含）
+      include_soak:
+        type: boolean
+        default: false
+        description: 运行 soak（需运行中的 server）
+      include_fault_inject:
+        type: boolean
+        default: false
+        description: 运行故障注入（需运行中的 server）
+      include_sim_e2e:
+        type: boolean
+        default: false
+        description: 运行 sim-regression（需 BYOK + 模拟运行期）
+      include_skill_gate:
+        type: boolean
+        default: false
+        description: 运行内置技能包门禁（需技能运行期目录）
+
+permissions:
+  contents: read
+
+jobs:
+  nightly:
+    name: nightly audit + heavy tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Rust toolchain 1.97.1
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: '1.97.1'
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './agent-sdk -> ./agent-sdk/target'
+
+      - name: Install cargo-audit（预编译二进制）
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Install cargo-deny（预编译二进制）
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Nightly 门禁（audit + deny + release test + SBOM + 可控入口）
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        working-directory: agent-sdk
+        run: |
+          $args = @('-LogDir', "$env:RUNNER_TEMP\ci-nightly-logs", '-RequireSecurityTools')
+          if ("${{ inputs.include_bench }}" -eq 'true') { $args += '-IncludeBench' }
+          if ("${{ inputs.include_soak }}" -eq 'true') { $args += '-IncludeSoak' }
+          if ("${{ inputs.include_fault_inject }}" -eq 'true') { $args += '-IncludeFaultInject' }
+          if ("${{ inputs.include_sim_e2e }}" -eq 'true') { $args += '-IncludeSimE2E' }
+          if ("${{ inputs.include_skill_gate }}" -eq 'true') { $args += '-IncludeSkillGate' }
+          & .\scripts\ci-nightly.ps1 @args
+          exit $LASTEXITCODE
+
+      - name: 上传 Nightly 结果（日志 + SBOM，仅公开数据）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-nightly-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/ci-nightly-logs
+            agent-sdk/dist/sbom.json
+          if-no-files-found: warn

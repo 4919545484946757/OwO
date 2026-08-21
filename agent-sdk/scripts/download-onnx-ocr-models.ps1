@@ -1,4 +1,4 @@
-# Download local ONNX OCR models (M-E): ch_PP-OCRv4 det/rec + ppocr_keys_v1.txt dict.
+﻿# Download local ONNX OCR models (M-E): ch_PP-OCRv4 det/rec + ppocr_keys_v1.txt dict.
 # Output: <repo>/models/ocr/ (point OWO_ONNX_OCR_MODEL_DIR there to enable).
 # Models from RapidOCR v1.1.0 official release (https://github.com/RapidAI/RapidOCR/releases),
 # dict from PaddleOCR official repo (Gitee mirror).

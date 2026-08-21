@@ -94,11 +94,19 @@
       '</div>' +
       '<div class="owo-workflow-section">' +
       '<h4>Runs</h4>' +
-      '<div id="owo-workflow-runs">无</div>' +
+      '<div id="owo-workflow-runs">空</div>' +
       '</div>' +
       '<div class="owo-workflow-section">' +
-      '<h4>运行审计</h4>' +
-      '<div id="owo-workflow-audit" class="owo-workflow-audit">—</div>' +
+      '<h4>实时事件（SSE）</h4>' +
+      '<div id="owo-workflow-events" class="owo-workflow-json">（运行后自动订阅 /events）</div>' +
+      '</div>' +
+      '<div class="owo-workflow-section">' +
+      '<h4>审批卡</h4>' +
+      '<div id="owo-workflow-approval" class="sub">等待审批的请求会显示在这里。</div>' +
+      '</div>' +
+      '<div class="owo-workflow-section">' +
+      '<h4>审计尾部</h4>' +
+      '<div id="owo-workflow-audit" class="owo-workflow-audit">空</div>' +
       '</div>' +
       '</section>'
     );
@@ -146,6 +154,11 @@
           issues +
           '<label>ctx（JSON 对象，可选）</label>' +
           '<input id="owo-workflow-ctx" class="owo-workflow-input" placeholder=\'{"key": "value"}\' />' +
+          '<label>执行后端：</label>' +
+          '<select id="owo-workflow-backend" class="owo-workflow-input">' +
+          '<option value="mock" selected>mock（沙箱，默认）</option>' +
+          '<option value="real">real（真实后端，桌面动作需门禁）</option>' +
+          "</select>" +
           '<button id="owo-workflow-run-this" class="primary">运行</button>';
         document.getElementById("owo-workflow-run-this").addEventListener("click", function () {
           runFlow(name, document.getElementById("owo-workflow-ctx").value);
@@ -161,11 +174,14 @@
     if (ctxText && ctxText.trim()) {
       try { ctx = JSON.parse(ctxText); } catch (e) { alert("ctx 不是合法 JSON：" + e.message); return; }
     }
-    post("/workflow/" + encodeURIComponent(name) + "/run", { ctx: ctx })
+    var backendEl = document.getElementById("owo-workflow-backend");
+    var backend = (backendEl && backendEl.value) || "mock";
+    post("/workflow/" + encodeURIComponent(name) + "/run", { ctx: ctx, backend: backend })
       .then(function (data) {
         var runId = data.run_id;
         var result = document.getElementById("owo-workflow-runner");
-        result.innerHTML += '<div class="sub">已启动 run：' + esc(runId) + "</div>";
+        result.innerHTML += '<div class="sub">已启动 run：' + esc(runId) + "（backend=" + esc(backend) + "）</div>";
+        connectEvents(runId);
         pollRun(runId, 0);
         refreshRuns(name);
       })
@@ -174,24 +190,78 @@
       });
   }
 
+  function connectEvents(runId) {
+    var es = window.OwoWorkflowEventSource;
+    if (es) { es.close(); }
+    var el = document.getElementById("owo-workflow-events");
+    if (!el) { return; }
+    var h = getHelpers();
+    var base = (h && h.baseUrl) || BASE;
+    es = new EventSource(base + "/workflow/run/" + encodeURIComponent(runId) + "/events");
+    window.OwoWorkflowEventSource = es;
+    es.onmessage = function (ev) { appendEvent(ev.data); };
+    es.onerror = function () { appendEvent("[events 连接中断]"); };
+  }
+
+  function appendEvent(frame) {
+    var el = document.getElementById("owo-workflow-events");
+    if (!el) { return; }
+    el.innerHTML += esc(frame) + "\n";
+    el.scrollTop = el.scrollHeight;
+  }
+
   function pollRun(runId, attempt) {
-    if (attempt > 200) { return; }
+    if (attempt > 300) { return; }
     get("/workflow/run/" + encodeURIComponent(runId))
       .then(function (snap) {
         renderSnapshot(snap, attempt === 0);
-        if (snap.state === "running") {
+        if (snap.state === "running" || snap.state === "waiting_approval") {
           setTimeout(function () { pollRun(runId, attempt + 1); }, 300);
         }
       })
       .catch(function () {});
   }
 
+  function renderApprovalCard(snap) {
+    var el = document.getElementById("owo-workflow-approval");
+    if (!el) { return; }
+    var pending = snap.pending_approval;
+    if (!pending || !pending.id) {
+      el.innerHTML = '<span class="sub">等待审批的请求会显示在这里。</span>';
+      return;
+    }
+    el.innerHTML =
+      '<div class="owo-workflow-card">' +
+      '<h4>等待审批：' + esc(snap.run_id) + "</h4>" +
+      '<div class="owo-workflow-json">' + esc(pending.prompt || "") + "</div>" +
+      '<div class="sub">' + esc(pending.created_at || "") + "</div>" +
+      '<button id="owo-workflow-approve" class="primary">批准</button>' +
+      '<button id="owo-workflow-reject" class="owo-workflow-btn">拒绝</button>' +
+      "</div>";
+    document.getElementById("owo-workflow-approve").addEventListener("click", function () {
+      decideApproval(snap.run_id, "approve");
+    });
+    document.getElementById("owo-workflow-reject").addEventListener("click", function () {
+      decideApproval(snap.run_id, "reject");
+    });
+  }
+
+  function decideApproval(runId, decision) {
+    post("/workflow/run/" + encodeURIComponent(runId) + "/approval", { decision: decision })
+      .then(function () {
+        pollRun(runId, 0);
+      })
+      .catch(function (e) { alert(friendlyError(e)); });
+  }
+
   function renderSnapshot(snap) {
     var el = document.getElementById("owo-workflow-runner");
     if (!el) { return; }
+    renderApprovalCard(snap);
     var badge = "owo-workflow-badge-run";
     if (snap.state === "succeeded") { badge = "owo-workflow-badge-ok"; }
     if (snap.state === "failed" || snap.state === "aborted") { badge = "owo-workflow-badge-bad"; }
+    if (snap.state === "waiting_approval") { badge = "owo-workflow-badge-run"; }
     var steps = (snap.steps || [])
       .map(function (s) {
         var cls = s.ok ? "owo-workflow-step-ok" : "owo-workflow-step-fail";
@@ -296,6 +366,10 @@
       this.refresh();
       bindValidate();
       bindRefresh();
+      if (window.OwoWorkflowEventSource) {
+        window.OwoWorkflowEventSource.close();
+        window.OwoWorkflowEventSource = null;
+      }
     },
     refresh: function () {
       get("/workflow")

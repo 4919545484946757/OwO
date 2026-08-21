@@ -123,6 +123,21 @@ struct UpdateBody {
 }
 
 #[derive(Deserialize)]
+struct RefreshBody {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct InstallRemoteBody {
+    id: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct UninstallBody {
     id: String,
 }
@@ -172,6 +187,11 @@ pub fn router(state: Arc<owo_agent_server::AppState>) -> axum::Router {
     axum::Router::new()
         .route("/plugins/market", axum::routing::get(catalog))
         .route("/plugins/market/seed", axum::routing::post(seed))
+        .route("/plugins/market/refresh", axum::routing::post(refresh))
+        .route(
+            "/plugins/market/install-remote",
+            axum::routing::post(install_remote),
+        )
         .route("/plugins/market/versions", axum::routing::get(versions))
         .route("/plugins/market/verify", axum::routing::post(verify))
         .route("/plugins/market/install", axum::routing::post(install))
@@ -272,7 +292,51 @@ async fn seed(
     ok(json!({ "ok": true, "entries": count }))
 }
 
-/// GET /plugins/market/versions?plugin={id}&app={version}：兼容版本解析。
+/// POST /plugins/market/refresh {url?}：拉取远端 registry 并写入本地 market.json。
+async fn refresh(
+    State(state): State<Arc<owo_agent_server::AppState>>,
+    Json(body): Json<RefreshBody>,
+) -> ApiResult {
+    let fetched = super::market_client::refresh_local_market(body.url.as_deref(), &state.data_root)
+        .await
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let count = fetched.manifest.plugins.len();
+    let source = if fetched.source == super::market_client::RegistrySource::Remote {
+        "remote"
+    } else {
+        "local"
+    };
+    audit(
+        "market/refresh",
+        format!("registry 刷新完成（{source}，{count} 条）"),
+    );
+    ok(json!({
+        "ok": true,
+        "source": source,
+        "entries": count,
+    }))
+}
+
+/// POST /plugins/market/install-remote {id, version?, url?}：远端下载 → 签名 → 安装。
+async fn install_remote(
+    State(state): State<Arc<owo_agent_server::AppState>>,
+    Json(body): Json<InstallRemoteBody>,
+) -> ApiResult {
+    let fetched = super::market_client::fetch_registry(body.url.as_deref(), &state.data_root)
+        .await
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let result = super::market_client::install_remote(
+        &state.data_root,
+        &fetched,
+        &body.id,
+        body.version.as_deref(),
+        body.url.as_deref(),
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    audit("market/install-remote", format!("{} 远端安装完成", body.id));
+    ok(result)
+}
 async fn versions(
     State(state): State<Arc<owo_agent_server::AppState>>,
     Query(query): Query<VersionsQuery>,

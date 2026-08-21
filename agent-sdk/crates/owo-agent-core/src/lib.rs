@@ -6,23 +6,35 @@ pub mod action_program;
 pub mod agent;
 pub mod assert;
 pub mod audit;
+pub mod audit_chain;
 pub mod automation;
 pub mod autoreview;
+pub mod blackboard;
+pub mod bus_store;
+pub mod capability;
+pub mod cas_store;
 pub mod cloud_exec;
 pub mod computer_task;
 pub mod computer_use;
 pub mod context;
+pub mod credentials;
+pub mod critic;
 pub mod element_registry;
 pub mod error;
 pub mod eval;
 pub mod executor;
+pub mod experience_store;
+pub mod fleet;
+pub mod fleet_transport;
 pub mod gateway;
 pub mod goal;
 pub mod injection;
 pub mod learn;
+pub mod lease;
 pub mod locate;
 pub mod mcp;
 pub mod memory;
+pub mod node_agent;
 pub mod notes;
 pub mod observe;
 pub mod ocr;
@@ -34,6 +46,8 @@ pub mod permissions;
 pub mod plan;
 pub mod platform;
 pub mod plugin;
+pub mod remote_step;
+pub mod sandbox;
 pub mod scene;
 pub mod session;
 pub mod settings;
@@ -43,6 +57,7 @@ pub mod skill;
 pub mod skill_health;
 pub mod skill_pack;
 pub mod sqlite_store;
+pub mod storage_crypto;
 pub mod stt;
 pub mod subagent;
 pub mod tools;
@@ -50,15 +65,31 @@ pub mod trace;
 pub mod vision;
 pub mod whitelist;
 pub mod window_template;
+pub mod worker_pool;
 pub mod workflow;
 
 pub use accessibility::{foreground_ui_tree, ui_tree_for_hwnd, UiNode};
 pub use agent::{estimate_tokens, Agent, AgentConfig, TurnEvent, TurnOutcome};
 pub use audit::{AuditEntry, AuditLog};
+pub use audit_chain::{
+    canonical, export_to_file, hex_encode, hmac_sha256, load_export, verify_export, verify_file,
+    Anchor, AuditChain, AuditChainError, AuditCliCommand, AuditCliOutcome, AuditExport,
+    AuditRecord, ChainedRecord,
+};
 pub use automation::{AutomationAction, AutomationStore, AutomationTask, Schedule};
 pub use autoreview::{
     parse_verdict, AutoReviewChain, HeuristicReviewer, ModelReviewer, ReviewVerdict, Reviewer,
 };
+pub use blackboard::{
+    Blackboard, BlackboardEntry, BlackboardError, BlackboardEvent, BlackboardOp, BlackboardSnapshot,
+};
+pub use bus_store::{is_critical, BusPersistPolicy, BusStore, StoredMessage};
+pub use capability::{
+    evaluate_capability_match, Arch, CapabilityCard, CapabilityMatch, CapabilityWorkerRegistry,
+    EgressMode, Os, RegistrySnapshot, Resources, RouteDecision, RouteStats, TrustLevel,
+    WorkerHealth, WorkerRequirement,
+};
+pub use cas_store::{CasRefsSnapshot, CasStore};
 pub use cloud_exec::{
     backoff_delay, cloud_token_from_env, describe_diff, validate_batch, validate_commands,
     CloudProgress, CloudTask, CloudTaskQueue, CloudTaskResult, CloudTaskSpec, CloudTransport,
@@ -73,6 +104,14 @@ pub use computer_use::{
     sim_base_url_configured, task_gate_check, SimTaskSurface, TaskGoal, TaskReport, TaskSurface,
 };
 pub use context::load_project_rules;
+pub use credentials::{
+    scan_json_for_secrets, windows_credential_manager, ApiKeyRef, CredentialError,
+    CredentialResolver, CredentialStore, MemoryCredentialStore, ProviderConfig, UnavailableStore,
+};
+pub use critic::{
+    review_loop, ConsistencyReport, Critic, CriticConfig, CriticVerdict, ReadOnlyGate,
+    ReviewOutcome, ReviewRound, SamplePair, ScriptedCritic,
+};
 pub use element_registry::{
     fuse_sources, fuse_sources_with_vision, register_vision_grounding, ElementRegistry,
     SceneElement, VisionGrounding,
@@ -80,6 +119,24 @@ pub use element_registry::{
 pub use error::AgentError;
 pub use eval::{builtin_suite, eval_suite_path, run_suite, EvalCase, EvalReport, EvalSuite};
 pub use executor::{execute_graph, ExecReport, ExecStep, UiActionSource, WindowsUiaSource};
+pub use experience_store::{
+    load_aggregation_report, AggregationReport, Attribution, ExperienceEvent, ExperienceKind,
+    ExperienceStore, Outcome, SkillInsight, AGGREGATION_REPORT_FILE,
+};
+pub use fleet::{
+    arbitrate_wait_cycle, backoff_secs, dedupe_messages, detect_cycle, detect_wait_cycle, fan_out,
+    fan_out_cfg, is_mergeable, message_dedup_key, new_correlation_id, AgentBus, AgentId, Budget,
+    BusError, BusMessage, CorrelationId, FanOutConfig, FanOutOutcome, FanOutReport, FanOutStatus,
+    Mailbox, MessageKind, OverflowPolicy, PushOutcome, RestartPolicy, RestartRule,
+    SupervisionState, Supervisor, WaitEdge, WaitGraph, WaitResolution, WorkerEvent,
+    WorkerEventKind,
+};
+/// 控制面 HTTP 传输（cloud_exec 已有 `HttpTransport`，此处以 FleetHttpTransport 区分）。
+pub use fleet_transport::HttpTransport as FleetHttpTransport;
+pub use fleet_transport::{
+    FleetTransport, InMemoryTransport, TransportEvent, TransportEventKind, TransportStatus,
+    TransportTask, TransportWorker,
+};
 pub use gateway::{
     budget_violation, parse_usage_value, ChatMessage, ModelOutput, ModelProvider,
     OpenAiCompatibleConfig, OpenAiCompatibleProvider, TokenUsage, ToolCall,
@@ -94,7 +151,9 @@ pub use learn::{
     ProactiveEngine, ProactiveSuggestion, RecordedAction, SemanticAnchor, Sensitivity,
     SuggestionAction,
 };
+pub use lease::{Lease, LeaseConfig, LeaseError, LeaseManager};
 pub use mcp::{McpClient, McpRegistry, McpServerConfig, McpTool};
+pub use node_agent::{NodeAgent, NodeStatus};
 pub use notes::{
     add_block, append_child, block_text, doc_title, doc_to_md, generate_mixed_doc, get_block,
     insert_child, load_doc, md_to_doc, move_block, new_doc, remove_block, sanitize_html, save_doc,
@@ -123,6 +182,23 @@ pub use plugin::{
     PluginManager, PluginManifest, PluginReviewState, PluginSignature, PluginStateStore,
     PluginSubmission, VersionsJson,
 };
+pub use remote_step::{
+    approval_request_event, approve_transport_task, submit_via_transport,
+    submit_via_transport_with_timeout, ApprovalSpec, EvidenceItem, RemoteStep, RemoteStepEvent,
+    RemoteStepKind, RemoteStepOutcome,
+};
+pub use sandbox::{
+    available_isolation, evaluate_capability, inside_workspace, probe_platform_support,
+    CapabilityEvaluation, FileScope, IsolationLevel, MockSandboxExecutor, NetworkPolicy,
+    PlatformSupport, SandboxAuditEvent, SandboxAuditLog, SandboxCommand, SandboxError,
+    SandboxExecutor, SandboxHandle, SandboxHealth, SandboxManager, SandboxPolicy, SandboxProcess,
+    SandboxProcessStatus,
+};
+pub use scene::{
+    elements_from_ocr_lines, elements_from_ui_nodes, elements_from_vision_groundings,
+    merge_sources, text_hash, ElementRelation, EntityState, Evidence, EvidenceSource, GraphElement,
+    SceneGraph, WindowState,
+};
 pub use session::{JsonSessionStore, Session, SessionStore};
 pub use settings::{EgressSettings, Settings};
 pub use share::{export_html, export_markdown};
@@ -146,6 +222,10 @@ pub use whitelist::{AppTier, Whitelist, WhitelistEntry};
 pub use window_template::{
     build_template, build_template_from_ocr, detect_template, detect_template_ocr, load_template,
     save_template, WindowRoi, WindowTemplate,
+};
+pub use worker_pool::{
+    IsolationMode, PoolError, PoolWorker, WorkerBudget, WorkerId, WorkerPool, WorkerSpec,
+    WorkerStatus,
 };
 pub use workflow::{
     compile_to_program, eval_expr, validate_definition, ActSpec, ActionBackend, Approval,

@@ -1,0 +1,125 @@
+# Merge 工作流（agent-sdk）：push 到 main 时重复核心门禁并产出 SBOM
+# 触发：push -> main，路径含 agent-sdk/**
+# 不做发布：SBOM 只作为 artifact 存档，不创建 release、不上传 release asset。
+name: CI - Merge/main (agent-sdk)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'agent-sdk/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-merge-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  core-gate:
+    name: core gate + SBOM (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Rust toolchain 1.97.1
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: '1.97.1'
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './agent-sdk -> ./agent-sdk/target'
+
+      - name: Node.js 20（npm 锁 clients/ts）
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: agent-sdk/clients/ts/package-lock.json
+
+      - name: UTF-8 校验
+        working-directory: agent-sdk
+        run: .\scripts\ci-gate.ps1 -Step utf8 -LogDir "$env:RUNNER_TEMP\ci-logs"
+
+      - name: cargo fmt
+        working-directory: agent-sdk
+        run: .\scripts\ci-gate.ps1 -Step fmt -LogDir "$env:RUNNER_TEMP\ci-logs"
+
+      - name: cargo clippy (--locked, -D warnings)
+        working-directory: agent-sdk
+        run: .\scripts\ci-gate.ps1 -Step clippy -LogDir "$env:RUNNER_TEMP\ci-logs"
+
+      - name: workspace test (--locked)
+        working-directory: agent-sdk
+        run: .\scripts\ci-gate.ps1 -Step test -LogDir "$env:RUNNER_TEMP\ci-logs"
+
+      - name: 路由契约（route_contract_tests）
+        working-directory: agent-sdk
+        run: .\scripts\ci-gate.ps1 -Step route-contract -LogDir "$env:RUNNER_TEMP\ci-logs"
+
+      - name: Node 语法（app.js + panels）
+        working-directory: agent-sdk
+        run: .\scripts\ci-gate.ps1 -Step node -LogDir "$env:RUNNER_TEMP\ci-logs"
+
+      - name: TS 类型检查（clients/ts）
+        working-directory: agent-sdk
+        run: .\scripts\ci-gate.ps1 -Step ts -LogDir "$env:RUNNER_TEMP\ci-logs"
+
+      - name: 生成 SBOM
+        working-directory: agent-sdk
+        run: .\scripts\sbom.ps1 -OutFile "dist\sbom.json"
+
+      - name: 上传诊断日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-merge-${{ github.run_id }}
+          path: ${{ runner.temp }}/ci-logs
+          if-no-files-found: warn
+
+      - name: 上传 SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-merge-${{ github.run_id }}
+          path: agent-sdk/dist/sbom.json
+          if-no-files-found: warn
+
+  linux-check:
+    name: Linux compile gate (aux, via ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Rust toolchain 1.97.1 (linux target)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: '1.97.1'
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './agent-sdk -> ./agent-sdk/target'
+
+      - name: cargo check (x86_64-unknown-linux-gnu, --locked)
+        shell: bash
+        working-directory: agent-sdk
+        continue-on-error: true
+        run: cargo check --workspace --all-targets --target x86_64-unknown-linux-gnu --locked

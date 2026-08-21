@@ -285,20 +285,61 @@ pub trait SessionStore: Send + Sync {
         let total = entries.len();
         (entries, total)
     }
+
+    /// 清空会话与审计（R8 存储运维；默认不支持，SQLite 存储提供实现）。
+    fn clear(&self) -> Result<(), AgentError> {
+        Err(AgentError::Session("当前存储不支持清空".into()))
+    }
+
+    /// 存储是否处于只读降级（R8：迁移失败后的安全状态；默认否）。
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    /// 只读降级原因/迁移警告（R8；默认无）。
+    fn migration_warning(&self) -> Option<String> {
+        None
+    }
 }
 
 /// M1 会话存储：JSON 文件（后续迁移 SQLite）。
+/// R9：可选加密模式——落盘经 storage_crypto 文件信封加密（`<id>.json.owo-crypt`），
+/// 读取优先解密；明文 `.json` 保持兼容（既有存储不受影响）。
 pub struct JsonSessionStore {
     root: PathBuf,
+    encrypted: bool,
 }
 
 impl JsonSessionStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            encrypted: false,
+        }
+    }
+
+    /// 加密模式：会话落盘经 DPAPI 信封加密（非 Windows 下 save 会显式失败）。
+    pub fn new_encrypted(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            encrypted: true,
+        }
+    }
+
+    fn plain_path(&self, id: &str) -> PathBuf {
+        self.root.join(format!("{id}.json"))
+    }
+
+    fn encrypted_path(&self, id: &str) -> PathBuf {
+        self.root.join(format!("{id}.json.owo-crypt"))
     }
 
     fn path(&self, id: &str) -> PathBuf {
-        self.root.join(format!("{id}.json"))
+        if self.encrypted {
+            self.encrypted_path(id)
+        } else {
+            self.plain_path(id)
+        }
     }
 }
 
@@ -315,16 +356,29 @@ impl SessionStore for JsonSessionStore {
     }
 
     fn load(&self, id: &str) -> Result<Session, AgentError> {
-        let content = std::fs::read_to_string(self.path(id))
+        // 加密形态优先，明文兜底（读取解密；加密文件损坏 → 显式错误，不静默回退明文）。
+        let encrypted_path = self.encrypted_path(id);
+        if encrypted_path.exists() {
+            let content = crate::storage_crypto::decrypt_file_envelope(&encrypted_path)
+                .map_err(|error| AgentError::Session(format!("会话 {id} 解密失败：{error}")))?;
+            return Ok(serde_json::from_slice(&content)?);
+        }
+        let content = std::fs::read_to_string(self.plain_path(id))
             .map_err(|e| AgentError::Session(format!("会话 {id} 读取失败：{e}")))?;
         Ok(serde_json::from_str(&content)?)
     }
 
     fn save(&self, session: &Session) -> Result<(), AgentError> {
         std::fs::create_dir_all(&self.root)?;
-        let tmp = self.root.join(format!("{}.tmp", session.id));
         let target = self.path(&session.id);
         let content = serde_json::to_vec_pretty(session)?;
+        if self.encrypted {
+            crate::storage_crypto::encrypt_file_envelope(&target, &content).map_err(|error| {
+                AgentError::Session(format!("会话 {} 落盘加密失败：{error}", session.id))
+            })?;
+            return Ok(());
+        }
+        let tmp = self.root.join(format!("{}.tmp", session.id));
         std::fs::write(&tmp, content)?;
         if let Err(rename_error) = std::fs::rename(&tmp, &target) {
             // Windows 不允许 rename 覆盖已有文件；保留临时文件写入语义，
@@ -343,7 +397,9 @@ impl SessionStore for JsonSessionStore {
         if let Ok(entries) = std::fs::read_dir(&self.root) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if let Some(id) = name.strip_suffix(".json") {
+                if let Some(id) = name.strip_suffix(".json.owo-crypt") {
+                    sessions.push(id.to_string());
+                } else if let Some(id) = name.strip_suffix(".json") {
                     sessions.push(id.to_string());
                 }
             }

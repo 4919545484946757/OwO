@@ -1,4 +1,4 @@
-# 在用户交互会话启动核心服务（真实桌面输入必需）。
+﻿# 在用户交互会话启动核心服务（真实桌面输入必需）。
 # 用法：
 #   $env:OPENAI_API_KEY="sk-..."
 #   powershell -ExecutionPolicy Bypass -File agent-sdk\scripts\start-dev-service.ps1

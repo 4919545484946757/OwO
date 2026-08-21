@@ -26,6 +26,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+// R5：agent worker 作为本模块子模块编译（lib.rs 无需登记；独立编译、无 crate 引用）。
+#[path = "agent_worker.rs"]
+pub mod agent_worker;
+
 // ---------- 存储路径 ----------
 
 fn goals_dir(data_root: &Path) -> PathBuf {
@@ -141,11 +145,18 @@ impl Worker for FailWorker {
     }
 }
 
-fn builtin_workers() -> WorkerRegistry {
+fn builtin_workers(state: Option<&AppState>) -> WorkerRegistry {
     let registry = WorkerRegistry::new();
     registry.register(Arc::new(EchoWorker));
     registry.register(Arc::new(SleepWorker));
     registry.register(Arc::new(FailWorker));
+    // R5：真实 Agent worker（name="agent"）。
+    if let Some(state) = state {
+        registry.register(Arc::new(agent_worker::AgentWorker::new(
+            state.agent.clone(),
+            state.workspace.clone(),
+        )));
+    }
     registry
 }
 
@@ -349,9 +360,17 @@ async fn create_plan(
         return Err(bad_request("steps 不能为空"));
     }
     let mut plan = Plan::new("plan".to_string(), goal_id.clone());
+    let agent_model = resolve_agent_model(&request.steps);
     for step in request.steps {
         if step.id.is_empty() || step.worker.is_empty() {
             return Err(bad_request("步骤 id/worker 不能为空"));
+        }
+        // R5：agent 步骤必须在 input 中提供非空 prompt（预校验 → 400）。
+        if step.worker == "agent" {
+            let input = step.input.clone().unwrap_or(Value::Null);
+            if let Err(error) = agent_worker::validate_agent_input(&input) {
+                return Err(bad_request(error.as_str()));
+            }
         }
         let mut spec = StepSpec::new(step.id.clone(), step.worker.clone());
         spec.depends_on = step.deps;
@@ -383,8 +402,20 @@ async fn create_plan(
             "waves": waves,
             "valid": true,
             "objective": goal.objective,
+            "agent_model": agent_model,
         })),
     ))
+}
+
+/// R5：计划含 agent 步骤时，返回该步骤将使用的模型名（input.model → OWO_AGENT_MODEL → 缺省）。
+fn resolve_agent_model(steps: &[PlanStepInput]) -> Value {
+    for step in steps {
+        if step.worker == "agent" {
+            let input = step.input.clone().unwrap_or(Value::Null);
+            return json!(agent_worker::AgentWorker::resolve_model(&input));
+        }
+    }
+    Value::Null
 }
 
 /// 计划详情：`GET /goal/{id}/plan`。
@@ -411,10 +442,17 @@ async fn start_run(
     std::fs::create_dir_all(&runs).map_err(|e| bad_request(&format!("创建 runs 目录失败：{e}")))?;
 
     let run_id = format!("run-{uuid}", uuid = uuid::Uuid::new_v4());
+    // R7（Agent 2 扩展）：WorkerPool 子进程执行默认关闭，保持进程内语义。
     let config = RunnerConfig {
         max_parallel: request.parallelism.unwrap_or(2).max(1),
         persist_dir: Some(runs),
         allow_replan: request.allow_replan.unwrap_or(true),
+        use_worker_pool: false,
+        worker_pool: None,
+        capability_registry: None,
+        capability_requirement: None,
+        transport: None,
+        leases: None,
     };
     let mut runner = GoalRunner::new(goal.clone(), plan, config);
     runner.attach_audit(audit_for(&state.data_root));
@@ -425,7 +463,7 @@ async fn start_run(
         map.insert((goal_id.clone(), run_id.clone()), Arc::clone(&runner));
     }
 
-    let workers = builtin_workers();
+    let workers = builtin_workers(Some(state.as_ref()));
     let data_root = state.data_root.clone();
     let goal_id_clone = goal_id.clone();
     let run_id_clone = run_id.clone();
@@ -477,10 +515,50 @@ async fn goal_status(
         .to_string();
     let state_value = GoalRunState::load(&runs, &run_id)
         .map_err(|e| bad_request(&format!("运行状态读取失败：{e}")))?;
+    let plan = Plan::load(&goal_dir(&state.data_root, &goal_id), "plan")
+        .unwrap_or_else(|_| Plan::new("plan".to_string(), goal_id.clone()));
+    // R5：每步骤输出（截断 2000 字符）+ worker 名 + agent 模型名。
+    let steps: Vec<Value> = state_value
+        .records
+        .iter()
+        .map(|(step_id, record)| {
+            let worker = plan
+                .steps
+                .iter()
+                .find(|s| &s.id == step_id)
+                .map(|s| s.worker.clone())
+                .unwrap_or_default();
+            let model = if worker == "agent" {
+                let input = plan
+                    .steps
+                    .iter()
+                    .find(|s| &s.id == step_id)
+                    .map(|s| s.input.clone())
+                    .unwrap_or(Value::Null);
+                json!(agent_worker::AgentWorker::resolve_model(&input))
+            } else {
+                Value::Null
+            };
+            let output = record.output.clone().unwrap_or_default();
+            let truncated = output.chars().count() > 2000;
+            let output = output.chars().take(2000).collect::<String>();
+            json!({
+                "step_id": step_id,
+                "worker": worker,
+                "model": model,
+                "status": format!("{:?}", record.status),
+                "attempts": record.attempts,
+                "output": output,
+                "output_truncated": truncated,
+                "error": record.error,
+            })
+        })
+        .collect();
     let mut value = serde_json::to_value(&state_value)
         .map_err(|e| bad_request(&format!("运行状态序列化失败：{e}")))?;
     value["run_id"] = json!(run_id);
     value["goal_status"] = json!(format!("{:?}", state_value.goal.status));
+    value["steps"] = Json(json!(steps)).0;
     Ok(Json(value))
 }
 

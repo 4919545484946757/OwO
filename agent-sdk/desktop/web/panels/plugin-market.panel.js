@@ -30,6 +30,13 @@
         "</div>" +
         "</div>" +
         '<div class="owo-market-tools">' +
+        "<h3>远端市场</h3>" +
+        '<div class="stack">' +
+        '<div class="inline"><input class="owo-market-url" placeholder="市场 URL（OWO_MARKET_URL 缺省）"><button class="owo-market-refreshremote">拉取 registry</button></div>' +
+        '<div class="inline"><input class="owo-market-rid" placeholder="远端插件 id"><input class="owo-market-rver" placeholder="版本（可选）"><button class="owo-market-installremote primary">下载并安装</button></div>' +
+        "</div>" +
+        "</div>" +
+        '<div class="owo-market-tools">' +
         "<h3>Seed 示例市场条目</h3>" +
         '<div class="stack">' +
         '<textarea class="owo-market-seed" rows="4" spellcheck="false" placeholder=\'{"entries":[{"id":"owo.plugin.demo","name":"Demo","version":"1.0.0","min_app_version":"0.5.0"}]}\'></textarea>' +
@@ -91,6 +98,16 @@
       });
       $(".owo-market-seedbtn").addEventListener("click", function () {
         self.doSeed($(".owo-market-seed").value);
+      });
+      $(".owo-market-refreshremote").addEventListener("click", function () {
+        self.doRefreshRemote($(".owo-market-url").value);
+      });
+      $(".owo-market-installremote").addEventListener("click", function () {
+        self.doInstallRemote(
+          $(".owo-market-rid").value,
+          $(".owo-market-rver").value,
+          $(".owo-market-url").value
+        );
       });
 
       this.refresh();
@@ -250,6 +267,41 @@
         })
         .catch(function (error) {
           self._result("seed 失败：" + self.friendlyError(error));
+        });
+    },
+
+    doRefreshRemote: function (url) {
+      var self = this;
+      var body = url ? { url: url } : {};
+      this.post("/plugins/market/refresh", body)
+        .then(function (data) {
+          self._result(
+            "registry 已刷新：" + (data.entries || 0) + " 条（来源 " + (data.source || "?") + "）"
+          );
+          self.refresh();
+        })
+        .catch(function (error) {
+          self._result("刷新失败：" + self.friendlyError(error));
+        });
+    },
+
+    doInstallRemote: function (id, version, url) {
+      var self = this;
+      if (!id) return this._result("请填写远端插件 id");
+      var body = { id: id };
+      if (version) body.version = version;
+      if (url) body.url = url;
+      this.post("/plugins/market/install-remote", body)
+        .then(function (data) {
+          var report = data.report || {};
+          self._result(
+            "远端安装完成：" + (report.id || id) + " v" + (report.version || "?") + " 状态 " + (report.state || "?")
+          );
+          self.refresh();
+          self.refreshAudit();
+        })
+        .catch(function (error) {
+          self._result("远端安装失败：" + self.friendlyError(error));
         });
     },
 

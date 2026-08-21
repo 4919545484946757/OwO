@@ -65,13 +65,33 @@ fn spawn_core_server() -> Option<Child> {
         exe.parent()?.parent()?.parent()?.to_path_buf() // 开发：agent-sdk
     };
     let port = CORE_PORT.to_string();
-    Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .args(["serve", "--port"])
         .arg(&port)
         .arg("--workspace")
-        .arg(workspace)
-        .spawn()
-        .ok()
+        .arg(workspace);
+
+    // 桌面壳必须能先把本地服务拉起。没有云端凭据时，核心服务会接受
+    // OpenAI 兼容的本地端点；这避免了 UI 已打开、后端却因缺少 API key
+    // 立即退出，从而把所有面板都变成 connection refused。
+    if std::env::var_os("OPENAI_API_KEY").is_none() && std::env::var_os("OPENAI_BASE_URL").is_none()
+    {
+        if let Some(token_plan_key) = std::env::var_os("DASHSCOPE_API_KEY") {
+            // 千问 Token Plan 专属密钥必须配套使用该端点；不把密钥写入
+            // settings.json，子进程仅从用户环境变量继承它。
+            command.env("OPENAI_API_KEY", token_plan_key).env(
+                "OPENAI_BASE_URL",
+                "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            );
+        } else {
+            command
+                .env("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1")
+                .env("OPENAI_MODEL", "local");
+        }
+    }
+
+    command.spawn().ok()
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -125,14 +145,13 @@ fn main() {
                 Some(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT),
                 Code::KeyO,
             );
-            let _ = app.global_shortcut().on_shortcut(
-                shortcut,
-                |app, _shortcut, event| {
+            let _ = app
+                .global_shortcut()
+                .on_shortcut(shortcut, |app, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         show_main_window(app);
                     }
-                },
-            );
+                });
             if let Err(error) = app.global_shortcut().register(shortcut) {
                 eprintln!("[owo-desktop] 全局快捷键注册失败（继续运行）：{error}");
             }
@@ -144,14 +163,13 @@ fn main() {
             } else {
                 "开机自启：关"
             };
-            let autostart = MenuItem::with_id(app, "autostart", autostart_label, true, None::<&str>)?;
-            let check_update = MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
+            let autostart =
+                MenuItem::with_id(app, "autostart", autostart_label, true, None::<&str>)?;
+            let check_update =
+                MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &autostart, &check_update, &quit])?;
-            let icon = app
-                .default_window_icon()
-                .cloned()
-                .ok_or("缺少应用图标")?;
+            let icon = app.default_window_icon().cloned().ok_or("缺少应用图标")?;
             let _tray = TrayIconBuilder::new()
                 .icon(icon)
                 .menu(&menu)
@@ -192,7 +210,8 @@ fn main() {
                                 Ok(Some(update)) => {
                                     eprintln!(
                                         "[owo-desktop] 发现新版本 {}：{}",
-                                        update.version, update.body.unwrap_or_default()
+                                        update.version,
+                                        update.body.unwrap_or_default()
                                     );
                                     if let Some(menu) = handle.menu() {
                                         if let Some(item) = menu.get("check-update") {

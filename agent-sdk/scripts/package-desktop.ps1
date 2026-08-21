@@ -1,8 +1,13 @@
-﻿# OwO Agent 便携打包：核心服务 + 桌面壳 + 内置技能包 → dist/OwO-Agent-<配置>.zip
-# 用法：powershell -ExecutionPolicy Bypass -File scripts\package-desktop.ps1 [-Configuration release|debug]
+﻿# OwO Agent 便携打包：核心服务 + 桌面壳 + 内置技能包 → dist/OwO-Agent-<版本>-<配置>.zip
+# R10 增强：版本号从 Cargo.toml 同步；Authenticode 签名占位（-SignCert）；NSIS 安装包（build-installer.ps1）；SBOM。
+# 用法：powershell -ExecutionPolicy Bypass -File scripts\package-desktop.ps1 [-Configuration release|debug] [-SignCert <thumbprint>] [-SkipInstaller] [-SkipSbom]
 param(
     [ValidateSet("release", "debug")]
-    [string]$Configuration = "release"
+    [string]$Configuration = "release",
+    # Authenticode 证书指纹（signtool sign）；缺省打印签名占位提示。
+    [string]$SignCert = "",
+    [switch]$SkipInstaller,
+    [switch]$SkipSbom
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,6 +22,20 @@ $cargo = if ($env:OWO_CARGO) {
 }
 
 $root = Split-Path $PSScriptRoot -Parent
+
+# R10：版本号从 workspace Cargo.toml 同步（version = "x.y.z"）。
+function Get-WorkspaceVersion {
+    $cargoToml = Get-Content -LiteralPath (Join-Path $root "Cargo.toml") -Encoding UTF8
+    foreach ($line in $cargoToml) {
+        if ($line -match '^version\s*=\s*"([^"]+)"') {
+            return $Matches[1]
+        }
+    }
+    return "0.0.0"
+}
+$version = Get-WorkspaceVersion
+Write-Host "[package] 版本（来自 Cargo.toml）：$version"
+
 $dist = Join-Path $root "dist\OwO-Agent"
 $configArgs = @()
 if ($Configuration -eq "release") {
@@ -97,9 +116,45 @@ OCR 通道优先级：本地 ONNX（随包/数据目录，无网可用）→ Pad
 安全：权限默认 deny；写/执行/注入需审批；密码/支付/验证码类锚点熔断不执行。
 "@ | Set-Content -LiteralPath (Join-Path $dist "README.txt") -Encoding UTF8
 
-$zip = Join-Path $root "dist\OwO-Agent-$Configuration.zip"
+$zip = Join-Path $root "dist\OwO-Agent-$version-$Configuration.zip"
 if (Test-Path $zip) {
     Remove-Item -LiteralPath $zip -Force
 }
 Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $zip
-Write-Host "[package] 完成：$zip"
+Write-Host "[package] 便携包完成：$zip"
+
+# R10：Authenticode 签名占位——提供 -SignCert 时用 signtool 签名，否则打印提示。
+$signtool = if ($env:OWO_SIGNTOOL) {
+    $env:OWO_SIGNTOOL
+} else {
+    (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+}
+if ($SignCert) {
+    if (-not $signtool) { throw "未找到 signtool.exe（可设置 OWO_SIGNTOOL）" }
+    Write-Host "[package] Authenticode 签名（证书 $SignCert）..."
+    & $signtool sign /sha1 $SignCert /fd sha256 /td sha256 /tr "http://timestamp.digicert.com" $zip
+    if ($LASTEXITCODE -ne 0) { throw "签名失败（exit $LASTEXITCODE）" }
+} else {
+    Write-Host "[package] 未签名（占位）：release 发布前请以 -SignCert <指纹> 执行 Authenticode 签名"
+}
+
+# R10：NSIS 安装包（复用 build-installer.ps1；缺省跳过开关）。
+if (-not $SkipInstaller) {
+    $installer = Join-Path $PSScriptRoot "build-installer.ps1"
+    if (Test-Path $installer) {
+        Write-Host "[package] 生成 NSIS 安装包..."
+        & $installer -Configuration $Configuration
+    } else {
+        Write-Host "[package] 跳过 NSIS：build-installer.ps1 不存在"
+    }
+}
+
+# R10：SBOM（依赖清单 + 模型文件哈希）纳入 release 产物。
+if (-not $SkipSbom) {
+    $sbom = Join-Path $PSScriptRoot "sbom.ps1"
+    if (Test-Path $sbom) {
+        Write-Host "[package] 生成 SBOM..."
+        & $sbom -DistDir $dist -OutFile (Join-Path $root "dist\sbom.json")
+    }
+}
+Write-Host "[package] 全部完成"

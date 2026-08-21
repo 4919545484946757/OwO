@@ -512,21 +512,49 @@ impl Tool for RunCommandTool {
             .transpose()?
             .unwrap_or_else(|| ctx.workspace.to_path_buf());
 
+        // 沙箱门卫：run_command 统一经 SandboxManager 执行（X01）。
+        // 策略：工作区作用域 + 危险片段 deny + Job 级隔离（允许显式降级，审计记录）。
+        let mut policy = crate::sandbox::SandboxPolicy::for_workspace("run_command", ctx.workspace);
+        policy.require_isolation = crate::sandbox::IsolationLevel::JobOnly;
+        policy.allow_degraded = true;
+        policy.cpu_ms = Some(60_000);
+        policy.mem_mb = Some(1024);
+        // 命令文本（cmd /C <command> 的命令体）同样过 deny 检查。
+        if let Some(fragment) =
+            crate::sandbox::SandboxCommand::deny_hit(&command, &policy.deny_programs)
+        {
+            return Err(format!("命令命中危险黑名单片段：{fragment}"));
+        }
+        let sandbox_command = crate::sandbox::SandboxCommand::new("cmd", policy.clone())
+            .with_args(vec!["/C".to_string(), command.to_string()])
+            .with_cwd(cwd.clone());
+
+        let manager = crate::sandbox::default_manager();
+        let process = {
+            let mut manager = manager
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            manager
+                .spawn(&sandbox_command)
+                .map_err(|error| format!("沙箱拒绝执行（{}）：{error}", command))?
+        };
+
+        // 同步等待放在 blocking 线程；超时仅报错，进程仍在 Job 内受限（CPU/内存上限兜底）。
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            tokio::process::Command::new("cmd")
-                .arg("/C")
-                .arg(&command)
-                .current_dir(&cwd)
-                .output(),
+            tokio::task::spawn_blocking(move || {
+                let mut process = process;
+                process.wait_output()
+            }),
         )
         .await
-        .map_err(|_| "命令执行超时（60s）".to_string())?
-        .map_err(|e| format!("命令执行失败：{e}"))?;
+        .map_err(|_| "命令执行超时（60s，进程仍在受限 Job 内，将被资源上限终止）".to_string())?
+        .map_err(|join_error| format!("命令等待失败：{join_error}"))?
+        .map_err(|error| format!("沙箱执行失败：{error}"))?;
 
         Ok(json!({
             "command": command,
-            "exit_code": output.status.code(),
+            "exit_code": output.exit_code,
             "stdout": String::from_utf8_lossy(&output.stdout),
             "stderr": String::from_utf8_lossy(&output.stderr),
         }))

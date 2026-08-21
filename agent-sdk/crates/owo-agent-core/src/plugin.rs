@@ -300,6 +300,96 @@ pub fn scan_plugin_for_risks(
     risks
 }
 
+/// 沙箱门卫：插件宿主（MCP 服务器）统一经 SandboxManager 授权（X01）。
+/// 策略：只读系统作用域 + 网络白名单（manifest.network_allowlist 或回环）+ Job 级隔离；
+/// 数据出境开关（R9）：关闭时插件一律不得出网（HTTP MCP 拒绝，stdio 强制回环）。
+/// 拒绝时产生审计事件（EgressRejected）并返回显式错误。
+fn sandbox_gate_for_mcp(
+    manifest: &PluginManifest,
+    mcp: &McpServerConfig,
+    egress_enabled: bool,
+) -> Result<(), String> {
+    use crate::sandbox::{
+        default_manager, FileScope, IsolationLevel, NetworkPolicy, SandboxCommand, SandboxPolicy,
+    };
+    let reject_and_audit = |detail: String| -> Result<(), String> {
+        let manager = default_manager();
+        let mut manager = manager
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        manager.record_egress_rejection(format!("plugin:{}", manifest.id), detail.clone());
+        Err(detail)
+    };
+    if mcp.transport == "http" {
+        if !egress_enabled {
+            return reject_and_audit(format!(
+                "插件 {} 的 HTTP MCP 被数据出境开关拒绝（egress 关闭）",
+                manifest.id
+            ));
+        }
+        // HTTP MCP 硬化：URL host 必须在 manifest.network_allowlist 内，否则拒绝。
+        let url = mcp
+            .url
+            .as_deref()
+            .ok_or_else(|| "HTTP MCP 服务器缺少 url".to_string())?;
+        let domain = url_domain(url).ok_or_else(|| format!("HTTP MCP URL 无法解析域名：{url}"))?;
+        if manifest.network_allowlist.is_empty() {
+            return reject_and_audit(format!(
+                "插件 {} 的 HTTP MCP 目标 {domain} 不在网络白名单（network_allowlist 为空），拒绝",
+                manifest.id
+            ));
+        }
+        let allowed = manifest.network_allowlist.iter().any(|entry| {
+            let entry_domain = if entry.starts_with("http://") || entry.starts_with("https://") {
+                url_domain(entry).unwrap_or_default()
+            } else {
+                entry.split(':').next().unwrap_or(entry).to_lowercase()
+            };
+            entry_domain == domain
+        });
+        if !allowed {
+            return reject_and_audit(format!(
+                "插件 {} 的 HTTP MCP 目标 {domain} 不在网络白名单（{}），拒绝",
+                manifest.id,
+                manifest.network_allowlist.join("、")
+            ));
+        }
+        return Ok(());
+    }
+    let policy = SandboxPolicy {
+        name: format!("plugin:{}", manifest.id),
+        file_scope: FileScope::WorkspacePlusReadonlySystem,
+        // egress 关闭：出网白名单失效，强制回环（默认 deny 网络）。
+        network_policy: if !egress_enabled || manifest.network_allowlist.is_empty() {
+            NetworkPolicy::Loopback
+        } else {
+            NetworkPolicy::AllowList
+        },
+        allow_hosts: if egress_enabled {
+            manifest.network_allowlist.clone()
+        } else {
+            Vec::new()
+        },
+        cpu_ms: None,
+        mem_mb: Some(1024),
+        ttl_secs: None,
+        require_isolation: IsolationLevel::JobOnly,
+        allow_degraded: true,
+        // 插件宿主可能需要子进程（如剪贴板插件调 powershell）。
+        active_process_limit: Some(32),
+        ..SandboxPolicy::default()
+    };
+    let sandbox_command = SandboxCommand::new(&mcp.command, policy).with_args(mcp.args.clone());
+    let manager = default_manager();
+    let mut manager = manager
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    manager
+        .guard(&sandbox_command)
+        .map_err(|error| format!("插件宿主沙箱拒绝（{}）：{error}", mcp.command))?;
+    Ok(())
+}
+
 /// 提取文本中的 http/https URL（简单正则）。
 fn extract_urls(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
@@ -375,6 +465,12 @@ pub struct PluginManager {
     app_version: String,
     /// 要求签名（缺签名拒绝加载）。
     require_signature: bool,
+    /// 数据出境开关（R9：关闭时插件网络白名单失效，一切出网请求拒绝并审计）。
+    egress_enabled: bool,
+    /// 吊销列表（R10：id@version 命中即拒绝加载）。
+    revocations: Vec<PluginRevocation>,
+    /// 官方插件豁免白名单（R10：仅对有效签名官方包生效的扫描风险豁免）。
+    official_ids: std::collections::HashSet<String>,
 }
 
 impl PluginManager {
@@ -383,12 +479,103 @@ impl PluginManager {
             data_root,
             app_version,
             require_signature: true,
+            egress_enabled: true,
+            revocations: Vec::new(),
+            official_ids: std::collections::HashSet::new(),
         }
     }
 
     /// 是否强制签名（默认 true；测试可放宽）。
     pub fn set_require_signature(&mut self, require: bool) {
         self.require_signature = require;
+    }
+
+    /// 数据出境开关（默认 true；关闭后插件宿主不得出网）。
+    pub fn set_egress_enabled(&mut self, enabled: bool) {
+        self.egress_enabled = enabled;
+    }
+
+    pub fn egress_enabled(&self) -> bool {
+        self.egress_enabled
+    }
+
+    /// 从吊销列表文件加载（`<data_root>/revocations.json` 或自定义路径；文件缺失=空列表）。
+    pub fn load_revocations(&mut self, path: Option<&Path>) {
+        let path = path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.data_root.join("revocations.json"));
+        self.revocations = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or_default();
+    }
+
+    pub fn revocations(&self) -> &[PluginRevocation] {
+        &self.revocations
+    }
+
+    /// 追加吊销（id+version；全版本用 `*`）。
+    pub fn add_revocation(
+        &mut self,
+        id: impl Into<String>,
+        version: impl Into<String>,
+        reason: impl Into<String>,
+    ) {
+        let revocation = PluginRevocation {
+            id: id.into(),
+            version: version.into(),
+            reason: reason.into(),
+            ts: chrono::Utc::now().to_rfc3339(),
+        };
+        if !self
+            .revocations
+            .iter()
+            .any(|entry| entry.id == revocation.id && entry.version == revocation.version)
+        {
+            self.revocations.push(revocation);
+        }
+    }
+
+    /// 保存吊销列表到 `<data_root>/revocations.json`。
+    pub fn save_revocations(&self) -> Result<(), String> {
+        let path = self.data_root.join("revocations.json");
+        std::fs::create_dir_all(&self.data_root).map_err(|e| e.to_string())?;
+        let content = serde_json::to_string_pretty(&self.revocations).map_err(|e| e.to_string())?;
+        std::fs::write(path, content).map_err(|e| e.to_string())
+    }
+
+    /// 清空吊销列表（测试/管理用）。
+    pub fn clear_revocations(&mut self) {
+        self.revocations.clear();
+    }
+
+    /// 是否被吊销（version `*` 匹配全部版本）。
+    pub fn is_revoked(&self, id: &str, version: &str) -> bool {
+        self.revocations
+            .iter()
+            .any(|entry| entry.id == id && (entry.version == "*" || entry.version == version))
+    }
+
+    /// 官方豁免白名单（R10：仅对有效签名官方包生效）。
+    pub fn set_official_allowlist(&mut self, ids: &[String]) {
+        self.official_ids = ids.iter().cloned().collect();
+    }
+
+    fn is_official_and_signed(
+        &self,
+        manifest: &PluginManifest,
+        entry_content: Option<&str>,
+    ) -> bool {
+        if !self.official_ids.contains(&manifest.id) {
+            return false;
+        }
+        match &manifest.signature {
+            Some(signature) => {
+                verify_plugin_signature(manifest, entry_content).is_ok()
+                    && signature.algorithm == "ed25519"
+            }
+            None => false,
+        }
     }
 
     /// 校验插件目录（manifest + 版本 + 扫描 + 签名）。
@@ -399,6 +586,20 @@ impl PluginManager {
         let mut audit = Vec::new();
         let manifest_path = plugin_dir.join("manifest.json");
         let manifest = PluginManifest::load(&manifest_path)?;
+
+        // 0. 吊销检查（R10）：id+version 命中吊销列表 → 拒绝加载。
+        if self.is_revoked(&manifest.id, &manifest.version) {
+            record_plugin_rejection(&manifest, "命中吊销列表".to_string());
+            return Err(format!(
+                "插件 {} {} 已被吊销，拒绝加载",
+                manifest.id, manifest.version
+            ));
+        }
+
+        // 0.5 路径校验（R10：zip-slip 变体——entry/mcp 引用与目录内文件不得含
+        // `..` 组件或绝对路径，拷贝前拦截）。
+        validate_plugin_paths(&manifest, plugin_dir)?;
+        audit.push("路径校验通过（无 zip-slip）".to_string());
 
         // 1. min_app_version 兼容。
         if let Some(min) = &manifest.min_app_version {
@@ -426,20 +627,39 @@ impl PluginManager {
             &manifest.network_allowlist,
         );
         if !risks.is_empty() {
-            return Err(format!(
-                "插件 {} 静态扫描未通过：{}",
-                manifest.id,
-                risks.join("；")
-            ));
+            // 官方豁免（R10）：仅对签名官方包生效——风险项记录为豁免而非拒绝。
+            let official_signed = self.is_official_and_signed(&manifest, entry_content.as_deref());
+            if official_signed {
+                audit.push(format!("官方插件豁免风险项：{}", risks.join("；")));
+            } else {
+                record_plugin_rejection(&manifest, format!("静态扫描未通过：{}", risks.join("；")));
+                return Err(format!(
+                    "插件 {} 静态扫描未通过：{}",
+                    manifest.id,
+                    risks.join("；")
+                ));
+            }
+        } else {
+            audit.push("静态扫描通过".to_string());
         }
-        audit.push("静态扫描通过".to_string());
+        // 依赖清单（R10：入口脚本 import/require 记录，低风险）。
+        if let Some(deps) = extract_dependencies(entry_content.as_deref()) {
+            audit.push(format!("依赖清单：{}", deps.join("、")));
+        }
 
         // 3. 签名。
         if let Some(signature) = &manifest.signature {
             verify_plugin_signature(&manifest, entry_content.as_deref())?;
             audit.push(format!("签名校验通过（{}）", signature.algorithm));
         } else if self.require_signature {
+            record_plugin_rejection(&manifest, "缺少签名".to_string());
             return Err(format!("插件 {} 缺少签名，拒绝加载", manifest.id));
+        }
+
+        // 4. 沙箱门卫（X01）：插件宿主（MCP 服务器/入口）统一经 SandboxManager 授权。
+        if let Some(mcp) = &manifest.mcp {
+            sandbox_gate_for_mcp(&manifest, mcp, self.egress_enabled)?;
+            audit.push("插件宿主沙箱策略通过".to_string());
         }
 
         Ok(PluginInstallReport {
@@ -526,7 +746,8 @@ impl PluginManager {
     }
 }
 
-/// 递归拷贝目录（std 实现；忽略符号链接）。
+/// 递归拷贝目录（std 实现；忽略符号链接；R10：逐文件拒绝 `..` 组件/绝对路径/符号链接，
+/// 防 zip-slip 变体）。
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     if !from.is_dir() {
         return Err(format!("{} 不是目录", from.display()));
@@ -534,14 +755,120 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
     for entry in std::fs::read_dir(from).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".." || name.contains('/') || name.contains('\\') {
+            return Err(format!("非法路径组件：{name}（zip-slip 拒绝）"));
+        }
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_symlink() {
+            return Err(format!("插件目录含符号链接：{name}（拒绝）"));
+        }
         let target = to.join(entry.file_name());
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        if file_type.is_dir() {
             copy_dir(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), &target).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
+}
+
+/// 插件吊销记录（R10）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginRevocation {
+    pub id: String,
+    /// 版本（`*` = 全部版本）。
+    pub version: String,
+    pub reason: String,
+    pub ts: String,
+}
+
+/// 路径校验（R10）：manifest 引用的 entry/MCP 命令路径与目录内文件
+/// 不得含 `..` 组件或绝对路径（zip-slip 变体拦截）。
+fn validate_plugin_paths(manifest: &PluginManifest, plugin_dir: &Path) -> Result<(), String> {
+    if let Some(entry) = &manifest.entry {
+        let entry_path = Path::new(entry);
+        if entry_path.is_absolute()
+            || entry_path
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+        {
+            return Err(format!("插件入口路径非法（zip-slip）：{entry}"));
+        }
+        if !plugin_dir.join(entry_path).is_file() {
+            return Err(format!("插件入口不存在：{entry}"));
+        }
+    }
+    // 目录内文件路径遍历检查（拷贝前拦截绝对/父级路径）。
+    let mut pending = vec![plugin_dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for entry in entries.flatten() {
+            let file_type = entry.file_type().map_err(|e| e.to_string())?;
+            if file_type.is_symlink() {
+                return Err(format!(
+                    "插件含符号链接：{}（拒绝）",
+                    entry.path().display()
+                ));
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 入口脚本依赖提取（R10：import/require 记录，低风险）。
+pub fn extract_dependencies(entry_content: Option<&str>) -> Option<Vec<String>> {
+    let content = entry_content?;
+    let mut deps: Vec<String> = Vec::new();
+    let mut rest = content;
+    while !rest.is_empty() {
+        let rel_index = rest.find("require(");
+        let from_index = rest.find("from '");
+        let next = match (rel_index, from_index) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => break,
+        };
+        let candidate = &rest[next..];
+        let dep = if let Some(rest) = candidate.strip_prefix("require(") {
+            let quoted = rest.trim_start();
+            quoted
+                .strip_prefix('\'')
+                .and_then(|s| s.split('\'').next())
+                .or_else(|| quoted.strip_prefix('"').and_then(|s| s.split('"').next()))
+        } else if let Some(rest) = candidate.strip_prefix("from '") {
+            rest.split('\'').next()
+        } else {
+            None
+        };
+        if let Some(dep) = dep {
+            if !dep.is_empty() && !deps.iter().any(|existing| existing == dep) {
+                deps.push(dep.to_string());
+            }
+        }
+        rest = &candidate[1..];
+    }
+    if deps.is_empty() {
+        None
+    } else {
+        Some(deps)
+    }
+}
+
+/// 插件拒绝审计（R10）：经全局沙箱管理器记录 PluginRejected 事件（可汇入审计链）。
+fn record_plugin_rejection(manifest: &PluginManifest, detail: String) {
+    let manager = crate::sandbox::default_manager();
+    let mut manager = manager
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    manager.record_plugin_rejection(
+        format!("plugin:{}@{}", manifest.id, manifest.version),
+        detail,
+    );
 }
 // ---------- M4b 市场治理：Ed25519 签名校验 ----------
 
@@ -802,6 +1129,7 @@ mod tests {
                 args: vec!["worker.py".to_string(), "--stdio".to_string()],
                 url: None,
                 timeout_ms: None,
+                network_allowlist: Vec::new(),
             }),
         };
         // 相对命令按 manifest 目录解析；服务器名 = 插件 id。

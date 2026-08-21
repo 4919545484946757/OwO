@@ -99,20 +99,92 @@ async function startLocalRecording() {
   return true;
 }
 
+// ---------- R7 X03：本地 API bearer token（/auth/token 公开引导配对） ----------
+
+let apiToken = null;
+let apiTokenRequest = null;
+let connectionUnavailableUntil = 0;
+
+function markConnectionUnavailable() {
+  // 启动中的桌面壳会在同一时刻加载二十多个面板。短暂断连时只允许
+  // 一次探测，避免每个面板都向 /auth/token 发请求并刷满控制台。
+  connectionUnavailableUntil = Date.now() + 5000;
+  const health = $("health");
+  if (health) {
+    health.textContent = "本地服务未连接";
+    health.style.color = "var(--yellow)";
+  }
+  const summary = $("connectionSummary");
+  if (summary) summary.textContent = "本地服务未连接";
+}
+
+function markConnectionReady() {
+  connectionUnavailableUntil = 0;
+  const health = $("health");
+  if (health && health.textContent === "本地服务未连接") {
+    health.textContent = "本地服务已连接";
+    health.style.color = "var(--green)";
+  }
+  const summary = $("connectionSummary");
+  if (summary) summary.textContent = "服务已连接";
+}
+
+async function ensureApiToken() {
+  if (apiToken) return apiToken;
+  if (Date.now() < connectionUnavailableUntil) {
+    throw new Error("本地服务尚未就绪，请稍候重试");
+  }
+  if (apiTokenRequest) return apiTokenRequest;
+  apiTokenRequest = (async () => {
+    try {
+      const response = await fetch(API_BASE + "/auth/token");
+      if (!response.ok) throw new Error(`token 引导失败（HTTP ${response.status}）`);
+      const data = await response.json();
+      apiToken = data && data.token ? data.token : null;
+      if (!apiToken) throw new Error("token 引导响应缺少 token");
+      connectionUnavailableUntil = 0;
+      return apiToken;
+    } catch (error) {
+      markConnectionUnavailable();
+      throw error;
+    } finally {
+      apiTokenRequest = null;
+    }
+  })();
+  return apiTokenRequest;
+}
+
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body != null && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(API_BASE + path, {
-    ...options,
-    headers,
-  });
+  let response = await fetchWithToken(path, options, headers);
+  if (response.ok) markConnectionReady();
+  // 401：token 过期/服务重启 → 重新引导一次后重试。
+  if (response.status === 401) {
+    apiToken = null;
+    await ensureApiToken().catch(() => {});
+    response = await fetchWithToken(path, options, headers);
+  }
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`${response.status}: ${body}`);
   }
   return response.status === 204 ? null : response.json();
+}
+
+async function fetchWithToken(path, options, headers) {
+  if (!headers.has("Authorization")) {
+    const token = apiToken || (await ensureApiToken().catch(() => null));
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+  }
+  try {
+    return await fetch(API_BASE + path, { ...options, headers });
+  } catch (error) {
+    markConnectionUnavailable();
+    throw error;
+  }
 }
 
 // 统一友好错误：404/405/5xx 提示"服务接口不可用"，其余透传原错误。
@@ -332,8 +404,10 @@ async function refreshHealth() {
   try {
     const health = await api("/health");
     $("health").textContent = `API 就绪 ${health.version}`;
+    $("health").style.color = "var(--green)";
   } catch (error) {
-    $("health").textContent = `连接失败：${error.message}`;
+    $("health").textContent = "本地服务未连接";
+    $("health").style.color = "var(--yellow)";
   }
 }
 
@@ -341,7 +415,11 @@ async function refreshPerception() {
   try {
     const snapshot = await api("/context/snapshot");
     $("permission").textContent = `感知：${snapshot.permission_level || "l0_l1"}`;
-    $("snapshot").textContent = JSON.stringify(snapshot, null, 2);
+    const level = snapshot.permission_level || "l0_l1";
+    const actions = Array.isArray(snapshot.recent_actions) && snapshot.recent_actions.length
+      ? snapshot.recent_actions.join("、")
+      : "暂无近期操作";
+    $("snapshot").textContent = `权限等级：${level}\n近期操作：${actions}`;
   } catch (_) {
     $("snapshot").textContent = "（无法获取情景快照）";
   }
@@ -614,6 +692,11 @@ async function refreshSettings() {
     const button = $("egressToggle");
     button.textContent = cloudEnabled ? "开" : "关";
     button.dataset.enabled = String(cloudEnabled);
+    const model = settings.model || "qwen3.8-max";
+    if ($("settingsModel").querySelector(`option[value="${CSS.escape(model)}"]`)) {
+      $("settingsModel").value = model;
+    }
+    $("connectionSummary").textContent = cloudEnabled ? "云端模型已启用" : "云端模型已关闭";
     $("settingsPreview").textContent = JSON.stringify(
       {
         model: settings.model,
@@ -649,6 +732,106 @@ async function refreshUsage() {
       ` ｜ 状态：${status}`;
   } catch (error) {
     $("usagePanel").textContent = friendlyError(error);
+  }
+}
+
+// ---------- R8 存储与恢复（/storage/* + /server/status） ----------
+
+async function refreshServerStatus() {
+  try {
+    const status = await api("/server/status");
+    const gate = status.shutdown_gate || {};
+    const storage = status.storage || {};
+    const parts = [
+      `并发回合：${gate.active_turns ?? 0}/${gate.max_concurrent_turns ?? "?"}`,
+      gate.shutting_down ? "服务关闭中" : "运行中",
+    ];
+    if (storage.read_only) {
+      parts.push(`⚠️ 存储只读降级：${storage.migration_warning || "迁移失败"}`);
+    } else if (storage.migration_warning) {
+      parts.push(`提示：${storage.migration_warning}`);
+    }
+    $("serverStatusPanel").textContent = parts.join(" ｜ ");
+  } catch (error) {
+    $("serverStatusPanel").textContent = friendlyError(error);
+  }
+}
+
+async function storageBackup() {
+  try {
+    const result = await api("/storage/backup", { method: "POST", body: "{}" });
+    $("storageResult").textContent =
+      `备份完成：${(result.size_bytes / 1024 / 1024).toFixed(2)} MB` +
+      `\n保存于：${result.saved_to}` +
+      `\n可用 POST /storage/restore 或「恢复…」选择该 zip 恢复（恢复前会自动再备份）`;
+    refreshServerStatus();
+  } catch (error) {
+    $("storageResult").textContent = friendlyError(error);
+  }
+}
+
+async function storageExport() {
+  try {
+    const data = await api("/storage/export", { method: "POST", body: "{}" });
+    const counts = data.counts || {};
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `owo-export-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    $("storageResult").textContent =
+      `导出完成：${counts.sessions ?? 0} 会话 / ${counts.audit ?? 0} 审计 / ` +
+      `${counts.notes ?? 0} 笔记 / ${counts.skills ?? 0} 技能 / ${counts.workflows ?? 0} 工作流（标准 JSON 已下载）`;
+  } catch (error) {
+    $("storageResult").textContent = friendlyError(error);
+  }
+}
+
+async function storageRestore(file) {
+  if (!file) return;
+  const archive_b64 = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = reader.result;
+      const bytes = typeof raw === "string" ? atob(raw.split(",")[1] || "") : raw;
+      resolve(bytes);
+    };
+    reader.onerror = () => reject(new Error("读取备份文件失败"));
+    reader.readAsDataURL(file);
+  });
+  if (!confirm("恢复会覆盖当前 settings/notes/skills/workflows，且 index.db 需重启生效（恢复前自动备份）。确认继续？")) return;
+  try {
+    const result = await api("/storage/restore", {
+      method: "POST",
+      body: JSON.stringify({ archive_b64 }),
+    });
+    $("storageResult").textContent =
+      `恢复完成：${result.restored.length} 项已还原，${result.staged.length} 项暂存（index.db 重启后生效）` +
+      `\n恢复前自动备份：${result.pre_backup}` +
+      (result.restart_required ? "\n⚠️ 请重启核心服务使 index.db 生效" : "");
+  } catch (error) {
+    $("storageResult").textContent = friendlyError(error);
+  }
+}
+
+async function storageClear() {
+  if (!confirm("将清空全部会话/审计/笔记/记忆/自动化（技能与工作流保留）。\n再次输入 CLEAR_ALL 确认：")) return;
+  const token = prompt("输入 CLEAR_ALL 以二次确认：", "");
+  if (token !== "CLEAR_ALL") return;
+  try {
+    const result = await api("/storage/clear", {
+      method: "POST",
+      body: JSON.stringify({ confirm: "CLEAR_ALL" }),
+    });
+    $("storageResult").textContent =
+      `已清空：${(result.cleared || []).join("、")}\n完整性校验：${result.integrity}`;
+    refreshSessions(null);
+    refreshAudit();
+    refreshServerStatus();
+  } catch (error) {
+    $("storageResult").textContent = friendlyError(error);
   }
 }
 
@@ -970,9 +1153,12 @@ async function sendPrompt() {
   state.abortController = new AbortController();
   $("abortBtn").disabled = false;
   try {
+    const headers = { "Content-Type": "application/json" };
+    const token = await ensureApiToken().catch(() => null);
+    if (token) headers.Authorization = `Bearer ${token}`;
     const response = await fetch(`${API_BASE}/session/${state.sessionId}/turn`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ prompt, attachments }),
       signal: state.abortController.signal,
     });
@@ -1743,10 +1929,21 @@ async function createComputerTask() {
   }
 }
 
-// ---------- 扩展面板（第四轮：notes / plugin-market / workflow / goal） ----------
+// ---------- 扩展面板（第四轮：notes / plugin-market / workflow / goal；第五轮：team / eval / observability / memory / command） ----------
 
 // 挂载顺序（与 index.html 的 script 引入顺序一致）。
-const PANEL_ORDER = ["notes", "plugin-market", "workflow", "goal"];
+const PANEL_ORDER = [
+  "notes",
+  "plugin-market",
+  "workflow",
+  "goal",
+  "team",
+  "eval",
+  "observability",
+  "memory",
+  "command",
+  "fleet",
+];
 
 function panelHelpers() {
   return {
@@ -1799,6 +1996,72 @@ function initPanels() {
 
 const savedWorkspace = localStorage.getItem("owo.workspace");
 if (savedWorkspace) $("workspace").value = savedWorkspace;
+function applyTheme(theme) {
+  const dark = theme === "dark";
+  document.body.classList.toggle("dark-theme", dark);
+  $("themeToggle").textContent = dark ? "☀" : "☾";
+  $("themeToggle").title = dark ? "切换白色主题" : "切换深色主题";
+  localStorage.setItem("owo.theme", dark ? "dark" : "light");
+}
+applyTheme(localStorage.getItem("owo.theme") || "light");
+$("themeToggle").addEventListener("click", () => {
+  applyTheme(document.body.classList.contains("dark-theme") ? "light" : "dark");
+});
+function enableResize(handleId, variable, min, max, fromRight = false) {
+  const handle = $(handleId);
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    const move = (next) => {
+      const raw = fromRight ? window.innerWidth - next.clientX : next.clientX - 64;
+      document.body.style.setProperty(variable, `${Math.max(min, Math.min(max, raw))}px`);
+    };
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  });
+}
+enableResize("sidebarResize", "--session-width", 220, 460);
+enableResize("rightResize", "--inspect-width", 260, 520, true);
+function setToolsVisible(visible) {
+  document.body.classList.toggle("show-tools", visible);
+  document.body.classList.toggle("tools-open", visible);
+  if (visible) document.body.classList.remove("settings-open");
+  $("toggleTools").setAttribute("aria-expanded", String(visible));
+  $("toggleTools").textContent = visible ? "收起工具与设置" : "显示工具与设置";
+}
+function setSettingsPageVisible(visible) {
+  document.body.classList.toggle("settings-open", visible);
+  if (visible) document.body.classList.remove("tools-open");
+  if (visible) {
+    setToolsVisible(true);
+    document.querySelector("#sidebar section:last-child")?.scrollIntoView({ block: "start" });
+  }
+}
+$("toggleTools").addEventListener("click", () => {
+  setToolsVisible(!document.body.classList.contains("show-tools"));
+});
+for (const button of document.querySelectorAll("[data-rail-target]")) {
+  button.addEventListener("click", () => {
+    const target = button.dataset.railTarget;
+    document.querySelectorAll(".rail-button").forEach((item) => item.classList.remove("active"));
+    button.classList.add("active");
+    if (target === "tools") {
+      setToolsVisible(true);
+      $("toggleTools").scrollIntoView({ block: "nearest" });
+    } else if (target === "workspace") {
+      $("workspace").focus();
+    } else if (target === "settings") {
+      setSettingsPageVisible(true);
+    } else {
+      setSettingsPageVisible(false);
+      $("sessionList").scrollIntoView({ block: "start" });
+    }
+  });
+}
 $("workspace").addEventListener("change", () => {
   const workspace = $("workspace").value.trim();
   if (workspace) localStorage.setItem("owo.workspace", workspace);
@@ -1872,6 +2135,7 @@ $("egressToggle").addEventListener("click", async () => {
 $("settingsSave").addEventListener("click", async () => {
   try {
     const settings = JSON.parse($("settingsEditor").value);
+    settings.model = $("settingsModel").value;
     const resp = await api("/settings", {
       method: "POST",
       body: JSON.stringify(settings),
@@ -1882,6 +2146,15 @@ $("settingsSave").addEventListener("click", async () => {
     addMessage("system", `设置保存失败：${error.message || error}`);
   }
 });
+$("storageBackupBtn").addEventListener("click", () => storageBackup());
+$("storageExportBtn").addEventListener("click", () => storageExport());
+$("storageRestoreBtn").addEventListener("click", () => $("storageRestoreFile").click());
+$("storageRestoreFile").addEventListener("change", (event) => {
+  const file = event.target.files && event.target.files[0];
+  if (file) storageRestore(file);
+  event.target.value = "";
+});
+$("storageClearBtn").addEventListener("click", () => storageClear());
 $("recallBtn").addEventListener("click", () => recallMemory());
 $("recallQ").addEventListener("keydown", (event) => {
   if (event.key === "Enter") recallMemory();
@@ -2007,6 +2280,7 @@ async function boot() {
     refreshReminders(),
     refreshSettings(),
     refreshUsage(),
+    refreshServerStatus(),
     refreshAudit(),
     refreshWhitelist(),
     refreshPerception(),

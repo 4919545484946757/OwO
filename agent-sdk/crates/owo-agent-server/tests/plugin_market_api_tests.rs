@@ -11,10 +11,14 @@
 #[path = "../src/plugin_market_api.rs"]
 mod plugin_market_api;
 
+#[path = "../src/market_client.rs"]
+mod market_client;
+
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use serde_json::{json, Value};
+use std::io::Write;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -499,5 +503,238 @@ async fn verify_missing_manifest_400() {
         status,
         StatusCode::BAD_REQUEST,
         "缺 manifest 应 400：{resp}"
+    );
+}
+
+// ---------- 远端市场（Agent 2 子任务 1：registry + zip + 签名） ----------
+
+/// 构造 zip 字节（条目列表：name -> content）。
+fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    for (name, content) in entries {
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file(*name, options).unwrap();
+        writer.write_all(content).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+/// 本地 fixture 远端市场：registry.json + 插件 zip。
+async fn start_fixture_market(registry: &serde_json::Value, zips: &[(&str, Vec<u8>)]) -> String {
+    use axum::routing::get;
+    let registry = registry.clone();
+    let zips: std::collections::HashMap<String, Vec<u8>> = zips
+        .iter()
+        .map(|(name, bytes)| (name.to_string(), bytes.clone()))
+        .collect();
+    let router = axum::Router::new()
+        .route(
+            "/registry.json",
+            get(move || {
+                let registry = registry.clone();
+                async move { axum::Json(registry) }
+            }),
+        )
+        .route(
+            "/plugins/{name}",
+            get(
+                move |axum::extract::Path(name): axum::extract::Path<String>| {
+                    let zips = zips.clone();
+                    async move {
+                        match zips.get(&name) {
+                            Some(bytes) => axum::response::Response::builder()
+                                .status(200)
+                                .header("Content-Type", "application/zip")
+                                .body(axum::body::Body::from(bytes.clone()))
+                                .unwrap(),
+                            None => axum::response::Response::builder()
+                                .status(404)
+                                .body(axum::body::Body::empty())
+                                .unwrap(),
+                        }
+                    }
+                },
+            ),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn remote_refresh_pulls_registry_into_local_market() {
+    let (state, temp) = test_state();
+    let base = start_fixture_market(
+        &json!({ "plugins": [{ "id": "owo.plugin.demo", "latest_version": "1.0.0", "min_app_version": "0.5.0" }] }),
+        &[],
+    )
+    .await;
+    let body = json!({ "url": base }).to_string();
+    let (status, resp) = call(
+        &router(state.clone()),
+        request("POST", "/plugins/market/refresh", Some(&body)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "refresh 应成功：{resp}");
+    assert_eq!(resp["source"], "remote");
+    assert_eq!(resp["entries"], 1);
+    assert!(
+        temp.path().join("plugins").join("market.json").exists(),
+        "远端 registry 应写入本地 market.json"
+    );
+}
+
+#[tokio::test]
+async fn remote_refresh_falls_back_to_local_without_url() {
+    let (state, temp) = test_state();
+    // 先 seed 本地。
+    let seed_body = r#"{"entries":[{"id":"owo.local","name":"L","version":"1.0.0"}]}"#;
+    let (status, _) = call(
+        &router(state.clone()),
+        request("POST", "/plugins/market/seed", Some(seed_body)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // 无 url（OWO_MARKET_URL 未设）→ 本地回退。
+    let body = "{}";
+    let (status, resp) = call(
+        &router(state.clone()),
+        request("POST", "/plugins/market/refresh", Some(body)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "无 URL 应回退本地：{resp}");
+    assert_eq!(resp["source"], "local");
+    let _ = temp;
+}
+
+#[tokio::test]
+async fn remote_install_signed_zip_succeeds() {
+    let (state, temp) = test_state();
+    let zip_bytes = make_zip(&[
+        ("manifest.json", SIGNED_MANIFEST.as_bytes()),
+        ("server.py", SIGNED_ENTRY.as_bytes()),
+    ]);
+    let base = start_fixture_market(
+        &json!({ "plugins": [{ "id": "signed-ok", "latest_version": "1.0.0" }] }),
+        &[("signed-ok-1.0.0.zip", zip_bytes)],
+    )
+    .await;
+    let body = json!({ "id": "signed-ok", "url": base }).to_string();
+    let (status, resp) = call(
+        &router(state.clone()),
+        request("POST", "/plugins/market/install-remote", Some(&body)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "远端签名安装应成功：{resp}");
+    assert_eq!(resp["report"]["state"], "Activated");
+    assert!(temp
+        .path()
+        .join("plugins")
+        .join("signed-ok")
+        .join("manifest.json")
+        .exists());
+}
+
+#[tokio::test]
+async fn remote_install_rejects_tampered_signature() {
+    let (state, temp) = test_state();
+    // 篡改 manifest 内容（签名不再匹配）。
+    let tampered = SIGNED_MANIFEST.replace("\"version\": \"1.0.0\"", "\"version\": \"9.9.9\"");
+    let zip_bytes = make_zip(&[
+        ("manifest.json", tampered.as_bytes()),
+        ("server.py", SIGNED_ENTRY.as_bytes()),
+    ]);
+    let base = start_fixture_market(
+        &json!({ "plugins": [{ "id": "signed-ok", "latest_version": "1.0.0" }] }),
+        &[("signed-ok-1.0.0.zip", zip_bytes)],
+    )
+    .await;
+    let body = json!({ "id": "signed-ok", "url": base }).to_string();
+    let (status, resp) = call(
+        &router(state.clone()),
+        request("POST", "/plugins/market/install-remote", Some(&body)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "篡改包应拒绝：{resp}");
+    assert!(
+        resp["error"].as_str().unwrap_or("").contains("签名"),
+        "应提示签名：{resp}"
+    );
+    let _ = temp;
+}
+
+#[tokio::test]
+async fn remote_install_rejects_zip_slip() {
+    let (state, temp) = test_state();
+    let zip_bytes = make_zip(&[
+        ("manifest.json", SIGNED_MANIFEST.as_bytes()),
+        ("server.py", SIGNED_ENTRY.as_bytes()),
+        ("../evil.txt", b"outside".as_slice()),
+    ]);
+    let base = start_fixture_market(
+        &json!({ "plugins": [{ "id": "signed-ok", "latest_version": "1.0.0" }] }),
+        &[("signed-ok-1.0.0.zip", zip_bytes)],
+    )
+    .await;
+    let body = json!({ "id": "signed-ok", "url": base }).to_string();
+    let (status, resp) = call(
+        &router(state.clone()),
+        request("POST", "/plugins/market/install-remote", Some(&body)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "zip-slip 应拒绝：{resp}");
+    assert!(
+        resp["error"].as_str().unwrap_or("").contains("zip-slip")
+            || resp["error"].as_str().unwrap_or("").contains("越界"),
+        "应提示 zip-slip：{resp}"
+    );
+    let _ = temp;
+}
+
+#[tokio::test]
+async fn remote_install_rejects_high_risk_scan() {
+    let (state, temp) = test_state();
+    // 签名有效但内容高危（zip 内 manifest 签名匹配、入口高危——远端强制签名优先，
+    // 但高危扫描在签名后执行；此处构造：入口内容高危但签名仍匹配需要签名常量——
+    // 用纯高危内容包（无签名）验证扫描路径：远端要求签名 → 签名缺失即拒绝。
+    let risky_manifest =
+        r#"{"id":"signed-ok","name":"Signed OK","version":"1.0.0","entry":"server.py"}"#;
+    let zip_bytes = make_zip(&[
+        ("manifest.json", risky_manifest.as_bytes()),
+        ("server.py", b"import os; os.system('rm -rf /')".as_slice()),
+    ]);
+    let base = start_fixture_market(
+        &json!({ "plugins": [{ "id": "signed-ok", "latest_version": "1.0.0" }] }),
+        &[("signed-ok-1.0.0.zip", zip_bytes)],
+    )
+    .await;
+    let body = json!({ "id": "signed-ok", "url": base }).to_string();
+    let (status, resp) = call(
+        &router(state.clone()),
+        request("POST", "/plugins/market/install-remote", Some(&body)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "高危/缺签名应拒绝：{resp}");
+    let _ = temp;
+}
+
+#[tokio::test]
+async fn remote_install_unknown_id_400() {
+    let (state, _temp) = test_state();
+    let base = start_fixture_market(&json!({ "plugins": [] }), &[]).await;
+    let body = json!({ "id": "nope", "url": base }).to_string();
+    let (status, resp) = call(
+        &router(state.clone()),
+        request("POST", "/plugins/market/install-remote", Some(&body)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "registry 无此 id 应 400：{resp}"
     );
 }

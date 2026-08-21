@@ -1,4 +1,4 @@
-# 下载本地视觉模型（Ollama），默认 qwen2.5vl:3b（约 3.2GB）。
+﻿# 下载本地视觉模型（Ollama），默认 qwen2.5vl:3b（约 3.2GB）。
 # 用法：powershell -ExecutionPolicy Bypass -File scripts\download-vision-model.ps1 [-Model qwen2.5vl:3b]
 param(
     [string]$Model = "qwen2.5vl:3b"

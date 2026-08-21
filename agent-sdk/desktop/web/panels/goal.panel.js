@@ -67,6 +67,7 @@ window.OwoPanels.goal = (function () {
       '.owo-goal-badge.ok{background:#2e7d32}.owo-goal-badge.bad{background:#c62828}' +
       '.owo-goal-badge.warn{background:#ef6c00}' +
       '.owo-goal-cloudlog{height:140px;overflow:auto;background:#111;color:#7cff9b;font-family:monospace;font-size:12px;padding:6px}' +
+      '.owo-goal-output{max-height:120px;overflow:auto;white-space:pre-wrap;font-family:monospace;font-size:11px;background:#f6f8fa;padding:4px;margin-top:2px}' +
       '</style>' +
       '<div class="stack">' +
       '<div class="sub">编排目标（Goal/Plan）</div>' +
@@ -189,7 +190,7 @@ window.OwoPanels.goal = (function () {
           null,
           2
         )
-      : '[{"id":"a","worker":"echo","input":{"text":"A"}}]';
+      : '[{"id":"a","worker":"echo","input":{"text":"A"}},{"id":"b","worker":"sleep","input":{"ms":20},"deps":["a"]},{"id":"c","worker":"agent","input":{"prompt":"总结上一步","read_only":true},"deps":["b"]}]';
     var wavesHtml = waves
       ? waves
           .map(function (w, i) {
@@ -283,20 +284,41 @@ window.OwoPanels.goal = (function () {
         state.status = status;
         var table = document.getElementById("owo-goal-status");
         if (!table) return;
-        var records = (status && status.records) || {};
-        var rows = Object.keys(records)
-          .map(function (stepId) {
-            var r = records[stepId];
-            var badge = r.status === "Succeeded" ? "ok" : r.status === "Failed" || r.status === "Aborted" ? "bad" : "warn";
-            return (
-              "<tr><td>" + H.esc(stepId) + '</td><td><span class="owo-goal-badge ' + badge + '">' + H.esc(r.status) + "</span></td>" +
-              "<td>" + H.esc(r.attempts) + "</td><td>" + H.esc((r.output || "").slice(0, 60)) + "</td></tr>"
-            );
-          })
-          .join("");
+        // R5：优先用 steps（含 worker 名/截断输出/模型名），回退 records。
+        var steps = (status && status.steps) || null;
+        var rows = "";
+        if (steps && steps.length) {
+          rows = steps
+            .map(function (s) {
+              var badge = s.status === "Succeeded" ? "ok" : s.status === "Failed" || s.status === "Aborted" ? "bad" : "warn";
+              var worker = H.esc(s.worker || "");
+              var output = H.esc(s.output || "");
+              var folded = output.length > 60
+                ? '<details><summary>' + H.esc(output.slice(0, 60)) + "…</summary><div class=\"owo-goal-output\">" + output + "</div></details>"
+                : output;
+              var modelHint = (s.model && s.model !== "gpt-4.1-mini") ? " · " + H.esc(s.model) : "";
+              return (
+                "<tr><td>" + H.esc(s.step_id) + '</td><td><span class="owo-goal-badge ' + badge + '">' + H.esc(s.status) + "</span></td>" +
+                "<td>" + worker + modelHint + "</td><td>" + folded + "</td></tr>"
+              );
+            })
+            .join("");
+        } else {
+          var records = (status && status.records) || {};
+          rows = Object.keys(records)
+            .map(function (stepId) {
+              var r = records[stepId];
+              var badge = r.status === "Succeeded" ? "ok" : r.status === "Failed" || r.status === "Aborted" ? "bad" : "warn";
+              return (
+                "<tr><td>" + H.esc(stepId) + '</td><td><span class="owo-goal-badge ' + badge + '">' + H.esc(r.status) + "</span></td>" +
+                "<td></td><td>" + H.esc((r.output || "").slice(0, 60)) + "</td></tr>"
+              );
+            })
+            .join("");
+        }
         var goalStatus = (status && status.goal_status) || "";
-        table.innerHTML = "<tr><th>步骤</th><th>状态</th><th>尝试</th><th>输出</th></tr>" + rows +
-          '<tr><td colspan="4">goal: ' + H.esc(goalStatus) + " ｜ steps_taken: " + H.esc(status.steps_taken) + " ｜ replan: " + H.esc(status.replan_count) + "</td></tr>";
+        table.innerHTML = "<tr><th>步骤</th><th>状态</th><th>worker/模型</th><th>输出</th></tr>" + rows +
+          '<tr><td colspan="4">goal: ' + H.esc(goalStatus) + " · steps_taken: " + H.esc(status.steps_taken) + " · replan: " + H.esc(status.replan_count) + "</td></tr>";
       })
       .catch(function () {});
   }

@@ -1,4 +1,4 @@
-#![recursion_limit = "512"]
+#![recursion_limit = "1024"]
 
 //! OwO Agent SDK HTTP 服务（M1 + v0.4）：session/turn/permission/diff/revert/abort + SSE，
 //! 以及 v0.4 接口：context.snapshot / perception.subscribe / learn.* / skill.verify /
@@ -7,11 +7,43 @@
 //! 第四轮核心模块 HTTP/UI 集成：notes_api / plugin_market_api / workflow_api / goal_api /
 //! sse（云端任务进度 SSE 集线器）四个模块路由并入 build_router；cloud_task_submit 的
 //! ProgressSink 接 sse::sink(task_id) 使 /cloud/tasks/{id}/events 收到真实进度。
+//!
+//! 第五轮（R5）：workflow_api/goal_api 扩展（真实执行后端 + 人审 + run SSE + Agent Worker，
+//! 子模块 workflow_backend/agent_worker 在各自模块内声明）；plugin_market_api 扩展
+//! （远端市场 refresh/install-remote）+ team_api（团队技能包共享）+ market_client；
+//! eval_gate（eval 护栏）+ observability_api（/metrics 可观测性）；memory_graph_api
+//! （记忆图谱）+ intent_api（统一命令入口）。
+//!
+//! 第七轮（R7）：本地 API 安全边界（X03）——bearer token 鉴权（auth_token.rs，token 文件
+//! 用户级 ACL + /auth/token 公开引导）、CORS 显式 origin 白名单（webview + localhost）、
+//! 全局/每会话/敏感端点双令牌桶限流（rate_limit.rs，429 + Retry-After + 审计）；SSE
+//! 资源型路径（/…/events）因 EventSource 无法携带自定义头而豁免鉴权（只读遥测）。
+//!
+//! 第八轮（R8）：存储运维（backup.rs：/storage/backup|restore|export|clear，恢复前自动备份、
+//! zip-slip 防护、清空二次确认 + 完整性校验）与服务端韧性（shutdown.rs：全局并发 turn 上限、
+//! 优雅关闭 POST /server/shutdown + GET /server/status、CLI serve 强杀恢复 pid 文件）。
 
+mod auth_token;
+pub mod backup;
+mod error_codes;
+mod eval_gate;
+mod event_stream;
+mod fleet_api;
 mod goal_api;
+mod idempotency;
+mod intent_api;
+mod logging;
+mod market_client;
+mod memory_graph_api;
 mod notes_api;
+mod observability_api;
 mod plugin_market_api;
+mod rate_limit;
+pub mod shutdown;
+mod slo;
 mod sse;
+mod team_api;
+mod usage;
 mod workflow_api;
 
 /// 协议约束：新模块（notes_api 等）一律写全限定名 `owo_agent_server::AppState`，
@@ -53,7 +85,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
 pub struct AppState {
@@ -86,6 +118,12 @@ pub struct AppState {
     /// 云端执行队列（/cloud/* 路由；懒初始化，传输由环境变量决定）。
     /// tokio Mutex：异步 handler 内跨 await 持锁（std MutexGuard 非 Send）。
     pub cloud_queue: Arc<tokio::sync::Mutex<Option<owo_agent_core::cloud_exec::CloudTaskQueue>>>,
+    /// 本地 API bearer token（X03：启动生成/复用 + 用户级 ACL 文件）。
+    pub auth_token: Arc<auth_token::AuthToken>,
+    /// 全局/每会话/敏感端点 双令牌桶限流（X03）。
+    pub rate_limiter: Arc<rate_limit::RateLimiter>,
+    /// R8 服务端韧性：全局并发 turn 上限 + 优雅关闭信号（CLI serve 接线退出）。
+    pub shutdown_gate: Arc<shutdown::ShutdownGate>,
 }
 
 impl AppState {
@@ -98,6 +136,27 @@ impl AppState {
     ) -> Self {
         let settings = owo_agent_core::Settings::load(&workspace);
         settings.apply_usage_env();
+        // R8：用量预算接线（Agent 4 交付 usage）——单价/预算从环境变量注入，turn 入口硬熔断。
+        {
+            let usage_store = usage::global();
+            if let Some(price) = std::env::var("OWO_MODEL_INPUT_PRICE_PER_MTOK")
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok())
+            {
+                let output_price = std::env::var("OWO_MODEL_OUTPUT_PRICE_PER_MTOK")
+                    .ok()
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .unwrap_or(price);
+                usage_store.set_price_per_mtok(price.max(output_price));
+            }
+            if let Some(budget) = std::env::var("OWO_USAGE_COST_BUDGET_USD")
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| *value > 0.0)
+            {
+                usage_store.set_budget(usage::UsageDimension::Session, budget);
+            }
+        }
         let mut whitelist = Whitelist::default();
         for entry in settings.whitelist.clone() {
             whitelist.upsert(entry);
@@ -105,6 +164,10 @@ impl AppState {
         let elements = Arc::new(Mutex::new(owo_agent_core::ElementRegistry::new()));
         let mut agent = agent;
         agent.set_elements(elements.clone());
+        // X03：本地 API bearer token（启动生成/复用 + ACL；失败降级为内存 token）。
+        let auth_token = Arc::new(auth_token::AuthToken::load_or_create(&data_root));
+        let rate_limiter = Arc::new(rate_limit::RateLimiter::from_env());
+        let shutdown_gate = Arc::new(shutdown::ShutdownGate::from_env());
         Self {
             agent: Arc::new(agent),
             store: Arc::new(store),
@@ -138,16 +201,44 @@ impl AppState {
             cloud_queue: Arc::new(tokio::sync::Mutex::new(None)),
             data_root,
             elements,
+            auth_token,
+            rate_limiter,
+            shutdown_gate,
         }
     }
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    // R7：SSE→可观测性指标桥接（Agent 4 钩子）：/events/stream 的采样样本
+    // 转发到 observability_api（/metrics/runtime 呈现真实运行期数值）；
+    // SLO 报告探针注册（/metrics/slo 反映全局 SLO 状态）。幂等：重复调用仅替换。
+    event_stream::set_metrics_observer(Box::new(|sample| {
+        observability_api::ingest_metrics_sample(&sample.to_json());
+    }));
+    observability_api::register_slo_report_probe(std::sync::Arc::new(slo::report_global));
+    // R12（Agent 4 交付，主控接线）：用量/SLO 告警/SLO 周期报告探针注册，
+    // 使 /metrics/prometheus 用量指标、/metrics/slo/alerts、/metrics/slo/report 返回真实数据
+    // （此前仅注册 slo_report_probe，其余探针为未注册空 stub）。
+    observability_api::register_usage_probe(std::sync::Arc::new(|| usage::global().summary()));
+    observability_api::register_slo_alerts_probe(std::sync::Arc::new(|| slo::alerts_json(50)));
+    observability_api::register_slo_period_probe(std::sync::Arc::new(slo::report_period_global));
+    // R9 主控接线收尾：SLO 告警监听器转发到可靠事件流（/events/stream 收到 alert 事件）。
+    // 触发源为 `slo::check_alerts_global`（数据面）；未评估时不产生事件，无副作用。
+    slo::set_alert_listener(Box::new(|event| {
+        let trace_id = event.trace_id.clone();
+        let data = serde_json::to_string(event).unwrap_or_default();
+        event_stream::hub().publish_alert(data, trace_id);
+    }));
+    // 公开面：健康检查 / OpenAPI / token 引导（静态桌面工作台 fallback 挂最终合并面）。
+    let public = Router::new()
         .route("/health", get(health))
+        .route("/openapi.json", get(openapi_spec))
+        .route("/auth/token", get(auth_token::auth_token_bootstrap))
+        .with_state(state.clone());
+    // 保护面：全部业务 API（bearer token 鉴权 + 双令牌桶限流）。
+    let protected = Router::new()
         .route("/usage", get(usage_summary))
         .route("/audit", get(audit_list))
-        .route("/openapi.json", get(openapi_spec))
         .route("/session", post(create_session))
         .route("/session/{id}", get(get_session))
         .route("/session/{id}/turn", post(turn))
@@ -296,17 +387,137 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/cloud/tasks/{id}", get(cloud_task_status))
         .route("/cloud/tasks/{id}/result", get(cloud_task_result))
         .route("/cloud/tasks/{id}/cancel", post(cloud_task_cancel))
-        .fallback_service(ServeDir::new(desktop_web_dir()))
-        .layer(CorsLayer::permissive())
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        // R8 服务端韧性（并发上限/状态/优雅关闭）。
+        .route("/server/status", get(server_status))
+        .route("/server/shutdown", post(server_shutdown))
+        // R8 用量预算：加额恢复（硬熔断后 request_topup 解除停轮）。
+        .route("/usage/topup", post(usage_topup))
+        // 与 R6 同款对齐：先 with_state 定 S，再 merge 模块 router（Router<()> 经 From 转换）。
         .with_state(state.clone())
-        // 第四轮核心模块 HTTP/UI 集成：四个 lane 的 router 内部已 with_state，
-        // 返回 Router<()>（无缺失状态），故在此处（with_state 之后）merge 对齐。
         .merge(notes_api::router(state.clone()))
         .merge(plugin_market_api::router(state.clone()))
         .merge(workflow_api::router(state.clone()))
         .merge(goal_api::router(state.clone()))
         .merge(sse::router(state.clone()))
+        // R5 第五轮：eval 护栏 / 团队共享 / 可观测性 / 记忆图谱 / 统一命令入口。
+        // Agent 1 的审批（/workflow/run/{run_id}/approval）与 run SSE
+        // （/workflow/run/{run_id}/events）已自含在 workflow_api::router 内，无需新 merge。
+        .merge(team_api::router(state.clone()))
+        .merge(eval_gate::router(state.clone()))
+        .merge(observability_api::router(state.clone()))
+        .merge(memory_graph_api::router(state.clone()))
+        .merge(intent_api::router(state.clone()))
+        // R8 存储运维（备份/恢复/导出/清空）。
+        .merge(backup::router(state.clone()))
+        // R8 用量与成本归集（Agent 4 交付：usage_router 四维用量 + 预算硬熔断）。
+        .merge(usage::usage_router(state.clone()))
+        // R10 契约治理：JSON Schema 版本化发布（/schemas/*）+ 契约变更 RFC 登记见本文件契约区。
+        .route("/schemas", get(schemas_list))
+        .route("/schemas/{kind}/{version}", get(schema_get))
+        // R12（Agent 2 交付，主控挂载）：P2 双节点网格控制面 /fleet/*（节点注册/列表、
+        // 任务提交/查询/取消/SSE 事件、审批响应；模块内 FleetHub 单例，不占用 AppState）。
+        .merge(fleet_api::router(state.clone()))
+        // R6（Wave 1，Agent 4 交付）：可靠事件流 /events/stream（SSE 续传 + 背压）。
+        .merge(event_stream::router(state.clone()))
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        // 鉴权在最外层：未授权请求不进入限流，也不消耗令牌。
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_token::require_auth,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::enforce_rate_limit,
+        ));
+    // 公开面（含静态 fallback）与保护面合并：两者均为 Router<Arc<AppState>>。
+    // R8/R9：trace_id 贯穿置于最外层（public + protected + fallback 全覆盖）。
+    public
+        .merge(protected)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            trace_id_middleware,
+        ))
+        // R10：弃用策略——命中 DEPRECATED_ROUTES 附加 Deprecation 头。
+        .layer(axum::middleware::from_fn(deprecation_middleware))
+        .fallback_service(ServeDir::new(desktop_web_dir()))
+        .layer(cors_layer())
+}
+
+/// R8/R9：trace_id 请求贯穿——从 `X-Trace-Id` 头继承（不合法则生成），回填响应头，
+/// 设置全局 trace 上下文（Agent 4 logging：后台任务/SSE/指标可继承），
+/// 并落一条结构化访问日志（脱敏不落消息体）。
+async fn trace_id_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let inherited = request
+        .headers()
+        .get("x-trace-id")
+        .and_then(|value| value.to_str().ok());
+    let trace_id = logging::TraceId::from_header(inherited);
+    logging::set_current_trace_id(Some(trace_id.as_str()));
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let started = std::time::Instant::now();
+    let mut response = next.run(request).await;
+    if let Ok(value) = trace_id
+        .to_header_value()
+        .parse::<axum::http::HeaderValue>()
+    {
+        response.headers_mut().insert("x-trace-id", value);
+    }
+    logging::emit(
+        logging::Level::Info,
+        "http",
+        Some(trace_id.as_str()),
+        "request",
+        &[
+            ("method", serde_json::json!(method)),
+            ("path", serde_json::json!(path)),
+            ("status", serde_json::json!(response.status().as_u16())),
+            (
+                "duration_ms",
+                serde_json::json!(started.elapsed().as_millis() as u64),
+            ),
+        ],
+    );
+    logging::set_current_trace_id(None);
+    response
+}
+
+/// CORS：permissive → 显式 origin 白名单（webview 协议 + localhost/127.0.0.1 任意端口）。
+/// 跨源预检由浏览器强制；服务器侧仍以 bearer token 鉴权为准。
+fn cors_layer() -> CorsLayer {
+    use axum::http::Method;
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+            origin_allowed(origin.as_bytes())
+        }))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::ACCEPT,
+        ])
+        .max_age(std::time::Duration::from_secs(600))
+}
+
+/// origin 白名单判定：localhost/127.0.0.1 任意端口、Tauri webview
+/// （tauri://localhost、http(s)://tauri.localhost）。
+fn origin_allowed(origin: &[u8]) -> bool {
+    let Ok(origin) = std::str::from_utf8(origin) else {
+        return false;
+    };
+    let host_port = origin.split("://").nth(1).unwrap_or(origin);
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    host == "localhost" || host == "127.0.0.1" || host == "tauri.localhost"
 }
 
 /// 开发环境下的桌面工作台静态目录：`<repo>/agent-sdk/desktop/web`。
@@ -322,6 +533,8 @@ async fn openapi_spec() -> Json<Value> {
     Json(serde_json::json!({
         "openapi": "3.1.0",
         "info": { "title": "OwO Agent SDK API", "version": env!("CARGO_PKG_VERSION") },
+        // R10 契约治理：API 版本号（破坏性变更递增 minor；弃用期 ≥2 minor）。
+        "x-owo-api-version": OWO_API_VERSION,
         "servers": [{ "url": "http://127.0.0.1:4096" }],
         "paths": {
             "/health": { "get": { "operationId": "health", "responses": { "200": { "description": "ok" } } } },
@@ -478,7 +691,58 @@ async fn openapi_spec() -> Json<Value> {
             "/plugins/market/update": { "post": { "operationId": "pluginMarketUpdate", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string" }, "dir": { "type": "string" } }, "required": ["id", "dir"] } } } }, "responses": { "200": { "description": "plugin updated" } } } },
             "/plugins/market/uninstall": { "post": { "operationId": "pluginMarketUninstall", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } } } }, "responses": { "200": { "description": "plugin uninstalled" } } } },
             "/plugins/market/scan": { "get": { "operationId": "pluginMarketScan", "parameters": [{ "name": "dir", "in": "query", "required": false, "schema": { "type": "string" } }], "responses": { "200": { "description": "risk scan summary" } } } },
-            "/plugins/market/audit": { "get": { "operationId": "pluginMarketAudit", "parameters": [{ "name": "n", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "plugin market audit tail" } } } }
+            "/plugins/market/audit": { "get": { "operationId": "pluginMarketAudit", "parameters": [{ "name": "n", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "plugin market audit tail" } } } },
+            "/plugins/market/refresh": { "post": { "operationId": "pluginMarketRefresh", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "url": { "type": "string" } } } } } }, "responses": { "200": { "description": "market registry refreshed" } } } },
+            "/plugins/market/install-remote": { "post": { "operationId": "pluginMarketInstallRemote", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string" }, "version": { "type": "string" }, "url": { "type": "string" } }, "required": ["id"] } } } }, "responses": { "200": { "description": "remote plugin signed and installed" } } } },
+            "/team/export": { "post": { "operationId": "teamExport", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "type": { "type": "string" }, "id": { "type": "string" } }, "required": ["type", "id"] } } } }, "responses": { "200": { "description": "packaged skill bytes + manifest summary" } } } },
+            "/team/review": { "post": { "operationId": "teamReview", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "package_b64": { "type": "string" } }, "required": ["package_b64"] } } } }, "responses": { "200": { "description": "review findings without import" } } } },
+            "/team/import": { "post": { "operationId": "teamImport", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "package_b64": { "type": "string" } }, "required": ["package_b64"] } } } }, "responses": { "200": { "description": "imported or blocked with findings" } } } },
+            "/team/versions": { "get": { "operationId": "teamVersions", "parameters": [{ "name": "id", "in": "query", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "team package version history" } } } },
+            "/team/audit": { "get": { "operationId": "teamAudit", "responses": { "200": { "description": "team api audit tail" } } } },
+            "/eval/gate/run": { "post": { "operationId": "evalGateRun", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "suite": { "type": "string" }, "model": { "type": "string" } } } } } }, "responses": { "200": { "description": "eval report or skipped reason" } } } },
+            "/eval/gate/report": { "get": { "operationId": "evalGateReport", "responses": { "200": { "description": "latest eval report" } } } },
+            "/eval/gate/reports": { "get": { "operationId": "evalGateReports", "responses": { "200": { "description": "eval report history" } } } },
+            "/schemas": { "get": { "operationId": "schemasList", "responses": { "200": { "description": "JSON Schema 版本化发布索引（plugin-manifest/owskill/owflow）" } } } },
+            "/schemas/{kind}/{version}": { "get": { "operationId": "schemaGet", "parameters": [path_param("kind"), path_param("version")], "responses": { "200": { "description": "JSON Schema (draft-07)" } } } },
+            "/metrics/overview": { "get": { "operationId": "metricsOverview", "responses": { "200": { "description": "aggregated traces/tools/approvals metrics" } } } },
+            "/metrics/turns": { "get": { "operationId": "metricsTurns", "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "recent turn durations" } } } },
+            "/metrics/tools": { "get": { "operationId": "metricsTools", "responses": { "200": { "description": "tool call frequency and failure ranking" } } } },
+            "/metrics/health": { "get": { "operationId": "metricsHealth", "responses": { "200": { "description": "component health checklist" } } } },
+            "/memory/graph/entries": { "get": { "operationId": "memoryGraphEntries", "parameters": [{ "name": "app", "in": "query", "required": false, "schema": { "type": "string" } }, { "name": "from", "in": "query", "required": false, "schema": { "type": "string" } }, { "name": "to", "in": "query", "required": false, "schema": { "type": "string" } }, { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "structured memory entries" } } } },
+            "/memory/graph/timeline": { "get": { "operationId": "memoryGraphTimeline", "parameters": [{ "name": "from", "in": "query", "required": false, "schema": { "type": "string" } }, { "name": "to", "in": "query", "required": false, "schema": { "type": "string" } }], "responses": { "200": { "description": "time-bucketed timeline" } } } },
+            "/memory/graph/entities": { "get": { "operationId": "memoryGraphEntities", "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "entity/tag aggregation" } } } },
+            "/memory/graph/links": { "get": { "operationId": "memoryGraphLinks", "responses": { "200": { "description": "manual relation list" } } } },
+            "/memory/graph/link": { "post": { "operationId": "memoryGraphLinkAdd", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "a": { "type": "string" }, "b": { "type": "string" }, "relation": { "type": "string" }, "note": { "type": "string" } }, "required": ["a", "b", "relation"] } } } }, "responses": { "201": { "description": "relation added" } } }, "delete": { "operationId": "memoryGraphLinkDelete", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "a": { "type": "string" }, "b": { "type": "string" }, "relation": { "type": "string" } }, "required": ["a", "b", "relation"] } } } }, "responses": { "200": { "description": "relation removed" } } } },
+            "/memory/graph/recall": { "get": { "operationId": "memoryGraphRecall", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "top_k", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "recall with entity hits" } } } },
+            "/intent/parse": { "post": { "operationId": "intentParse", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] } } } }, "responses": { "200": { "description": "parsed intent with args and confidence" } } } },
+            "/command/run": { "post": { "operationId": "commandRun", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "mode": { "type": "string" }, "text": { "type": "string" }, "wav_b64": { "type": "string" } }, "required": ["mode"] } } } }, "responses": { "200": { "description": "intent routed to action with results" } } } },
+            "/command/audit": { "get": { "operationId": "commandAudit", "responses": { "200": { "description": "command execution audit tail" } } } },
+            "/workflow/run/{run_id}/approval": { "post": { "operationId": "workflowRunApproval", "parameters": [path_param("run_id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "decision": { "type": "string" } }, "required": ["decision"] } } } }, "responses": { "200": { "description": "approval decision recorded" } } } },
+            "/workflow/run/{run_id}/events": { "get": { "operationId": "workflowRunEvents", "parameters": [path_param("run_id")], "responses": { "200": { "description": "SSE run event stream" } } } },
+            "/events/stream": { "get": { "operationId": "eventsStream", "parameters": [{ "name": "last_event_id", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "reliable SSE event stream (Last-Event-ID resume + bounded backpressure)" } } } },
+            "/metrics/runtime": { "get": { "operationId": "metricsRuntime", "responses": { "200": { "description": "runtime process metrics" } } } },
+            "/metrics/slo": { "get": { "operationId": "metricsSlo", "responses": { "200": { "description": "SLO registry with error budget and attainment status" } } } },
+            "/metrics/slo/alerts": { "get": { "operationId": "metricsSloAlerts", "responses": { "200": { "description": "SLO alert rules and structured alert events" } } } },
+            "/metrics/slo/report": { "get": { "operationId": "metricsSloReport", "parameters": [{ "name": "days", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "SLO period report (JSON)" } } } },
+            "/metrics/prometheus": { "get": { "operationId": "metricsPrometheus", "responses": { "200": { "description": "Prometheus text exposition format" } } } },
+            "/auth/token": { "get": { "operationId": "authTokenBootstrap", "security": [], "responses": { "200": { "description": "public bootstrap token (same-origin pairing; CORS whitelist blocks cross-origin reads)" } } } },
+            "/storage/backup": { "post": { "operationId": "storageBackup", "responses": { "200": { "description": "zip backup (b64 + saved path)" } } } },
+            "/storage/restore": { "post": { "operationId": "storageRestore", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "archive_b64": { "type": "string" } }, "required": ["archive_b64"] } } } }, "responses": { "200": { "description": "restore result with pre-backup" } } } },
+            "/storage/export": { "post": { "operationId": "storageExport", "responses": { "200": { "description": "full standard JSON export" } } } },
+            "/storage/clear": { "post": { "operationId": "storageClear", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "confirm": { "type": "string", "enum": ["CLEAR_ALL"] } } } } } }, "responses": { "200": { "description": "cleared with integrity check" } } } },
+            "/server/status": { "get": { "operationId": "serverStatus", "responses": { "200": { "description": "concurrency gate + storage migration status" } } } },
+            "/server/shutdown": { "post": { "operationId": "serverShutdown", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "confirm": { "type": "boolean" } }, "required": ["confirm"] } } } }, "responses": { "200": { "description": "graceful shutdown requested" } } } },
+            "/usage/summary": { "get": { "operationId": "usageSummaryV2", "responses": { "200": { "description": "four-dimension usage aggregation + budget hard-stop state" } } } },
+            "/usage/records": { "get": { "operationId": "usageRecords", "parameters": [{ "name": "dimension", "in": "query", "required": false, "schema": { "type": "string", "enum": ["session", "workflow_run", "goal_step", "tool"] } }, { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "usage records filtered by dimension" } } } },
+            "/usage/report": { "get": { "operationId": "usageReport", "parameters": [{ "name": "days", "in": "query", "required": false, "schema": { "type": "integer" } }], "responses": { "200": { "description": "usage aggregation report over window (budget/soak friendly)" } } } },
+            "/usage/topup": { "post": { "operationId": "usageTopup", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "amount": { "type": "number" } } } } } }, "responses": { "200": { "description": "budget topped up and hard stop cleared" } } } },
+            "/fleet/nodes/register": { "post": { "operationId": "fleetNodesRegister", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "node_id": { "type": "string" }, "card": { "type": "object" } }, "required": ["node_id", "card"] } } } }, "responses": { "200": { "description": "node registered with lease" } } } },
+            "/fleet/nodes": { "get": { "operationId": "fleetNodesList", "responses": { "200": { "description": "node status snapshots" } } } },
+            "/fleet/tasks/submit": { "post": { "operationId": "fleetTasksSubmit", "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "task_id": { "type": "string" }, "worker": { "type": "string" }, "input": { "type": "object" }, "correlation_id": { "type": "string" }, "lineage": { "type": "array", "items": { "type": "string" } }, "approval_required": { "type": "boolean" } }, "required": ["task_id", "worker", "input"] } } } }, "responses": { "200": { "description": "task submitted with idempotency key" } } } },
+            "/fleet/tasks/{id}": { "get": { "operationId": "fleetTaskGet", "parameters": [path_param("id")], "responses": { "200": { "description": "task view with status and events" } } } },
+            "/fleet/tasks/{id}/cancel": { "post": { "operationId": "fleetTaskCancel", "parameters": [path_param("id")], "responses": { "200": { "description": "task cancelled" } } } },
+            "/fleet/tasks/{id}/events": { "get": { "operationId": "fleetTaskEvents", "parameters": [path_param("id"), { "name": "format", "in": "query", "required": false, "schema": { "type": "string", "enum": ["json"] } }], "responses": { "200": { "description": "SSE task event stream (history replay + live; ?format=json returns array)" } } } },
+            "/fleet/approvals/{id}/respond": { "post": { "operationId": "fleetApprovalRespond", "parameters": [path_param("id")], "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "decision": { "type": "string", "enum": ["approve", "reject"] }, "approved_by": { "type": "string" } }, "required": ["decision", "approved_by"] } } } }, "responses": { "200": { "description": "approval decision recorded" } } } }
         },
         "components": {
             "schemas": {
@@ -519,8 +783,12 @@ async fn openapi_spec() -> Json<Value> {
                     "properties": { "suite_id": { "type": "string" } },
                     "required": ["suite_id"]
                 }
+            },
+            "securitySchemes": {
+                "bearerAuth": { "type": "http", "scheme": "bearer" }
             }
-        }
+        },
+        "security": [{ "bearerAuth": [] }]
     }))
 }
 
@@ -613,7 +881,7 @@ async fn usage_summary(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 /// 把 Agent 内存审计日志中尚未落库的条目追加到存储，返回已 flush 数。
-fn flush_audit(state: &AppState) {
+pub fn flush_audit(state: &AppState) {
     let mut flushed = match state.audit_flushed.lock() {
         Ok(flushed) => flushed,
         Err(_) => return,
@@ -631,6 +899,94 @@ fn flush_audit(state: &AppState) {
             *flushed = next;
         }
     }
+}
+
+/// R8：服务运行状态（并发上限/在途/关闭中 + 存储只读降级提示）。
+async fn server_status(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({
+        "shutdown_gate": {
+            "max_concurrent_turns": state.shutdown_gate.max_concurrent(),
+            "active_turns": state.shutdown_gate.active_turns(),
+            "shutting_down": state.shutdown_gate.shutting_down(),
+        },
+        "storage": {
+            "read_only": state.store.is_read_only(),
+            "migration_warning": state.store.migration_warning(),
+        },
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct ShutdownRequest {
+    confirm: Option<bool>,
+}
+
+/// R8：优雅关闭入口（需二次确认；CLI serve 侧接线完成「停止接收→完成在途→flush→退出」）。
+async fn server_shutdown(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ShutdownRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    if request.confirm != Some(true) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "需要二次确认：{\"confirm\":true}".to_string(),
+        ));
+    }
+    let active = state.shutdown_gate.request_shutdown();
+    logging::warn(
+        "server",
+        None,
+        "收到优雅关闭请求（需二次确认）",
+        &[("active_turns", json!(active))],
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "shutting_down": true,
+        "active_turns": active,
+        "note": "已停止接收新回合；在途回合完成后服务将退出（CLI serve 接线）",
+    })))
+}
+
+/// R8：用量预算加额（解除硬熔断；主控接线 Agent 4 usage::request_topup）。
+#[derive(serde::Deserialize)]
+struct UsageTopupRequest {
+    /// 加额（美元）；不填则仅解除熔断。
+    amount: Option<f64>,
+}
+
+async fn usage_topup(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<UsageTopupRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let amount = request.amount.unwrap_or(0.0);
+    if !amount.is_finite() || amount < 0.0 {
+        // R10：错误码表统一响应体（validation/invalid_input → 400）。
+        let code = error_codes::ErrorCode::from_code("validation/invalid_input/not_retryable")
+            .unwrap_or_else(|_| error_codes::ErrorCode {
+                domain: "validation".into(),
+                reason: "invalid_input".into(),
+                retryable: false,
+                http_status: 400,
+                retry_after_ms: None,
+            });
+        return Err(api_error_response(
+            &code,
+            format!("amount 非法：{amount}（需 ≥0）"),
+        ));
+    }
+    usage::global().request_topup(usage::UsageDimension::Session, amount);
+    logging::info(
+        "usage",
+        None,
+        &format!("预算加额 ${amount:.2}，硬熔断已解除"),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "topup_usd": amount,
+        "hard_stopped": usage::global().is_hard_stopped(),
+        "note": "会话维度预算已加额，熔断解除（见 /usage/summary）",
+        "workspace": state.workspace.to_string_lossy(),
+    })))
 }
 
 async fn audit_list(
@@ -918,6 +1274,28 @@ async fn turn(
     let turn_guard = turn_lock
         .try_lock_owned()
         .map_err(|_| (StatusCode::CONFLICT, "该会话已有回合正在运行".to_string()))?;
+    // R8：全局并发 turn 上限 + 关闭中拒绝新回合。
+    let concurrency_permit = state.shutdown_gate.try_acquire_turn().map_err(|busy| {
+        // R10：错误码表接入（domain/reason/retryable 统一前缀，见 error_codes.rs）。
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("[gateway/unavailable/retryable] {busy}"),
+        )
+    })?;
+    // R8/R9：用量预算硬熔断（Agent 4 交付 usage；超限停轮，错误码贯穿，请求用户加额后恢复）。
+    if usage::global().check_budget() {
+        let reason = usage::global()
+            .hard_stop_reason()
+            .unwrap_or_else(|| "用量预算超限".to_string());
+        let (status, body) = usage::budget_exceeded_response(&reason);
+        let detail = body
+            .0
+            .get("detail")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&reason)
+            .to_string();
+        return Err((status, format!("[{}] {detail}", usage::BUDGET_ERROR_CODE)));
+    }
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
     let abort_flag = {
@@ -942,6 +1320,7 @@ async fn turn(
     let state_for_audit = Arc::clone(&state);
     tokio::spawn(async move {
         let _turn_guard = turn_guard;
+        let _concurrency_permit = concurrency_permit;
         let mut current = session;
         let stream_abort = Arc::clone(&abort_flag);
         let mut on_event = |event: &owo_agent_core::TurnEvent| {
@@ -990,9 +1369,23 @@ async fn turn(
                             ),
                         );
                     }
+                    // R8：用量与成本归集（Agent 4 交付 usage_router 的会话维度记录）。
+                    usage::global().record_tokens(
+                        usage::UsageDimension::Session,
+                        &current.id,
+                        Some(&current.id),
+                        outcome.usage.prompt_tokens,
+                        outcome.usage.completion_tokens,
+                    );
                 }
             }
             Err(error) => {
+                logging::error(
+                    "agent",
+                    None,
+                    "回合执行失败",
+                    &[("session_id", serde_json::json!(current.id))],
+                );
                 let _ = tx.send(to_event(SseEvent::Progress {
                     message: format!("turn failed: {error}"),
                 }));
@@ -3748,7 +4141,7 @@ async fn subagent_run(
             format!(
                 "{}子代理完成（{}ms）：{}",
                 if request.read_only {
-                    "鍙??鎺㈢储"
+                    "只读探索"
                 } else {
                     "通用"
                 },
@@ -3798,6 +4191,7 @@ async fn mcp_add(
         args: request.args.clone(),
         url: request.url.clone(),
         timeout_ms: None,
+        network_allowlist: Vec::new(),
     };
     let mut configs = load_mcp_configs(&state.data_root);
     if configs.iter().any(|existing| existing.name == name) {
@@ -4009,7 +4403,7 @@ async fn memory_recall(
         .get("q")
         .map(String::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "缂哄皯鏌ヨ?鍙傛暟 q".to_string()))?;
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "缺少查询参数 q".to_string()))?;
     let top_k = params
         .get("top_k")
         .and_then(|value| value.parse::<usize>().ok())
@@ -4481,6 +4875,211 @@ fn to_event(sse: SseEvent) -> Result<Event, Infallible> {
         SseEvent::TokenDelta { .. } => "token_delta",
         SseEvent::Compaction { .. } => "compaction",
     };
-    let data = serde_json::to_string(&sse).unwrap_or_else(|_| "{}".to_string());
+    // R10：SSE 事件统一携带协议版本 v（见 protocol::SSE_PROTOCOL_VERSION）。
+    let mut payload = serde_json::to_value(&sse).unwrap_or_else(|_| json!({}));
+    if let serde_json::Value::Object(map) = &mut payload {
+        map.insert(
+            "v".to_string(),
+            json!(owo_agent_protocol::SSE_PROTOCOL_VERSION),
+        );
+    }
+    let data = payload.to_string();
     Ok(Event::default().event(name).data(data))
+}
+
+// ===========================================================================
+// R10 契约治理：API 版本 / 弃用策略 / 错误码表 / JSON Schema 发布
+// ===========================================================================
+
+/// API 版本（`x-owo-api-version`）。破坏性变更递增 minor；弃用期 ≥2 个 minor。
+pub const OWO_API_VERSION: &str = "0.7";
+
+/// 已弃用路由登记：(路径前缀, since, until, 替代建议)。
+/// 命中时响应携带 `Deprecation` 头；当前无已弃用路由，破坏性变更前在此登记。
+const DEPRECATED_ROUTES: &[(&str, &str, &str, &str)] = &[];
+
+/// 路由/事件契约变更 RFC 登记（弃用策略落地：变更前登记 → 弃用期 ≥2 minor → 移除）：
+/// - 2026-08-17（R10）：SSE 事件 data 统一携带 `v` 字段（v=1；旧客户端帧缺 v 视为 v=0）。
+/// - 2026-08-17（R10）：新增 /schemas/{kind}/{version} 静态 JSON Schema 版本化发布。
+/// - 2026-08-17（R10）：错误响应统一为 {error:{code,message,retry_after_ms,domain,reason,retryable}}。
+#[allow(dead_code)]
+const CONTRACT_RFC_LOG: &str = "2026-08-17 R10: SSE v 字段 / schemas 发布 / 统一错误码";
+
+/// 统一错误响应（R10 错误码表接入 HTTP 层）：(status, {error:{code,message,retry_after_ms,...}})。
+fn api_error_response(
+    code: &error_codes::ErrorCode,
+    message: impl std::fmt::Display,
+) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::from_u16(code.http_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(json!({
+            "error": {
+                "code": format!(
+                    "{}/{}/{}",
+                    code.domain,
+                    code.reason,
+                    if code.retryable { "retryable" } else { "not_retryable" }
+                ),
+                "message": message.to_string(),
+                "domain": code.domain,
+                "reason": code.reason,
+                "retryable": code.retryable,
+                "retry_after_ms": code.retry_after_ms,
+            }
+        })),
+    )
+}
+
+/// 计算给定路径应附加的 `Deprecation` 头值（未命中返回 None）。
+/// 独立为纯函数供契约测试直接覆盖命中/未命中与头格式（R12 收尾）。
+pub fn deprecation_header_value_for(
+    routes: &[(&str, &str, &str, &str)],
+    path: &str,
+) -> Option<String> {
+    for (route, since, until, alternative) in routes {
+        if path.starts_with(route) {
+            return Some(format!(
+                "{route}: since {since}, until {until} (use {alternative})"
+            ));
+        }
+    }
+    None
+}
+
+/// Deprecation 中间件：命中 DEPRECATED_ROUTES 的请求附加 `Deprecation` 响应头。
+async fn deprecation_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = request.uri().path().to_string();
+    let mut response = next.run(request).await;
+    if let Some(value) = deprecation_header_value_for(DEPRECATED_ROUTES, &path) {
+        if let Ok(value) = value.parse::<axum::http::HeaderValue>() {
+            response.headers_mut().insert("Deprecation", value);
+        }
+    }
+    response
+}
+
+/// /schemas 列表（R10：JSON Schema 版本化发布索引）。
+async fn schemas_list() -> Json<Value> {
+    Json(json!({
+        "api_version": OWO_API_VERSION,
+        "schemas": {
+            "plugin-manifest": ["v1"],
+            "owskill": ["v1"],
+            "owflow": ["v1"],
+        },
+        "note": "GET /schemas/{kind}/{version} 获取 JSON Schema（draft-07）",
+    }))
+}
+
+const SCHEMA_PLUGIN_MANIFEST_V1: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://owo.local/schemas/plugin-manifest/v1",
+  "title": "OwO Plugin Manifest",
+  "type": "object",
+  "required": ["id", "name", "version"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+" },
+    "description": { "type": "string" },
+    "permissions": { "type": "array", "items": { "type": "string" } },
+    "mcp": { "type": "object" },
+    "min_app_version": { "type": "string" },
+    "entry": { "type": "string" },
+    "network_allowlist": { "type": "array", "items": { "type": "string" } },
+    "signature": { "type": "string" }
+  },
+  "additionalProperties": false
+}"#;
+
+const SCHEMA_OWSKILL_V1: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://owo.local/schemas/owskill/v1",
+  "title": "OwO Flow Skill Package (.owskill)",
+  "type": "object",
+  "required": ["manifest", "graph", "skill_md"],
+  "properties": {
+    "manifest": {
+      "type": "object",
+      "required": ["id", "name", "version", "min_app_version", "target_apps", "sensitivity"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+" },
+        "min_app_version": { "type": "string" },
+        "target_apps": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "permissions": { "type": "array", "items": { "type": "string" } },
+        "variables": { "type": "array", "items": { "type": "string" } },
+        "sensitivity": { "enum": ["none", "low", "medium", "high"] }
+      },
+      "additionalProperties": false
+    },
+    "graph": { "type": "object" },
+    "skill_md": { "type": "string" }
+  },
+  "additionalProperties": false
+}"#;
+
+const SCHEMA_OWFLOW_V1: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://owo.local/schemas/owflow/v1",
+  "title": "OwO Workflow Definition (.owflow)",
+  "type": "object",
+  "required": ["id", "name"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "type": "integer", "minimum": 1 },
+    "triggers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind"],
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "type": "object" }
+        }
+      }
+    },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["scope", "mode"],
+        "properties": {
+          "scope": { "type": "string" },
+          "mode": { "enum": ["allow", "ask", "deny"] }
+        }
+      }
+    },
+    "preconditions": { "type": "array", "items": { "type": "string" } },
+    "rollback_points": { "type": "array", "items": { "type": "string" } },
+    "max_steps": { "type": "integer", "minimum": 1 },
+    "subflow_depth_limit": { "type": "integer", "minimum": 1 },
+    "steps": { "type": "array", "items": { "type": "object" } }
+  },
+  "additionalProperties": false
+}"#;
+
+/// GET /schemas/{kind}/{version}：静态 JSON Schema（版本化发布）。
+async fn schema_get(
+    AxumPath((kind, version)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let raw = match (kind.as_str(), version.as_str()) {
+        ("plugin-manifest", "v1") => SCHEMA_PLUGIN_MANIFEST_V1,
+        ("owskill", "v1") => SCHEMA_OWSKILL_V1,
+        ("owflow", "v1") => SCHEMA_OWFLOW_V1,
+        _ => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("未知 schema：{kind}/{version}（GET /schemas 查看列表）"),
+            ))
+        }
+    };
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(value))
 }

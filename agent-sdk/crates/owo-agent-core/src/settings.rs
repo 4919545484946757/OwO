@@ -274,6 +274,27 @@ impl Settings {
         .map_err(|error| error.to_string())
     }
 
+    /// 加密落盘（R9）：`settings.json.owo-crypt` 信封加密；settings 仍零明文密钥
+    /// （api_key_ref 引用模型不变，加密的是配置整体）。非 Windows 显式失败。
+    pub fn save_encrypted(&self, workspace: &Path) -> Result<(), String> {
+        let path = workspace.join("settings.json.owo-crypt");
+        let content = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
+        crate::storage_crypto::encrypt_file_envelope(&path, &content)
+            .map_err(|error| error.to_string())
+    }
+
+    /// 加密读取（R9）：优先加密文件（解密读取，损坏显式报错不静默回退），
+    /// 无加密文件时回退明文 `settings.json`（兼容既有安装）。
+    pub fn load_encrypted(workspace: &Path) -> Result<Self, String> {
+        let encrypted = workspace.join("settings.json.owo-crypt");
+        if encrypted.exists() {
+            let content = crate::storage_crypto::decrypt_file_envelope(&encrypted)
+                .map_err(|error| format!("settings 解密失败：{error}"))?;
+            return serde_json::from_slice(&content).map_err(|error| error.to_string());
+        }
+        Ok(Self::load(workspace))
+    }
+
     /// 把用量预算配置写回环境变量（provider 每次调用前读取，即时生效）。
     /// None 字段清除对应环境变量，避免旧值残留。
     pub fn apply_usage_env(&self) {

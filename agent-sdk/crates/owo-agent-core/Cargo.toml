@@ -23,6 +23,10 @@ ed25519-dalek.workspace = true
 sha2.workspace = true
 zip = "2"
 png = "0.17"
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+hmac = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 ndarray = "0.17"

@@ -11,6 +11,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::oneshot;
 
+use crate::sandbox::{
+    default_manager as default_sandbox_manager, FileScope, IsolationLevel, JobGuard, NetworkPolicy,
+    SandboxCommand, SandboxPolicy,
+};
+
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 fn default_transport() -> String {
@@ -32,6 +37,10 @@ pub struct McpServerConfig {
     /// stdio 单次请求超时（毫秒）；未配置时读 OWO_MCP_STDIO_TIMEOUT_MS，再默认 15s。
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// 网络白名单（R9：HTTP 传输静态扫描 allowlist；非空时 URL host 必须命中，
+    /// 空 = 不校验，兼容既有配置）。
+    #[serde(default)]
+    pub network_allowlist: Vec<String>,
 }
 
 impl McpServerConfig {
@@ -43,6 +52,7 @@ impl McpServerConfig {
             args,
             url: None,
             timeout_ms: None,
+            network_allowlist: Vec::new(),
         }
     }
 
@@ -54,7 +64,22 @@ impl McpServerConfig {
             args: Vec::new(),
             url: Some(url.into()),
             timeout_ms: None,
+            network_allowlist: Vec::new(),
         }
+    }
+}
+
+/// URL host 提取（去协议/路径/端口，小写）。
+fn url_host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.split(':').next().unwrap_or("");
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_lowercase())
     }
 }
 
@@ -89,6 +114,8 @@ struct StdioTransport {
     stdin: ChildStdin,
     pending: Pending,
     next_id: AtomicU64,
+    /// 受限 Job 守卫：drop 时终止 job 内进程（防孤儿；与 kill_on_drop 双保险）。
+    _job_guard: Option<JobGuard>,
 }
 
 enum Transport {
@@ -119,6 +146,26 @@ impl McpClient {
                 .url
                 .clone()
                 .ok_or_else(|| "HTTP MCP 服务器缺少 url".to_string())?;
+            // 静态扫描 allowlist（R9）：network_allowlist 非空时 URL host 必须命中。
+            if !config.network_allowlist.is_empty() {
+                let host =
+                    url_host(&url).ok_or_else(|| format!("HTTP MCP URL 无法解析域名：{url}"))?;
+                let allowed = config.network_allowlist.iter().any(|entry| {
+                    let entry_host =
+                        if entry.starts_with("http://") || entry.starts_with("https://") {
+                            url_host(entry).unwrap_or_default()
+                        } else {
+                            entry.split(':').next().unwrap_or(entry).to_lowercase()
+                        };
+                    entry_host == host
+                });
+                if !allowed {
+                    return Err(format!(
+                        "HTTP MCP 服务器 {host} 不在网络白名单（{}），拒绝连接",
+                        config.network_allowlist.join("、")
+                    ));
+                }
+            }
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(60))
@@ -136,6 +183,33 @@ impl McpClient {
                 next_id: AtomicU64::new(1),
             }
         } else {
+            // 沙箱门卫（X01）：stdio 子进程统一经 SandboxManager 授权；
+            // 策略：只读系统作用域 + 回环网络 + Job 级隔离（可显式降级，审计记录）。
+            let policy = SandboxPolicy {
+                name: format!("mcp:{}", config.name),
+                file_scope: FileScope::WorkspacePlusReadonlySystem,
+                network_policy: NetworkPolicy::Loopback,
+                cpu_ms: None,
+                mem_mb: Some(1024),
+                ttl_secs: None,
+                require_isolation: IsolationLevel::JobOnly,
+                allow_degraded: true,
+                // MCP 服务器可能需要子进程（如插件调 powershell/node），放宽进程数上限。
+                active_process_limit: Some(32),
+                ..SandboxPolicy::default()
+            };
+            let sandbox_command =
+                SandboxCommand::new(&config.command, policy.clone()).with_args(config.args.clone());
+            let manager = default_sandbox_manager();
+            {
+                let mut manager = manager
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                manager.guard(&sandbox_command).map_err(|error| {
+                    format!("MCP 服务器被沙箱拒绝（{}）：{error}", config.command)
+                })?;
+            }
+
             let mut command = Command::new(&config.command);
             command
                 .args(&config.args)
@@ -147,6 +221,28 @@ impl McpClient {
             let mut child = command
                 .spawn()
                 .map_err(|error| format!("MCP 服务器启动失败（{}）：{error}", config.command))?;
+            // 启动后挂入受限 Job；挂接失败 = 显式拒绝（终止进程，不留非受限子进程）。
+            let mut job_guard: Option<JobGuard> = None;
+            if let Some(pid) = child.id() {
+                // attach 在同步块内完成（guard 不跨 await，保证 future Send）。
+                let attach_result = {
+                    let mut manager = manager
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    manager.attach_pid(&policy, pid)
+                };
+                match attach_result {
+                    Ok(guard) => job_guard = Some(guard),
+                    Err(error) => {
+                        let _ = child.kill().await;
+                        let _wait_status = child.wait().await;
+                        return Err(format!(
+                            "MCP 服务器无法挂入沙箱 Job（{}）：{error}",
+                            config.command
+                        ));
+                    }
+                }
+            }
             let stdin = child
                 .stdin
                 .take()
@@ -181,6 +277,7 @@ impl McpClient {
                 stdin,
                 pending,
                 next_id: AtomicU64::new(1),
+                _job_guard: job_guard,
             }))
         };
 

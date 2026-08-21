@@ -1,0 +1,64 @@
+# deny.toml — cargo-deny 供应链策略基线（Agent 2 / CI 基线）
+# 生效命令：cargo deny check （CI 经 taiki-e/install-action 提供最新二进制；本地可选安装）
+# 目标：许可证白名单、禁止项、来源约束、安全公告门禁一文件治理。
+
+[advisories]
+# 安全公告策略：任何已公开漏洞（vulnerability）或 unsound 一律拒绝；
+# 高危及以上由 severity-threshold 直接阻断；unmaintained / yanked 仅告警，便于过渡观察。
+vulnerability = "deny"
+unsound = "deny"
+severity-threshold = "high"
+unmaintained = "warn"
+yanked = "warn"
+
+# —— 过渡规则（禁止静默忽略高危）——
+# 1) 新发现漏洞会立即阻断 nightly/weekly 依赖审计；修复路径优先：升级到含修复补丁的 crate 版本。
+# 2) 仅当"上游已无修复版本、必须等待下游依赖升级"时，才允许在本文件 ignore 中新增条目。
+#    每条 ignore 必须附：RUSTSEC/GHSA 编号、影响范围、上游修复版本、负责人、计划修复日期。
+# 3) 禁止新增无说明的 ignore；ignore 条目由与主 Agent 分离的 security-review 评审合并。
+ignore = [
+  # 当前基线 2026-08-20：cargo audit 扫描 375 个依赖，0 个漏洞，0 个高/中危。
+  # 已知 1 条 unmaintained 告警：paste 1.0.15（经 ratatui 0.29 -> owo-agent-cli）RUSTSEC-2024-0436
+  # ，非漏洞、无高危；待 CLI 侧依赖升级（超出本 Agent 独占范围）后自动消失。此处不忽略、仅记录。
+]
+
+[bans]
+# 过渡期允许多版本共存（warn），达标后应收紧为 "deny"。
+multiple-versions = "warn"
+# 禁止通配符依赖，导入必须固定范围。
+wildcards = "deny"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# 只允许 crates.io 官方源；git/其他注册表依赖必须显式列入 allow-git / allow-registry。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = [
+  "https://github.com/rust-lang/crates.io-index",
+  "sparse+https://index.crates.io/",
+]
+allow-git = []
+
+[licenses]
+# 允许清单：与 workspace license 策略（GPL-3.0-only 项目 + 常见宽松许可）匹配。
+# 未识别许可证在过渡期仅告警（warn），合并前需法务/安全评审补白名单。
+unlicensed = "warn"
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-DFS-2016",
+  "GPL-3.0-only",
+  "GPL-3.0-or-later",
+  "MPL-2.0",
+  "Zlib",
+  "CC0-1.0",
+  "BSL-1.0",
+]
+confidence-threshold = 0.8
+# workspace 内部依赖视为私有包，不要求许可证文件。
+private = { ignore = true }

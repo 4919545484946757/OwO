@@ -1,0 +1,66 @@
+# Weekly 工作流（agent-sdk）：每周依赖审计 + 外部验收/真模型 eval（BYOK 感知）+ SBOM
+# 触发：schedule 每周一 03:00 UTC + workflow_dispatch
+# BYOK 规则：OPENAI_API_KEY 经 secrets 注入单个步骤 env；ci-weekly.ps1 在无凭据时对真模型
+# 类步骤显式 SKIP，日志与 artifact 不含密钥；无凭据不调用模型、不做外部验收。
+name: CI - Weekly (agent-sdk)
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  weekly:
+    name: weekly eval + audit + SBOM (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Rust toolchain 1.97.1
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: '1.97.1'
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './agent-sdk -> ./agent-sdk/target'
+
+      - name: Install cargo-audit（预编译二进制）
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Install cargo-deny（预编译二进制）
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Weekly 门禁（audit + deny + 外部验收/BYOK eval + SBOM）
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        working-directory: agent-sdk
+        run: |
+          & .\scripts\ci-weekly.ps1 -LogDir "$env:RUNNER_TEMP\ci-weekly-logs" -RequireSecurityTools
+          exit $LASTEXITCODE
+
+      - name: 上传 Weekly 结果（日志 + SBOM，仅公开数据）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-weekly-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/ci-weekly-logs
+            agent-sdk/dist/sbom.json
+          if-no-files-found: warn

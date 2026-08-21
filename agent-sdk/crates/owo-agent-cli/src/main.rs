@@ -22,7 +22,8 @@ use std::sync::{Arc, Mutex};
 
 mod tui;
 
-const DEFAULT_MODEL: &str = "deepseek-v4-flash";
+/// 千问 Token Plan 的默认通用文本/推理模型；可在工作台设置中覆盖。
+const DEFAULT_MODEL: &str = "qwen3.8-max";
 
 const AGENTS_TEMPLATE: &str = r#"# AGENTS.md
 
@@ -107,6 +108,146 @@ enum Commands {
     Bench(BenchArgs),
     /// 云端执行任务（M4a：提交/列表/状态/diff/应用/回滚）
     Cloud(CloudArgs),
+    /// 插件市场治理（M4b：catalog/check/install/update/uninstall/verify；本地离线模式）
+    Plugin(PluginArgs),
+    /// 审计链校验/导出（R6 audit_chain：verify 检出篡改，export 输出可离线校验的导出文件）
+    Audit(AuditArgs),
+    /// 数据备份（R9：zip 打包 index.db/settings/notes/skills/workflows，复用服务端备份逻辑）
+    Backup(BackupArgs),
+    /// 环境诊断（R10：数据目录/凭据/模型/端点/服务健康逐项检查）
+    Doctor(DoctorArgs),
+}
+
+/// `owo-agent backup`：本地一键备份（同 HTTP POST /storage/backup 的打包逻辑）。
+#[derive(Args)]
+struct BackupArgs {
+    /// 输出 zip 路径（缺省 <data>/backups/backup-<时间戳>.zip）
+    #[arg(long)]
+    out: Option<std::path::PathBuf>,
+}
+
+/// `owo-agent doctor`：环境健康诊断（数据目录/凭据/模型/端点/服务）。
+#[derive(Args)]
+struct DoctorArgs {
+    /// 数据目录（缺省 OWO_AGENT_DATA 或 <workspace>/.owo-data）
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// 目标工作区（缺省当前目录）
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+}
+
+/// `owo-agent audit`：verify|export（复用 core audit_chain::run_audit_cli）。
+#[derive(Args)]
+struct AuditArgs {
+    #[command(subcommand)]
+    action: AuditAction,
+    /// 审计链 HMAC 密钥（hex 字符串；缺省读 OWO_AUDIT_KEY 环境变量）
+    #[arg(long)]
+    key: Option<String>,
+    /// 审计链密钥文件路径（hex 文本；与 --key 二选一）
+    #[arg(long)]
+    key_file: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum AuditAction {
+    /// 校验导出文件的链完整性（检出任意篡改）
+    Verify { path: String },
+    /// 把已导出审计文件另存为 out（可离线分发校验）
+    Export { path: String, out: String },
+}
+
+/// 解析审计链密钥：--key → OWO_AUDIT_KEY → --key-file。缺省明确报错（不 panic）。
+fn audit_key(args: &AuditArgs) -> Result<Vec<u8>, String> {
+    let hex = if let Some(key) = &args.key {
+        Some(key.clone())
+    } else if let Ok(env) = std::env::var("OWO_AUDIT_KEY") {
+        if env.trim().is_empty() {
+            None
+        } else {
+            Some(env)
+        }
+    } else {
+        None
+    };
+    let hex = match hex {
+        Some(hex) => hex,
+        None => {
+            if let Some(path) = &args.key_file {
+                let content =
+                    std::fs::read_to_string(path).map_err(|e| format!("读取密钥文件失败：{e}"))?;
+                content.trim().to_string()
+            } else {
+                return Err(
+                    "缺少审计链密钥：请用 --key <hex> 或设置 OWO_AUDIT_KEY 环境变量".to_string(),
+                );
+            }
+        }
+    };
+    let hex = hex.trim();
+    if hex.len() % 2 != 0 {
+        return Err("密钥必须为偶数长度 hex 字符串".to_string());
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("密钥不是合法 hex：{e}"))
+        })
+        .collect()
+}
+
+/// `owo-agent audit verify|export` 命令入口。
+fn run_audit_cmd(args: AuditArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use owo_agent_core::audit_chain::{run_audit_cli, AuditCliCommand};
+    let key = audit_key(&args)?;
+    let command = match args.action {
+        AuditAction::Verify { path } => AuditCliCommand::Verify { path },
+        AuditAction::Export { path, out } => AuditCliCommand::Export { path, out },
+    };
+    let outcome = run_audit_cli(&command, &key)?;
+    match outcome {
+        owo_agent_core::audit_chain::AuditCliOutcome::VerifyOk { records, anchors } => {
+            println!("审计链校验通过：{records} 条记录 / {anchors} 个锚点");
+        }
+        owo_agent_core::audit_chain::AuditCliOutcome::Exported { out, records } => {
+            println!("审计导出完成：{out}（{records} 条记录，含链锚点）");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Args)]
+struct PluginArgs {
+    #[command(subcommand)]
+    action: PluginAction,
+    #[arg(long, default_value = ".")]
+    workspace: PathBuf,
+    /// 数据目录（默认 OWO_AGENT_DATA 或 %LOCALAPPDATA%\OwO\Agent）
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// 远端市场 URL（预留；当前实现为本地离线模式）
+    #[arg(long)]
+    url: Option<String>,
+    /// 离线模式（默认 true；不联网）
+    #[arg(long)]
+    offline: bool,
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    /// 列出本地插件目录
+    Catalog,
+    /// 校验插件目录（签名/扫描/版本）
+    Check { dir: PathBuf },
+    /// 校验插件目录（与 check 相同）
+    Verify { dir: PathBuf },
+    /// 安装插件目录
+    Install { dir: PathBuf },
+    /// 更新已安装插件（id 为已安装插件 id）
+    Update { id: String, dir: PathBuf },
+    /// 卸载插件
+    Uninstall { id: String },
 }
 
 #[derive(Args)]
@@ -258,7 +399,276 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Eval(args)) => run_async(run_eval(args))?,
         Some(Commands::Bench(args)) => run_async(run_bench(args))?,
         Some(Commands::Cloud(args)) => run_async(run_cloud(args))?,
+        Some(Commands::Plugin(args)) => run_plugin(args)?,
+        Some(Commands::Audit(args)) => run_audit_cmd(args)?,
+        Some(Commands::Backup(args)) => run_backup_cmd(args)?,
+        Some(Commands::Doctor(args)) => run_async(run_doctor_cmd(args))?,
     }
+    Ok(())
+}
+
+/// `owo-agent doctor`：逐项环境诊断，输出 [ok]/[warn]/[fail] 清单；任一 fail 非零退出。
+async fn run_doctor_cmd(args: DoctorArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = args
+        .workspace
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let data_root = if let Some(dir) = args.data_dir {
+        dir
+    } else if let Ok(env_dir) = std::env::var("OWO_AGENT_DATA") {
+        PathBuf::from(env_dir)
+    } else {
+        workspace.join(".owo-data")
+    };
+    let mut failures = 0usize;
+    let mut checks: Vec<(&str, bool, String)> = Vec::new();
+
+    // 1) 数据目录与关键存储文件。
+    let storage_ok = data_root.is_dir() || std::fs::create_dir_all(&data_root).is_ok();
+    checks.push(("数据目录", storage_ok, data_root.display().to_string()));
+    let index_db = data_root.join("index.db");
+    if index_db.exists() {
+        let openable = owo_agent_core::sqlite_store::SqliteSessionStore::open(&index_db).is_ok();
+        checks.push(("SQLite index.db", openable, index_db.display().to_string()));
+    } else {
+        checks.push((
+            "SQLite index.db",
+            true,
+            "未初始化（首次运行自动创建）".to_string(),
+        ));
+    }
+
+    // 2) 模型凭据与端点（缺省不视为失败，仅提示）。
+    match std::env::var("OPENAI_API_KEY") {
+        Ok(value) if !value.trim().is_empty() => {
+            checks.push(("OPENAI_API_KEY", true, "已配置".to_string()));
+        }
+        _ => {
+            let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_default();
+            let local = base_url.contains("127.0.0.1") || base_url.contains("localhost");
+            checks.push((
+                "OPENAI_API_KEY",
+                local,
+                if local {
+                    "本地端点免凭据".to_string()
+                } else {
+                    "未配置（云端模型不可用）".to_string()
+                },
+            ));
+        }
+    }
+
+    // 3) 模型网关韧性配置（R9：熔断/重试参数）。
+    let mut gateway_note = String::new();
+    for (name, default) in [
+        ("OWO_MODEL_RETRY_MAX", "3"),
+        ("OWO_MODEL_CIRCUIT_THRESHOLD", "5"),
+    ] {
+        match std::env::var(name) {
+            Ok(value) => gateway_note.push_str(&format!("{name}={value} ")),
+            Err(_) => gateway_note.push_str(&format!("{name}={default}（默认） ")),
+        }
+    }
+    checks.push(("模型网关韧性", true, gateway_note.trim().to_string()));
+
+    // 4) 服务健康（serve 冒烟：可选项）。
+    match std::env::var("OWO_DOCTOR_SERVE_PORT") {
+        Ok(port) => {
+            let url = format!("http://127.0.0.1:{port}/health");
+            let token = std::env::var("OWO_DOCTOR_SERVE_TOKEN").unwrap_or_default();
+            let response = reqwest::Client::new()
+                .get(&url)
+                .header("authorization", format!("Bearer {token}"))
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await;
+            match response {
+                Ok(resp) => {
+                    checks.push(("本地服务 /health", resp.status().is_success(), url));
+                }
+                Err(error) => {
+                    checks.push(("本地服务 /health", false, format!("{url}（{error}）")));
+                }
+            }
+        }
+        Err(_) => {
+            checks.push((
+                "本地服务 /health",
+                true,
+                "跳过（设置 OWO_DOCTOR_SERVE_PORT 启用）".to_string(),
+            ));
+        }
+    }
+
+    // 5) 备份目录可写（release 产物路径）。
+    let backups = data_root.join("backups");
+    let backups_ok = backups.is_dir() || std::fs::create_dir_all(&backups).is_ok();
+    checks.push(("备份目录", backups_ok, backups.display().to_string()));
+
+    for (name, ok, note) in &checks {
+        let mark = if *ok { "[ok]  " } else { "[fail]" };
+        println!("{mark} {name}：{note}");
+        if !*ok {
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        println!("诊断完成：{} 项失败", failures);
+        std::process::exit(1);
+    }
+    println!("诊断完成：全部通过");
+    Ok(())
+}
+
+/// `owo-agent backup`：复用服务端 backup.rs 打包逻辑，本地一键备份。
+fn run_backup_cmd(args: BackupArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = std::env::current_dir()?;
+    let root = ensure_data_root(None, &workspace);
+    let zip_bytes = owo_agent_server::backup::build_backup_zip(&root, &workspace)?;
+    let out = match args.out {
+        Some(path) => path,
+        None => {
+            let dir = root.join("backups");
+            std::fs::create_dir_all(&dir)?;
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default();
+            dir.join(format!("backup-{stamp}.zip"))
+        }
+    };
+    std::fs::write(&out, &zip_bytes)?;
+    println!("备份完成：{}（{} 字节）", out.display(), zip_bytes.len());
+    Ok(())
+}
+
+/// 插件市场治理（本地离线模式）：catalog/check/install/update/uninstall/verify。
+/// 签名/扫描/回滚由 core PluginManager 提供；远端拉取走 HTTP 面（POST /plugins/market/refresh）。
+fn run_plugin(args: PluginArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use owo_agent_core::plugin::{
+        discover_plugins, scan_plugin_for_risks, PluginManager, PluginManifest,
+    };
+
+    let workspace = args.workspace;
+    let data_root = if let Some(dir) = args.data_dir {
+        dir
+    } else if let Ok(env_dir) = std::env::var("OWO_AGENT_DATA") {
+        std::path::PathBuf::from(env_dir)
+    } else if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        std::path::PathBuf::from(local).join("OwO").join("Agent")
+    } else {
+        std::path::PathBuf::from("data")
+    };
+    let app_version = env!("CARGO_PKG_VERSION").to_string();
+    let _ = &args.url; // 远端 URL 预留：当前为本地离线模式（--offline 恒真）。
+    let _ = args.offline;
+
+    match args.action {
+        PluginAction::Catalog => {
+            let plugins = discover_plugins(&workspace, &data_root);
+            println!(
+                "本地插件目录（workspace={} data={}）：",
+                workspace.display(),
+                data_root.display()
+            );
+            for (path, manifest) in &plugins {
+                let base = path.parent().unwrap_or(path);
+                let manifest_content = std::fs::read_to_string(path).unwrap_or_default();
+                let entry_content = manifest
+                    .entry
+                    .as_ref()
+                    .and_then(|entry| std::fs::read_to_string(base.join(entry)).ok());
+                let risks = scan_plugin_for_risks(
+                    &manifest_content,
+                    entry_content.as_deref(),
+                    &manifest.network_allowlist,
+                );
+                let risk = if risks.is_empty() { "clean" } else { "RISK" };
+                println!(
+                    "  {} v{}（{}）[{}]{}",
+                    manifest.id,
+                    manifest.version,
+                    manifest.name,
+                    risk,
+                    if risks.is_empty() {
+                        String::new()
+                    } else {
+                        format!("：{}", risks.join("；"))
+                    }
+                );
+            }
+            if plugins.is_empty() {
+                println!("  （无插件）");
+            }
+        }
+        PluginAction::Check { dir } | PluginAction::Verify { dir } => {
+            let manager = PluginManager::new(data_root.clone(), app_version);
+            match manager.verify_plugin_dir(&dir) {
+                Ok(report) => {
+                    println!(
+                        "校验通过：{} v{}（{:?}）",
+                        report.id, report.version, report.state
+                    );
+                    for line in report.audit {
+                        println!("  {line}");
+                    }
+                }
+                Err(error) => {
+                    println!("校验失败：{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        PluginAction::Install { dir } => {
+            let manager = PluginManager::new(data_root.clone(), app_version);
+            match manager.install(&dir) {
+                Ok(report) => {
+                    println!(
+                        "安装完成：{} v{}（{:?}）",
+                        report.id, report.version, report.state
+                    );
+                    for line in report.audit {
+                        println!("  {line}");
+                    }
+                }
+                Err(error) => {
+                    println!("安装失败：{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        PluginAction::Update { id, dir } => {
+            let manager = PluginManager::new(data_root.clone(), app_version);
+            let backup = data_root.join("plugins").join("backups");
+            match manager.update(&dir, &backup) {
+                Ok(report) => {
+                    println!("更新完成：{id} → v{}（{:?}）", report.version, report.state);
+                    for line in report.audit {
+                        println!("  {line}");
+                    }
+                }
+                Err(error) => {
+                    println!("更新失败（已回滚或旧版保留）：{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        PluginAction::Uninstall { id } => {
+            let manager = PluginManager::new(data_root.clone(), app_version);
+            match manager.uninstall(&id) {
+                Ok(audit_lines) => {
+                    println!("已卸载 {id}");
+                    for line in audit_lines {
+                        println!("  {line}");
+                    }
+                }
+                Err(error) => {
+                    println!("卸载失败：{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+    let _ = PluginManifest::load; // 类型引用保活（防未使用告警变体依赖）。
     Ok(())
 }
 
@@ -385,7 +795,10 @@ async fn run_eval(args: EvalArgs) -> Result<(), Box<dyn std::error::Error>> {
     let model = resolve_model(args.model, None);
     let mut config = OpenAiCompatibleConfig::from_env()?;
     config.model = model.clone();
-    let provider = std::sync::Arc::new(OpenAiCompatibleProvider::new(config)?);
+    // R9：模型网关韧性（重试/熔断/failover）。
+    let provider = std::sync::Arc::new(owo_agent_core::gateway::ResilientProvider::from_config(
+        config,
+    )?);
     let suite = match args.suite {
         Some(path) => {
             eval_suite_path(&path).ok_or_else(|| format!("评估套件解析失败：{}", path.display()))?
@@ -506,7 +919,10 @@ fn build_agent_with_mcp(
 ) -> Result<Agent, Box<dyn std::error::Error>> {
     let mut config = OpenAiCompatibleConfig::from_env()?;
     config.model = model.to_string();
-    let provider = Arc::new(OpenAiCompatibleProvider::new(config)?);
+    // R9：模型网关韧性（重试/退避/熔断/failover 强→次选云→本地）。
+    let provider = Arc::new(owo_agent_core::gateway::ResilientProvider::from_config(
+        config,
+    )?);
     let mut policy = if read_only {
         Policy::read_only(workspace.to_path_buf())
     } else {
@@ -738,6 +1154,31 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         root.clone(),
         workspace.clone(),
     ));
+    // R8：强杀恢复——陈旧 pid 文件清理；检测到存活实例则显式拒绝双开。
+    if let Some(recovery) = owo_agent_server::shutdown::recover_force_kill(&root)? {
+        tracing::warn!(
+            "检测到强杀残留（pid={:?}），已清理 pid 文件并恢复干净状态",
+            recovery.stale_pid
+        );
+    }
+    let _pid_file = owo_agent_server::shutdown::PidFile::create(&root)?;
+    // R8：优雅关闭接线——停止接收 → 完成在途 → flush 审计 → 清理 pid → 退出。
+    let shutdown_state = Arc::clone(&state);
+    let shutdown_root = root.clone();
+    tokio::spawn(async move {
+        let gate = Arc::clone(&shutdown_state.shutdown_gate);
+        gate.wait_shutdown_request().await;
+        tracing::info!("收到关闭请求：等待在途回合完成（上限 30s）");
+        let remaining = gate.await_drain(std::time::Duration::from_secs(30)).await;
+        if remaining > 0 {
+            tracing::warn!("仍有 {remaining} 个在途回合超时未完成，强制执行退出");
+        }
+        owo_agent_server::flush_audit(&shutdown_state);
+        // process::exit 不执行 Drop，显式清理 pid 文件（强杀残留仍由 recover_force_kill 兜底）。
+        let _ = std::fs::remove_file(shutdown_root.join("server.pid"));
+        tracing::info!("审计已 flush，服务退出");
+        std::process::exit(0);
+    });
     // 启动时同步插件禁用状态到 Agent 工具前缀（热卸载重启后仍生效）。
     if let Ok(plugin_state) = state.plugin_state.lock() {
         for id in plugin_state.disabled_ids() {
@@ -2024,5 +2465,47 @@ impl Approver for ConsoleApprover {
             }
         }
         Decision::Deny
+    }
+}
+
+#[cfg(test)]
+mod audit_cli_tests {
+    use super::audit_key;
+    use super::AuditAction;
+    use super::AuditArgs;
+
+    fn args(action: AuditAction, key: Option<String>, key_file: Option<String>) -> AuditArgs {
+        AuditArgs {
+            action,
+            key,
+            key_file,
+        }
+    }
+
+    #[test]
+    fn audit_key_from_flag_hex_decodes() {
+        let a = args(
+            AuditAction::Verify { path: "x".into() },
+            Some("00ff10ab".into()),
+            None,
+        );
+        assert_eq!(audit_key(&a).unwrap(), vec![0x00, 0xff, 0x10, 0xab]);
+    }
+
+    #[test]
+    fn audit_key_missing_is_explicit_error() {
+        let a = args(AuditAction::Verify { path: "x".into() }, None, None);
+        let err = audit_key(&a).unwrap_err();
+        assert!(err.contains("OWO_AUDIT_KEY"), "缺密钥应明确报错：{err}");
+    }
+
+    #[test]
+    fn audit_key_odd_hex_rejected() {
+        let a = args(
+            AuditAction::Verify { path: "x".into() },
+            Some("abc".into()),
+            None,
+        );
+        assert!(audit_key(&a).is_err());
     }
 }

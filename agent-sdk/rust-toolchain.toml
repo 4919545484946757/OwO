@@ -1,0 +1,16 @@
+# 固定 Rust 工具链（CI 与本地一致；Agent 2 / CI 基线）
+# 固定 Rust/Cargo 1.97.1。当前 Cargo.lock 含要求 Cargo edition2024 的依赖，1.81.0
+# 无法解析。升级或固定版本前必须完成 lockfile 兼容性验证和全量门禁。
+[toolchain]
+channel = "1.97.1"
+profile = "default"
+components = [
+  "rustfmt",
+  "clippy",
+  "rust-src",
+  "llvm-tools-preview",
+]
+targets = [
+  "x86_64-pc-windows-msvc",
+  "x86_64-unknown-linux-gnu",
+]

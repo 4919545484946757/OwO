@@ -8,13 +8,27 @@
 </head>
 <body>
   <header>
-    <h1>OwO Agent 工作台 <span class="tag">本地优先</span></h1>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">O</span>
+      <h1>OwO <span>Agent</span></h1>
+      <span class="tag">本地优先</span>
+    </div>
+    <div class="project-label"><span class="project-dot"></span>当前工作区 <strong>本地项目</strong></div>
     <div class="header-right">
+      <button id="themeToggle" class="theme-toggle" type="button" title="切换深色主题" aria-label="切换深色主题">☾</button>
       <span id="health" class="pill">连接中…</span>
       <span id="permission" class="pill">感知：—</span>
       <span id="learnState" class="pill">学习：—</span>
     </div>
   </header>
+
+  <nav id="appRail" aria-label="工作台导航">
+    <button class="rail-button active" type="button" title="会话" data-rail-target="sessions"><span>☰</span>会话</button>
+    <button class="rail-button" type="button" title="项目" data-rail-target="workspace"><span>⌘</span>项目</button>
+    <button class="rail-button" type="button" title="工具中心" data-rail-target="tools"><span>◈</span>工具</button>
+    <span class="rail-spacer"></span>
+    <button class="rail-button" type="button" title="设置" data-rail-target="settings"><span>⚙</span>设置</button>
+  </nav>
 
   <aside id="sidebar">
     <section>
@@ -27,6 +41,7 @@
       <label class="inline"><input type="checkbox" id="showArchived"> 显示归档</label>
       <ul id="sessionList" class="list"></ul>
     </section>
+    <button id="toggleTools" class="tools-toggle" type="button" aria-expanded="false">显示工具与设置</button>
     <section>
       <h2>技能中心</h2>
       <ul id="skillList" class="list"></ul>
@@ -160,18 +175,51 @@
     </section>
     <section>
       <h2>设置与诊断</h2>
+      <div class="settings-page-title">
+        <div><strong>模型与连接</strong><span>管理当前工作区的模型与运行偏好</span></div>
+        <span class="connection-summary" id="connectionSummary">检查中…</span>
+      </div>
+      <div class="settings-grid">
+        <label class="field-label">模型
+          <select id="settingsModel">
+            <option value="qwen3.8-max">qwen3.8-max</option>
+            <option value="qwen3.7-plus">qwen3.7-plus</option>
+            <option value="qwen3.7-max">qwen3.7-max</option>
+            <option value="qwen3.6-flash">qwen3.6-flash</option>
+            <option value="deepseek-v4-pro-0813">deepseek-v4-pro-0813</option>
+            <option value="deepseek-v4-flash-0731">deepseek-v4-flash-0731</option>
+            <option value="glm-5.2">glm-5.2</option>
+          </select>
+        </label>
+        <div class="settings-card"><span>提供商</span><strong>千问 Token Plan</strong><small>OpenAI 兼容接口</small></div>
+        <div class="settings-card"><span>密钥</span><strong>系统环境变量</strong><small>不写入工作区或设置文件</small></div>
+      </div>
       <div class="inline">
         <span>云端模型（数据出境）</span>
         <button id="egressToggle">…</button>
       </div>
       <h3>模型用量与预算</h3>
       <div id="usagePanel" class="sub">—</div>
-      <pre id="settingsPreview">—</pre>
-      <textarea id="settingsEditor" rows="10" spellcheck="false" placeholder='{"model": "...", "stt": {...}, ...}'></textarea>
-      <button id="settingsSave">保存设置（JSON）</button>
+      <pre id="settingsPreview" class="json-fallback">—</pre>
+      <textarea id="settingsEditor" class="json-fallback" rows="10" spellcheck="false" placeholder='{"model": "...", "stt": {...}, ...}'></textarea>
+      <button id="settingsSave" class="primary">保存模型与设置</button>
+      <h3>存储与恢复</h3>
+      <div id="serverStatusPanel" class="sub">—</div>
+      <div class="inline">
+        <button id="storageBackupBtn" title="zip 打包 index.db/skills/workflows/notes/settings">备份</button>
+        <button id="storageExportBtn" title="全量标准 JSON 导出">导出</button>
+        <button id="storageRestoreBtn" title="选择备份 zip 文件恢复（恢复前自动备份）">恢复…</button>
+        <input type="file" id="storageRestoreFile" accept=".zip,application/zip" hidden>
+      </div>
+      <pre id="storageResult" class="sub">—</pre>
+      <div class="inline">
+        <button id="storageClearBtn" class="danger" title="二次确认后清空会话/审计/笔记/记忆/自动化">一键清空数据…</button>
+      </div>
       <a href="openapi.json" target="_blank" rel="noopener">OpenAPI 3.1</a>
+      <a href="privacy.md" target="_blank" rel="noopener">隐私声明（数据字典/一键关闭/保留期）</a>
     </section>
   </aside>
+  <div id="sidebarResize" class="resize-handle" role="separator" aria-label="调整会话栏宽度"></div>
 
   <main>
     <div id="contextBar" class="hidden" title="会话上下文状态">
@@ -187,13 +235,18 @@
     <form id="chatForm">
       <div id="attachmentChips" class="inline"></div>
       <input type="file" id="attachmentInput" multiple hidden>
-      <button type="button" id="attachmentBtn" title="添加附件（图片/文件）">📎</button>
       <textarea id="prompt" rows="3" placeholder="输入任务，Enter 发送（Shift+Enter 换行）；/new 建新会话"></textarea>
-      <button type="button" id="abortBtn" title="中断当前回合">⏹</button>
-      <button type="button" id="micBtn" title="语音输入（系统语音服务）">🎤</button>
-      <button type="submit" class="primary">发送</button>
+      <div class="prompt-toolbar">
+        <div class="prompt-tools">
+          <button type="button" id="attachmentBtn" title="添加附件（图片/文件）">📎 添加文件</button>
+          <button type="button" id="micBtn" title="语音输入（系统语音服务）">🎤 语音</button>
+          <button type="button" id="abortBtn" title="中断当前回合">⏹ 停止</button>
+        </div>
+        <button type="submit" class="primary send-button">发送 <span>Ctrl ↵</span></button>
+      </div>
     </form>
   </main>
+  <div id="rightResize" class="resize-handle" role="separator" aria-label="调整检查器宽度"></div>
 
   <aside id="right">
     <section>
@@ -242,6 +295,12 @@
   <script src="panels/plugin-market.panel.js"></script>
   <script src="panels/workflow.panel.js"></script>
   <script src="panels/goal.panel.js"></script>
+  <script src="panels/team.panel.js"></script>
+  <script src="panels/eval.panel.js"></script>
+  <script src="panels/observability.panel.js"></script>
+  <script src="panels/memory.panel.js"></script>
+  <script src="panels/command.panel.js"></script>
+  <script src="panels/fleet.panel.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

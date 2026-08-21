@@ -775,3 +775,67 @@ M2 验收项"trace 可回放"补齐 HTTP 面；桌面端 P0 补会话导出入�
 | 质量门禁 | ✅ | cargo test --workspace 487 项全绿（较上轮 429 新增 58：notes 13 + plugin_market 9 + workflow 18 + goal 12 + sse 6）；cargo fmt --all -- --check 干净；cargo clippy --workspace --all-targets -D warnings 0 警告；node --check 0 错误；serve 冒烟（/notes /workflow /goal /plugins/market /openapi.json / 桌面页/面板脚本）+ SSE 端到端帧验证通过 |
 
 说明：四个 lane 面板依赖后端同源托管（build_router permissive CORS）；run 级进度 SSE 与真实 ActionBackend（工作流）留待后续轮次；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。
+
+## 五十五、第五轮：R5 四线收尾 + 阶段 0 门禁恢复（2026-08-16）
+
+按综合技术文档 §7 阶段 0 收尾：R5 并行交付的 5 个路由模块（eval_gate/team_api/observability_api/memory_graph_api/intent_api）全部挂载并复核 market_client/workflow_backend/agent_worker 接线；恢复全量门禁绿色，R5 交付物进入主链路。协调协议 `.coord6/`（Agent 1 主控收尾 + Agent 2/3/4 并行：多 Agent P0 原语、安全硬化 Wave 1、韧性 Wave 1）。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| R5 路由挂载 | ✅ | lib.rs 合并 `team_api/eval_gate/observability_api/memory_graph_api/intent_api` 五个 router（此前已并入 workflow_api/goal_api/plugin_market_api/notes_api/sse）；复核 market_client（plugin_market_api 经 `super::` 引用）、workflow_backend（workflow_api 内 `#[path]` 子模块）、agent_worker（goal_api 内子模块 + Worker 实现）接线完整；另接线 R6 Agent 4 交付的 event_stream（`/events/stream`，SSE 续传 + 背压） |
+| 路由面契约测试 | ✅ 3/3（4.6s） | route_contract_tests：`POST /team/export → 404`（资源缺失，白名单）、`/eval/gate/run` sample_body 改传不存在套件（防止真实凭据环境下触发分钟级真实 eval 挂起）、`/session/{id}/permission/{request_id}` sample_body 修正为 `{"allow":true}`；每请求加 60s 超时（SSE/慢路径挂起即报错指明路径，不再拖垮测试）；新增"模块路由漏登记"扫描（全部 src/*.rs 的 .route 提取）与"快照⇄served spec 路径双向一致"断言（抓出 2 条未登记路径：/events/stream、/metrics/runtime，已补） |
+| OpenAPI 同步 | ✅ | openapi_spec 补 `/events/stream`（last_event_id 查询参数）、`/metrics/runtime`；clients/ts/openapi.json 快照同步（171→173 路径）；schema.d.ts 经 `npm run generate:local` 重新生成（新增 eventsStream/metricsRuntime operation）；TS SDK typecheck 0 错误、test:unit 3/3 |
+| 桌面面板挂载 | ✅ | index.html 引入 9 个面板脚本（notes/plugin-market/workflow/goal/team/eval/observability/memory/command）；app.js PANEL_ORDER 全部注册、helpers 注入、按序 mount；node --check app.js + 10 面板 0 错误；serve 冒烟 9 个面板脚本与桌面页全部 200 |
+| CLI 复核 | ✅ | `cargo check -p owo-agent-cli` 通过；`owo-agent plugin catalog/check/verify/install` 子命令完整（sign/scan 复用 core PluginManager，HTTP 面 /plugins/market/refresh）；无编译问题需修复 |
+| 编码修复 | ✅ | lib.rs 2 处历史 GBK 双重编码损坏修复（"鍙??鎺㈢储"→"只读探索"、"缂哄皯鏌ヨ?鍙傛暟 q"→"缺少查询参数 q"）；全量 .rs/.js/.json/.html 扫描无 mojibake；event_stream.rs 主控接线后补模块级 allow(dead_code)（与 team_api.rs 同款，测试面符号说明入注释）；gate.ps1 补 UTF-8 BOM（PS 5.1 无 BOM 按 ANSI 解码导致解析失败，R5 交付脚本首次可运行） |
+| 全量门禁 | ✅ | `cargo test --workspace` 691 项全绿（较上轮 487 新增 204：core lib 265、fleet 13、goal_plan 29、sandbox 19、credentials 11、audit_chain 20、event_stream 12、idempotency 7、error_codes 8、observability 13、team 10、eval_gate 6、intent 11、memory_graph 9、workflow_api 33、CLI 7…）；`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 0 警告；`cargo build --workspace` 通过；gate.ps1 4/4（fmt/clippy/server-tests/node）；node --check 0 错误；UTF-8 全量校验通过（gate.ps1 含 BOM 除外） |
+| serve 冒烟 + SSE 端到端 | ✅ | 真实 `owo-agent serve`（OWO_AGENT_DATA=临时目录）实测：/health 200、/openapi.json 173 路径、/metrics/runtime 200、/team/export 404（资源缺失非路由缺失）、/team/audit、/command/audit、/eval/gate/reports、/memory/graph/entries、/workflow、/goal、/plugins/market、/intent/parse、/command/run 全部 200；`GET /events/stream` content-type: text/event-stream；POST /cloud/tasks（mock 传输）→ Succeeded → `GET /cloud/tasks/cloud-0001/events` 历史重放 snapshotting→submitting→submitted→executing→fetching→succeeded 六帧 |
+
+说明：Agent 2/3/4 的三条 R6 线（多 Agent P0 原语 critic/blackboard/fan-out 超时仲裁、sandbox/credentials/audit_chain 安全抽象、event_stream/idempotency/error_codes/metrics 韧性契约）均随本轮全量门禁入库并各自提交 STATUS（fleet_tests 13 / sandbox 19 / credentials 11 / audit_chain 20 / event_stream 12 / idempotency 7 / error_codes 8 / observability 13）；SSE→observability 指标桥接（record_sse_connection/record_events）按 Agent 4 约定留待下一轮接线；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。
+
+## 五十六、第六轮：R8 增量（SQLite 迁移 + 存储运维 + 服务端韧性 + 主控接线）（2026-08-16）
+
+R8 四线并行交付后主控统一收尾：R7 安全边界（X03 auth/rate_limit/CLI audit/SSE→metrics//metrics/slo）复核确认已接线；Agent 1 交付 SQLite 迁移框架、/storage/* 存储运维、/server/* 服务端韧性，并接线 Agent 2/3/4 交付物（usage_router、trace_id、capability RunnerConfig 集成修复）。协调协议不建状态文件，交接用文件头部 `// R8:<模块> 完成，待主控接线` 注释。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| R7 收尾复核 | ✅ | route_contract_tests.rs fmt/clippy 遗留修复（assert 格式化）；auth（/auth/token + require_auth 中间件）、rate_limit（双令牌桶 + 429/Retry-After + 审计）、CLI audit（`owo-agent audit verify|export`）、SSE→metrics（event_stream::set_metrics_observer→observability_api::ingest_metrics_sample）、/metrics/slo（register_slo_report_probe(slo::report_global)）接线确认完整；OpenAPI/TS/面板挂载已在第五十五节登记 |
+| SQLite 迁移框架 | ✅ 7/7 | `sqlite_store.rs`：`PRAGMA user_version` + 顺序迁移表 `MIGRATIONS`（v1：sessions 列补齐，替代原运行时隐式 ALTER，实现"禁止隐式 ALTER"）；`open` 启动自动迁移（事务内逐条应用并推进 user_version）；迁移失败降级只读（SQLITE_OPEN_READ_ONLY 重开）并记录 last_error 提示；新增 `migration_status/is_read_only/clear_all/integrity_check/counts`；SessionStore trait 增默认 `clear/is_read_only/migration_warning`（JsonSessionStore 不受影响）；测试含迁移幂等、legacy v1 迁移、失败降级只读、清空+完整性校验 |
+| 备份/恢复/导出/清空 | ✅ 3/3 | `backup.rs`：POST /storage/backup（zip 打包 index.db+settings+notes+skills+workflows+memory+plugin_state+automations+goals+intent-workflows+eval 报告，排除 models/traces/backups 缓存与模型，附 manifest.json）；POST /storage/restore（恢复前自动备份 pre-restore-*.zip；zip-slip 防护：条目数/单条/总量上限 + 路径净化；index.db 经核心存储打开 + integrity_check 校验后暂存 .restored、重启生效）；POST /storage/export（全量标准 JSON：sessions/audit/notes/skills/workflows/settings + counts）；POST /storage/clear（二次确认 `{"confirm":"CLEAR_ALL"}`，清空会话/审计/笔记/记忆/自动化，清空后完整性校验）；`storage_api_tests.rs` 3 项（备份→恢复回路、导出全节、清空二次确认+完整性） |
+| 服务端韧性 | ✅ 5/5 | `shutdown.rs`：ShutdownGate（信号量全局并发 turn 上限，OWO_SERVER_MAX_CONCURRENT_TURNS 默认 4，try_acquire 拒绝 AtCapacity/ShuttingDown）；优雅关闭 request_shutdown→await_drain（30s 限时）→flush→退出；强杀恢复 PidFile（server.pid 正常 Drop 清理）+ recover_force_kill（陈旧 pid 清理、存活实例拒绝双开）；turn() 入口接并发上限；GET /server/status（并发/关闭中/存储只读降级提示）、POST /server/shutdown（二次确认）；CLI serve 接线 pid 文件 + 关闭 watcher（等待在途→flush_audit→exit(0)）；`shutdown_tests.rs` 5 项 |
+| 主控接线（Agent 2/4 交付物） | ✅ | usage.rs `usage_router` 并入 build_router（/usage/summary、/usage/records）；turn 完成记会话维度用量（record_tokens）；turn 入口预算硬熔断（check_budget→402 + 加额提示）；AppState::new 注入单价/预算环境变量；主控补 POST /usage/topup（request_topup 解除熔断）；logging.rs 接线 trace_id 中间件（X-Trace-Id 继承/生成 + 响应头回填 + JSON 结构化访问日志，脱敏不落消息体）；storage/关闭操作落结构化审计日志；goal_api.rs RunnerConfig 新增 capability_registry/capability_requirement 字段集成修复（Agent 2 core 变更同步） |
+| OpenAPI/TS 同步 | ✅ | openapi_spec 新增 8 路径（/storage/* 4、/server/* 2、/usage/* 2）；clients/ts/openapi.json 快照同步（173→181 路径）；schema.d.ts 补 storageServer/usage 系列 paths+operations（含 query/requestBody 类型）；route_contract_tests 双向一致性全绿（8/8，含新路由可达性） |
+| 桌面面板 | ✅ | index.html "设置与诊断"区新增"存储与恢复"（备份/导出/恢复…/一键清空数据 + /server/status 状态行）；app.js storageBackup/storageExport/storageRestore/storageClear/refreshServerStatus + 事件绑定 + 初始加载；style.css 补 button.danger；node --check app.js + 10 面板 0 错误 |
+| gate.ps1 | ✅ | 新增 UTF-8 校验步骤（全部源文件严格 UTF-8 解码 + .ps1 必须带 BOM）；-WorkspaceTests 开关（默认 server 测试，开关跑 workspace 全量）；PS 5.1 兼容；脚本本身补 UTF-8 BOM |
+| 全量门禁 | ✅ | `cargo test --workspace` 全绿（core lib 284 含 sqlite 迁移 7 新增、goal_plan 18、worker_pool 11、fleet 13、sandbox 21、notes 30、workflow_api 33、route_contract 8、storage 3、shutdown 5、observability 22、rate_limit 21 等）；`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 0 警告；node --check app.js + 10 面板 0 错误；UTF-8 严格校验 1977 文件全过；serve 冒烟：/server/status、/storage/backup（zip 落盘）、/storage/export、/storage/clear（400→确认→integrity=ok）、/usage/summary、/usage/topup、优雅关闭（shutting_down→进程退出→pid 清理→重启恢复）全部实测通过 |
+
+说明：Agent 2 worker pool/capability 两用例随其收尾修复后复核通过（goal_plan_tests 18/18、worker_pool_tests 11/11）；Agent 4 logging/usage 预留 API clippy 处理后 workspace -D warnings 0 警告；Agent 4 遗留的临时验证文件 usage_scratch_tests.rs（头部注释"验证后删除"）按原意图删除（备份于 %TEMP%\opencode\）；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。
+
+## 五十七、第九轮：R9 加倍（挂载验证 + 模型网关韧性）（2026-08-17）
+
+四线并行（主控/集成 + 多 Agent 编排 + 生产化安全 + 可靠性与可观测性）。Agent 1 交付：R8 模块挂载复核 + OpenAPI/TS/CLI 同步 + 模型网关韧性（重试/熔断/failover/成本硬停）；并接线 Agent 4 交付的 /metrics/prometheus、/metrics/slo/alerts、/metrics/slo/report、/usage/report 与全局 trace 上下文。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| R8 模块挂载复核 | ✅ | /storage/backup\|restore\|export\|clear、/usage/*、/metrics/slo、logging/trace_id 中间件、graceful shutdown 全部路由可达（契约测试 8/8 + serve 冒烟）；/metrics/prometheus（Agent 4 交付，文本格式）、/metrics/slo/alerts、/metrics/slo/report、/usage/report 路由并入 observability_api/usage_router 后自动生效 |
+| OpenAPI/TS 同步 | ✅ | openapi_spec 新增 4 路径（/metrics/prometheus、/metrics/slo/alerts、/metrics/slo/report、/usage/report）；clients/ts/openapi.json 快照同步（181→185 路径）；schema.d.ts 补 metricsPrometheus/metricsSloAlerts/metricsSloReport/usageReport paths+operations；route_contract_tests 双向一致性全绿 |
+| CLI audit/backup 复核 | ✅ | `owo-agent audit verify\|export` 可用（R7）；新增 `owo-agent backup` 子命令（复用 server backup::build_backup_zip，zip 打包到 `<data>/backups/`，实测 1.7KB zip 落盘）；server backup 模块改为 `pub mod` 暴露打包函数（只读接线，未动实现逻辑） |
+| 模型网关韧性 | ✅ 4/4 | `gateway.rs`：`RetryPolicy`（指数退避 2^n×base 封顶 + 0..20% jitter；OWO_MODEL_RETRY_MAX/BASE_MS/MAX_DELAY_MS；429/网络/空闲看门狗可重试，预算/出境/解析不可重试）；`CircuitBreaker`（连续失败阈值 OWO_MODEL_CIRCUIT_THRESHOLD 默认 5 → Open 快速失败 → 冷却 OWO_MODEL_CIRCUIT_COOLDOWN_SECS 默认 10s → HalfOpen 单探测 → 成功恢复 Closed）；`ResilientProvider`（primary 强模型 → fallbacks 次选云/本地，OWO_MODEL_FALLBACK_BASE_URLS 逗号分隔，本地端点免 key；failover 语义：不可重试错误不降级）；流式路径每块预算检查（OpenAiCompatibleProvider::complete_stream 每 usage 块 usage_budget_check，超限立即停轮返回可读错误）；流式空闲看门狗失败自动整条重试/降级（成功后才回放增量，防重复）；`gateway_tests.rs` 4 条主链路（失败→重试→成功；熔断开→半开→恢复；failover 降级；流式重试 + 预算不降级） |
+| CLI 主链路接线 | ✅ | run_eval、build_agent_with_mcp（serve）改用 `ResilientProvider::from_config`（重试/熔断/failover 生效）；auto-review 独立审批模型保持原构造 |
+| 集成修复 | ✅ | McpServerConfig 新增 network_allowlist 字段（Agent 3 core 变更）在 /mcp/add 构造处同步（空 allowlist）；gateway jitter 实现无 rand 依赖（DefaultHasher 伪随机） |
+| 全量门禁 | ✅ | `cargo test --workspace` 全绿（core lib 289 含 gateway 新冒烟 4、bus_store 等 Agent 2/3/4 新增项；server 全量含 route_contract 8 / observability 22 等）；`cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 0 警告；`cargo build --workspace` 通过；node --check 0 错误；UTF-8 严格校验 1979 文件全过 + 全部 20 个 .ps1 补 UTF-8 BOM（8 个历史脚本字节级加 BOM，内容不变）；serve 冒烟：/metrics/prometheus（Prometheus 文本格式 # HELP/# TYPE 正确）、/metrics/slo/alerts、/metrics/slo/report?days=7、/usage/report?days=7、/storage/backup、/usage/summary、/server/status 全部 200；trace_id 贯穿实测（X-Trace-Id 头继承回填同一值 + 无头自动生成回填） |
+
+说明：R9 模型网关韧性为纯增量（新增组件 + 包装层），未改动既有 OpenAiCompatibleProvider 请求语义；熔断/failover 参数全部环境变量可调，默认值保守（重试 3 次、阈值 5、冷却 10s）；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。
+
+## 五十八、第十轮：R10 三包（v0.7 收尾 + API 契约治理 + 发布工程）（2026-08-17）
+
+Agent 1 三工作包：v0.7 收尾接线与门禁、API 版本化与契约治理、发布工程骨架。协作不建状态文件，交接用文件头注释。
+
+| 工作包 | 状态 | 证据 |
+|---|---|---|
+| 1 · v0.7 收尾接线 | ✅ | /storage/*、/usage/*、/metrics/slo|alerts|report|prometheus、logging/trace_id 中间件、graceful shutdown 全部路由可达（契约 8/8 + serve 冒烟）；CLI `audit`/`backup`/新增 `doctor` 子命令可构建（doctor 实测：数据目录/SQLite/凭据/网关韧性/服务健康逐项输出 [ok]/[fail]，任一 fail 非零退出）；OpenAPI/TS/面板同步（见下）；全量门禁见末行 |
+| 2 · API 契约治理 | ✅ | SSE 事件 data 统一携带 `v` 字段（protocol::SSE_PROTOCOL_VERSION=1；to_event 注入，实测每帧 `"v":1`）；OpenAPI 顶层 `x-owo-api-version: "0.7"`（OWO_API_VERSION const，openapi.json 同步）；新增 `/schemas`（索引）+ `/schemas/{kind}/{version}`（plugin-manifest/owskill/owflow 三份 draft-07 JSON Schema 版本化发布，实测 200 + 未知 kind 404）；弃用策略：`DEPRECATED_ROUTES` 注册表 + deprecation_middleware（命中附加 `Deprecation` 头，弃用期 ≥2 minor）+ 路由/事件变更 RFC 注释登记（lib.rs 契约区）；错误码表接入 HTTP 层：`api_error_response` 统一 `{error:{code,message,retry_after_ms,domain,reason,retryable}}` 响应体，应用于 /usage/topup 非法 amount（实测 400 + validation/invalid_input/not_retryable）与 turn 503 错误码前缀 |
+| 3 · 发布工程骨架 | ✅ | updater：generate-update-manifest.ps1 增加 `channel`（stable/beta）+ `cohort` 灰度 + `rolloutFailureThreshold` + `paused`（读上一清单失败率自动暂停，-PreviousManifest 支持）；桌面打包：package-desktop.ps1 版本号从 Cargo.toml 同步（`OwO-Agent-<版本>-<配置>.zip`）+ Authenticode 签名占位（-SignCert + signtool 自动定位，缺省打印提示）+ NSIS（build-installer.ps1）+ SBOM 纳入 dist；新建 `sbom.ps1`（cargo metadata 依赖清单 SPDX 2.3 + 产物 sha256，实测 5 依赖）；新建 `SECURITY.md`（支持版本/报告渠道/漏洞等级）+ `desktop/web/privacy.md`（数据字典/一键关闭/保留期，桌面"设置与诊断"加入口） |
+| 全量门禁 | ✅ | `cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 0 警告；`cargo test --workspace` 全绿（core lib 289 + server 全量 route_contract 8 / observability 22 等 + Agent 2/3/4 新增 control_plane/os_sandbox 等）；`cargo build --workspace` 通过；node --check 0 错误；UTF-8 严格校验 325 文件 + 全部 .ps1 带 BOM；**gate.ps1 5/5 全过**（修复 Run-Step $LASTEXITCODE 为 $null 时误判失败的 bug——UTF-8 为第一步不运行外部程序导致）；serve 冒烟：/schemas 列表 + 三份 schema 200、未知 kind 404、openapi x-owo-api-version=0.7、/usage/topup 非法 amount 400 + validation/invalid_input 统一错误体、SSE 事件帧带 v:1；CLI doctor 逐项诊断实测 |
+
+说明：R10 契约治理为兼容加法（SSE 帧新增 v 字段、OpenAPI 新增 x-owo-api-version 与 /schemas 路径、错误响应新增统一体，均不破坏既有 wire 格式；旧客户端缺 v 视为 v=0）；当前无已弃用路由（DEPRECATED_ROUTES 为空，机制就绪）；updater 完整签名流程需 Tauri 私钥（生成脚本逻辑已落地）；gate.ps1 Run-Step 修复 $LASTEXITCODE null 判定（R8 引入 UTF-8 首步后暴露）；跨 Agent 集成修复：RunnerConfig 新增 transport/leases 字段在 goal_api 同步、Agent 3/4 交付文件 fmt/clippy 由主控收尾统一处理；eval-gate（真实模型）仍属外部验收项，C.4 保持"开放"。

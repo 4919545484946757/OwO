@@ -1,4 +1,4 @@
-# plugin-sign.ps1 — 插件签名包装器（Ed25519，调用 plugin-sign.py）
+﻿# plugin-sign.ps1 — 插件签名包装器（Ed25519，调用 plugin-sign.py）
 #
 # 用法（示例插件）：
 #   .\scripts\plugin-sign.ps1 generate -KeyFile "$env:TEMP\owo-plugin-key.pem"

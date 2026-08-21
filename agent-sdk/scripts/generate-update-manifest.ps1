@@ -1,11 +1,21 @@
-﻿# 生成 Tauri updater 静态清单 latest.json（配合任意静态托管 / GitHub Pages）。
+﻿# 生成 Tauri updater 动态清单 latest.json（稳定/测试通道 + cohort 灰度 + 失败率自动暂停）。
 # 用法：powershell -ExecutionPolicy Bypass -File scripts\generate-update-manifest.ps1 `
-#         -SetupExe dist\OwO-Agent-0.1.0-setup.exe -Version 0.1.0 -BaseUrl https://example.com/owo/updates
+#         -SetupExe dist\OwO-Agent-0.1.0-setup.exe -Version 0.1.0 -BaseUrl https://example.com/owo/updates `
+#         [-Channel stable|beta] [-Cohort 0.1] [-RolloutFailureThreshold 0.05] [-PreviousManifest dist\updates\latest.json]
 param(
     [string]$SetupExe = "",
     [string]$Version = "0.1.0",
     [string]$Notes = "OwO Agent 自动更新",
-    [string]$BaseUrl = "https://example.com/owo/updates"
+    [string]$BaseUrl = "https://example.com/owo/updates",
+    # R10：发布通道（stable 全量；beta 预览）。
+    [ValidateSet("stable", "beta")]
+    [string]$Channel = "stable",
+    # R10：灰度 cohort（如 "0.1" = 首批 10% 用户；空 = 不限制）。
+    [string]$Cohort = "",
+    # R10：失败率阈值（0..1），上一次清单同版本失败率 ≥ 阈值时自动暂停（paused=true）。
+    [double]$RolloutFailureThreshold = 0.05,
+    # R10：上一次发布的清单（用于失败率判断；缺省不暂停）。
+    [string]$PreviousManifest = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,10 +58,36 @@ if (-not $signature) {
 }
 
 $fileName = Split-Path $SetupExe -Leaf
+
+# R10：失败率自动暂停——上一次清单同版本失败率 ≥ 阈值 → paused=true（停止放量）。
+$paused = $false
+$pausedReason = ""
+$failureRate = $null
+if ($PreviousManifest -and (Test-Path $PreviousManifest)) {
+    try {
+        $previous = Get-Content -LiteralPath $PreviousManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($previous.version -eq $Version -and $null -ne $previous.failureRate) {
+            $failureRate = [double]$previous.failureRate
+            if ($failureRate -ge $RolloutFailureThreshold) {
+                $paused = $true
+                $pausedReason = "上一清单失败率 $($failureRate.ToString("P1")) ≥ 阈值 $($RolloutFailureThreshold.ToString("P1"))"
+            }
+        }
+    } catch {
+        Write-Host "[updater] 上一清单解析失败（$($_.Exception.Message)），按未暂停处理"
+    }
+}
+
 $manifest = @{
     version   = $Version
     notes     = $Notes
     pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    # R10：发布治理字段。
+    channel   = $Channel
+    cohort    = $Cohort
+    rolloutFailureThreshold = $RolloutFailureThreshold
+    paused    = $paused
+    pausedReason = $pausedReason
     platforms = @{
         "windows-x86_64" = @{
             signature = $signature
@@ -65,4 +101,5 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $outFile = Join-Path $outDir "latest.json"
 Set-Content -LiteralPath $outFile -Value $manifest -Encoding UTF8
 Write-Host "[updater] 清单已生成：$outFile"
+Write-Host "[updater] channel=$Channel cohort=$(if ($Cohort) { $Cohort } else { 'all' }) paused=$paused"
 Write-Host "[updater] signature 长度：$($signature.Length)"

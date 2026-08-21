@@ -1,18 +1,20 @@
-//! 工作流 HTTP API（Lane C，.owflow v1 接入层）。
+//! 工作流 HTTP API（Lane C，.owflow v1 接入层；R5 扩展：真实后端 / 人审 / run 级 SSE）。
 //!
 //! 路由（前缀 /workflow）：
-//!   GET  /workflow                      发现 workspace 下 *.owflow（深度上限 3）
-//!   GET  /workflow/{name}               加载 + 校验，返回 {definition, valid, issues}
-//!   POST /workflow/validate             内联定义校验
-//!   POST /workflow/{name}/run {ctx?}    异步运行 → 201 {run_id}
-//!   GET  /workflow/{name}/runs          run 列表
-//!   GET  /workflow/run/{run_id}         运行快照 {state, steps, rollback_to}
-//!   POST /workflow/run/{run_id}/abort   中止
-//!   GET  /workflow/run/{run_id}/audit   审计尾部
+//!   GET  /workflow                          发现 workspace 下 *.owflow（深度上限 3）
+//!   GET  /workflow/{name}                   加载 + 校验，返回 {definition, valid, issues}
+//!   POST /workflow/validate                 内联定义校验
+//!   POST /workflow/{name}/run {ctx?, backend?, approval_timeout_ms?} → 201 {run_id}
+//!   GET  /workflow/{name}/runs              run 列表（注册表 + 落盘扫描）
+//!   GET  /workflow/run/{run_id}             运行快照 {state, steps, rollback_to, error, pending_approval}
+//!   POST /workflow/run/{run_id}/abort       中止
+//!   GET  /workflow/run/{run_id}/audit       审计尾部
+//!   POST /workflow/run/{run_id}/approval    {decision: "approve"|"reject"} 人审裁决
+//!   GET  /workflow/run/{run_id}/events      run 级 SSE（历史重放 + 实时）
 //!
 //! 运行态：模块内 OnceLock 注册表（run_id → RunEntry）；engine 由 tokio::spawn 持有；
-//! 执行工作目录 data_root/workflow-runs/<run_id>/ 为 MockBackend 沙箱；
-//! 结果落盘 outcome.json + audit.json（WorkflowOutcome 无 Serialize，手动 json! 拼装）。
+//! 执行工作目录 data_root/workflow-runs/<run_id>/；结果落盘 outcome.json + audit.json。
+//! 后端选择：mock（MockBackend 沙箱，默认）/ real（ServerActionBackend + 真实人审 ChannelApprover）。
 //!
 //! 协议约束：本模块不使用 crate::/super::；AppState 全限定名 owo_agent_server::AppState；
 //! 错误统一 (StatusCode, Json({error}))；不给 AppState 加字段。
@@ -30,6 +32,16 @@ use owo_agent_core::workflow::{
     AutoApprover, MockBackend, WorkflowDefinition, WorkflowEngine, WorkflowOutcome,
 };
 
+// R5 扩展：真实后端 / 人审 / run 级 SSE。
+// workflow_backend 作为本模块子模块编译（lib.rs 无需登记；两文件独立编译、无 crate 引用）。
+#[path = "workflow_backend.rs"]
+pub mod workflow_backend;
+
+use workflow_backend::{
+    decide_approval, pending_approvals, BackendChoice, ChannelApprover, EventBackend,
+    ServerActionBackend, WfEvents,
+};
+
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<serde_json::Value>)>;
 
 fn api_err(
@@ -39,7 +51,7 @@ fn api_err(
     (status, Json(serde_json::json!({ "error": message.into() })))
 }
 
-/// 运行条目：engine（tokio Mutex 供 abort）+ 结果快照 + 审计尾部。
+/// 运行条目：engine（tokio Mutex 供 abort）+ 结果快照 + 审计尾部 + 事件流。
 pub struct RunEntry {
     pub run_id: String,
     pub name: String,
@@ -49,6 +61,8 @@ pub struct RunEntry {
     pub audit_tail: Mutex<Vec<serde_json::Value>>,
     pub created_at: String,
     pub ctx: serde_json::Value,
+    /// run 级 SSE 事件源（R5）。
+    pub events: Arc<WfEvents>,
 }
 
 type RunRegistry = Arc<Mutex<HashMap<String, Arc<RunEntry>>>>;
@@ -146,6 +160,8 @@ pub fn router(state: Arc<owo_agent_server::AppState>) -> axum::Router {
         .route("/workflow/run/{run_id}", get(run_snapshot))
         .route("/workflow/run/{run_id}/abort", post(abort_run))
         .route("/workflow/run/{run_id}/audit", get(run_audit))
+        .route("/workflow/run/{run_id}/approval", post(decide_run_approval))
+        .route("/workflow/run/{run_id}/events", get(run_events_sse))
         .with_state(state)
 }
 
@@ -204,6 +220,12 @@ async fn validate_definition_endpoint(
 struct RunRequest {
     #[serde(default)]
     ctx: serde_json::Map<String, serde_json::Value>,
+    /// 执行后端："mock"（默认，沙箱）| "real"（真实后端，桌面动作门禁拒绝）。
+    #[serde(default)]
+    backend: Option<String>,
+    /// 人审超时（毫秒；缺省 120s）。
+    #[serde(default)]
+    approval_timeout_ms: Option<u64>,
 }
 
 async fn run_workflow(
@@ -221,15 +243,47 @@ async fn run_workflow(
         )
     })?;
     let ctx_value = serde_json::Value::Object(request.ctx.clone());
+    let backend_choice = BackendChoice::parse(request.backend.as_deref());
+    let events = Arc::new(WfEvents::new(128));
 
-    let engine = WorkflowEngine::new(
-        flow.clone(),
-        HashMap::new(),
-        Box::new(MockBackend::new(runs_dir.clone())),
-        Box::new(AutoApprover { approve: true }),
-        owo_agent_core::skill_health::SkillHealthStore::new(None),
-        runs_dir.clone(),
-    );
+    // 后端：mock 沙箱或真实后端（真实后端 act 桌面动作门禁拒绝，人审走 oneshot 通道）。
+    let engine = {
+        let health = owo_agent_core::skill_health::SkillHealthStore::new(None);
+        match backend_choice {
+            BackendChoice::Real => {
+                let backend = ServerActionBackend::new(state.clone());
+                let wrapped = EventBackend::new(backend, events.clone(), run_id.clone());
+                let timeout = std::time::Duration::from_millis(
+                    request.approval_timeout_ms.unwrap_or(120_000),
+                );
+                WorkflowEngine::new(
+                    flow.clone(),
+                    HashMap::new(),
+                    Box::new(wrapped),
+                    Box::new(
+                        ChannelApprover::new(run_id.clone(), timeout).with_events(events.clone()),
+                    ),
+                    health,
+                    runs_dir.clone(),
+                )
+            }
+            BackendChoice::Mock => {
+                let wrapped = EventBackend::new(
+                    MockBackend::new(runs_dir.clone()),
+                    events.clone(),
+                    run_id.clone(),
+                );
+                WorkflowEngine::new(
+                    flow.clone(),
+                    HashMap::new(),
+                    Box::new(wrapped),
+                    Box::new(AutoApprover { approve: true }),
+                    health,
+                    runs_dir.clone(),
+                )
+            }
+        }
+    };
     let entry = Arc::new(RunEntry {
         run_id: run_id.clone(),
         name: name.clone(),
@@ -239,6 +293,7 @@ async fn run_workflow(
         audit_tail: Mutex::new(Vec::new()),
         created_at: chrono::Utc::now().to_rfc3339(),
         ctx: ctx_value,
+        events,
     });
     runs_registry()
         .lock()
@@ -250,6 +305,7 @@ async fn run_workflow(
         runs_dir.join("meta.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "run_id": run_id, "name": name, "created_at": entry.created_at, "ctx": entry.ctx,
+            "backend": if backend_choice == BackendChoice::Real { "real" } else { "mock" },
         }))
         .unwrap_or_default(),
     );
@@ -269,6 +325,21 @@ async fn run_workflow(
                 let audit = audit_tail_json(guard.audit(), 50);
                 *spawned.outcome.lock().unwrap() = Some(snapshot.clone());
                 *spawned.audit_tail.lock().unwrap() = audit.clone();
+                spawned.events.push(
+                    "state_change",
+                    &serde_json::json!({ "run_id": spawned.run_id, "state": snapshot["state"] }),
+                );
+                if let Some(rollback_to) = snapshot.get("rollback_to") {
+                    if !rollback_to.is_null() {
+                        spawned.events.push(
+                            "rollback",
+                            &serde_json::json!({
+                                "run_id": spawned.run_id,
+                                "rollback_to": rollback_to,
+                            }),
+                        );
+                    }
+                }
                 let _ = std::fs::write(
                     run_dir.join("outcome.json"),
                     serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
@@ -282,6 +353,10 @@ async fn run_workflow(
             Err(error) => {
                 let failed = serde_json::json!({ "state": "error", "error": error });
                 *spawned.outcome.lock().unwrap() = Some(failed.clone());
+                spawned.events.push(
+                    "state_change",
+                    &serde_json::json!({ "run_id": spawned.run_id, "state": "error" }),
+                );
                 let _ = std::fs::write(
                     run_dir.join("outcome.json"),
                     serde_json::to_string_pretty(&failed).unwrap_or_default(),
@@ -374,9 +449,15 @@ async fn run_snapshot(Path(run_id): Path<String>) -> ApiResult<serde_json::Value
         .cloned()
         .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("运行不存在：{run_id}")))?;
     let outcome = entry.outcome.lock().unwrap().clone();
-    let state = match &outcome {
-        Some(value) => value["state"].clone(),
-        None => serde_json::json!("running"),
+    let pending = pending_approvals(&run_id);
+    // 人审等待中：引擎处于 WaitingApproval（outcome 尚未落盘），以 pending 判定。
+    let state = if !pending.is_empty() {
+        serde_json::json!("waiting_approval")
+    } else {
+        match &outcome {
+            Some(value) => value["state"].clone(),
+            None => serde_json::json!("running"),
+        }
     };
     let steps = match &outcome {
         Some(value) => value["steps"].clone(),
@@ -385,16 +466,91 @@ async fn run_snapshot(Path(run_id): Path<String>) -> ApiResult<serde_json::Value
     let rollback_to = outcome
         .as_ref()
         .and_then(|value| value["rollback_to"].clone().as_str().map(str::to_string));
+    // 失败原因：从审计尾部提取 workflow.failed 的 detail（引擎错误文本）。
+    let error = entry
+        .audit_tail
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|a| a["event"].as_str() == Some("workflow.failed"))
+        .and_then(|a| a["detail"].as_str())
+        .map(str::to_string);
     Ok(Json(serde_json::json!({
         "run_id": entry.run_id,
         "name": entry.name,
         "state": state,
         "steps": steps,
         "rollback_to": rollback_to,
+        "error": error,
         "created_at": entry.created_at,
         "ctx": entry.ctx,
         "outcome": outcome,
+        "pending_approval": if pending.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::to_value(&pending[0]).unwrap_or(serde_json::Value::Null)
+        },
     })))
+}
+
+#[derive(serde::Deserialize)]
+struct ApprovalRequest {
+    decision: String,
+}
+
+/// 人审裁决：POST /workflow/run/{run_id}/approval {decision: "approve"|"reject"}。
+async fn decide_run_approval(
+    Path(run_id): Path<String>,
+    Json(request): Json<ApprovalRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let approve = match request.decision.as_str() {
+        "approve" => true,
+        "reject" => false,
+        other => {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                format!("decision 只能为 approve|reject：{other}"),
+            ))
+        }
+    };
+    decide_approval(&run_id, approve).map_err(|e| api_err(StatusCode::NOT_FOUND, e))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "run_id": run_id,
+        "decision": if approve { "approve" } else { "reject" },
+    })))
+}
+
+/// run 级 SSE 事件流：GET /workflow/run/{run_id}/events（历史重放 + 实时）。
+async fn run_events_sse(
+    Path(run_id): Path<String>,
+) -> Result<
+    axum::response::Sse<
+        impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    use tokio_stream::StreamExt;
+    let entry = runs_registry()
+        .lock()
+        .unwrap()
+        .get(&run_id)
+        .cloned()
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("运行不存在：{run_id}")))?;
+    let history = entry.events.history();
+    let receiver = entry.events.subscribe();
+    let stream = tokio_stream::iter(
+        history
+            .into_iter()
+            .map(|frame| Ok(axum::response::sse::Event::default().data(frame))),
+    )
+    .chain(
+        tokio_stream::wrappers::BroadcastStream::new(receiver)
+            .map(|item| Ok(axum::response::sse::Event::default().data(item.unwrap_or_default()))),
+    );
+    Ok(axum::response::Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
+    ))
 }
 
 async fn abort_run(Path(run_id): Path<String>) -> ApiResult<serde_json::Value> {

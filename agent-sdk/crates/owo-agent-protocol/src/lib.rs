@@ -78,6 +78,10 @@ pub struct HealthResponse {
     pub auto_approve: bool,
 }
 
+/// SSE 事件协议版本（R10：所有 SSE 事件帧 data 统一携带 `v` 字段）。
+/// 变更策略：破坏性事件结构变更 → 递增版本并登记 RFC 注释（弃用期 ≥2 个 minor）。
+pub const SSE_PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseEvent {
