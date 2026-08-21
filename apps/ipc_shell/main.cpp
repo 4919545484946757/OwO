@@ -10,11 +10,13 @@ int main(int argc, char** argv) {
     const bool shutdown = argc > 1 && std::string_view(argv[1]) == "--shutdown";
     const bool update = argc > 1 && std::string_view(argv[1]) == "--update";
     const std::string input = argc > 1 && !shutdown && !update ? argv[1] : "test";
-    const owo::protocol::Message request{
+    owo::protocol::Message request{
         shutdown ? owo::protocol::MessageType::shutdown_request
                  : update ? owo::protocol::MessageType::candidate_update_request
                           : owo::protocol::MessageType::candidate_request,
         1, 1, input};
+    if (!shutdown && !update && argc > 2)
+        request.page = static_cast<std::uint64_t>(std::stoull(argv[2]));
     const auto result = owo::ipc::exchange(
         owo::ipc::kCorePipeName, owo::protocol::encode_message(request),
         std::chrono::milliseconds(2000));
@@ -45,6 +47,8 @@ int main(int argc, char** argv) {
         for (std::size_t index = 0; index < decoded.message.candidates.size(); ++index) {
             std::cout << index + 1 << ". " << decoded.message.candidates[index] << '\n';
         }
+        std::cout << "page=" << decoded.message.page
+                  << " has_more=" << decoded.message.has_more << '\n';
         if (decoded.message.model_pending) std::cout << "model_pending\n";
     }
     return 0;

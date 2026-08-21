@@ -20,9 +20,12 @@ struct PluginPermissionDefinition {
     bool requires_full_trust;
 };
 
-inline constexpr std::array<PluginPermissionDefinition, 17> kKnownPluginPermissions{{
+inline constexpr std::array<PluginPermissionDefinition, 24> kKnownPluginPermissions{{
+    {"candidate.transform", PluginPermissionRisk::elevated, false},
     {"clipboard.read", PluginPermissionRisk::elevated, false},
     {"clipboard.write", PluginPermissionRisk::high, false},
+    {"config.read", PluginPermissionRisk::low, false},
+    {"config.write", PluginPermissionRisk::high, false},
     {"filesystem.unrestricted", PluginPermissionRisk::critical, true},
     {"filesystem.user_selected", PluginPermissionRisk::elevated, false},
     {"input.commit", PluginPermissionRisk::high, false},
@@ -30,12 +33,16 @@ inline constexpr std::array<PluginPermissionDefinition, 17> kKnownPluginPermissi
     {"input.replace", PluginPermissionRisk::critical, false},
     {"microphone.capture", PluginPermissionRisk::high, true},
     {"network.client", PluginPermissionRisk::high, true},
+    {"notification.show", PluginPermissionRisk::elevated, true},
     {"process.launch", PluginPermissionRisk::critical, true},
     {"resource.dictionary.install", PluginPermissionRisk::high, true},
     {"resource.material.install", PluginPermissionRisk::high, true},
+    {"resource.model.install", PluginPermissionRisk::high, true},
+    {"resource.sound.install", PluginPermissionRisk::high, true},
     {"resource.theme.install", PluginPermissionRisk::high, true},
     {"screen.capture", PluginPermissionRisk::high, true},
     {"system.full_trust", PluginPermissionRisk::critical, false},
+    {"ui.settings_page", PluginPermissionRisk::elevated, false},
     {"ui.desktop_pet", PluginPermissionRisk::high, true},
     {"ui.overlay", PluginPermissionRisk::high, true},
 }};

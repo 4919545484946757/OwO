@@ -15,7 +15,6 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$explicitBuildDirectory = -not [string]::IsNullOrWhiteSpace($BuildDirectory)
 if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
     $BuildDirectory = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'build') -Directory |
         ForEach-Object { Join-Path $_.FullName 'Release' } |
@@ -39,16 +38,13 @@ $modelHost = Join-Path $BuildDirectory 'owo_model_host.exe'
 $modelShell = Join-Path $BuildDirectory 'owo_model_shell.exe'
 $profileCheck = Join-Path $BuildDirectory 'owo_tsf_profile_check.exe'
 $buildTsfDll = Join-Path $BuildDirectory 'OwO.TSF.dll'
-$deployedTsf = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'build/manual-deploy') `
-        -Filter 'OwO.TSF.*.dll' -File -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-$tsfDll = if ($explicitBuildDirectory -or $null -eq $deployedTsf) {
-    $buildTsfDll
-} else {
-    $deployedTsf.FullName
+$deployDirectory = Join-Path $projectRoot 'build/manual-deploy'
+[void](New-Item -ItemType Directory -Path $deployDirectory -Force)
+$tsfHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $buildTsfDll).Hash.ToLowerInvariant()
+$tsfDll = Join-Path $deployDirectory "OwO.TSF.$($tsfHash.Substring(0, 16)).dll"
+if (-not (Test-Path -LiteralPath $tsfDll -PathType Leaf)) {
+    Copy-Item -LiteralPath $buildTsfDll -Destination $tsfDll -Force
 }
-$settingsCenter = Join-Path $projectRoot `
-    'apps/settings_center/bin/Release/net10.0-windows10.0.26100.0/win-x64/OwO.Settings.exe'
 
 foreach ($required in @($coreService, $profileCheck, $tsfDll)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
@@ -173,10 +169,7 @@ if ($running.Count -eq 0) {
 }
 
 if ($OpenSettings) {
-    if (-not (Test-Path -LiteralPath $settingsCenter -PathType Leaf)) {
-        throw "Settings center is missing: $settingsCenter"
-    }
-    Start-Process -FilePath $settingsCenter
+    & (Join-Path $PSScriptRoot 'open-settings.ps1')
 }
 if ($OpenNotepad) {
     Start-Process -FilePath "$env:SystemRoot/System32/notepad.exe"

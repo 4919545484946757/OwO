@@ -50,9 +50,18 @@ std::vector<AbbreviatedLexiconMatch> MemoryLexicon::lookup_mixed_abbreviation(
     if (limit == 0) return {};
     std::vector<AbbreviatedLexiconMatch> matches;
     for (const auto& entry : entries_) {
-        const auto segments = detail::mixed_abbreviation_segments(entry.syllables, input);
-        if (!segments) continue;
-        matches.push_back({entry, *segments});
+        if (input.size() == 2 && input.find('\'') == std::string_view::npos) {
+            if (entry.syllables.size() != 2 || entry.syllables[0].empty() ||
+                entry.syllables[1].empty() || entry.syllables[0].front() != input[0] ||
+                entry.syllables[1].front() != input[1])
+                continue;
+            matches.push_back({entry, {std::string(1, input[0]),
+                                       std::string(1, input[1])}});
+        } else {
+            const auto segments = detail::mixed_abbreviation_segments(entry.syllables, input);
+            if (!segments) continue;
+            matches.push_back({entry, *segments});
+        }
     }
     detail::retain_best_mixed_matches(matches, limit);
     return matches;

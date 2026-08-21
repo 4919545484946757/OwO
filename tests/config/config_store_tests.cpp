@@ -34,13 +34,13 @@ int main(const int argc, char** argv) {
     changed.user_learning_sensitivity = 9;
     changed.model_ranking_enabled = true;
     changed.model_timeout_ms = 80;
-    changed.correction_shortcut = "Ctrl+Alt+C";
-    changed.language_shortcut = "Ctrl+Shift+Space";
+    changed.correction_shortcuts = {"Ctrl+Alt+C", "F8"};
+    changed.language_shortcuts = {"Ctrl+Shift+Space"};
     changed.raw_input_shortcut_enabled = false;
-    changed.cursor_left_shortcut = "Ctrl+Shift+Left";
-    changed.cursor_right_shortcut = "Ctrl+Shift+Right";
-    changed.previous_page_shortcut = "Ctrl+Shift+Up";
-    changed.next_page_shortcut = "Ctrl+Shift+Down";
+    changed.cursor_left_shortcuts = {"Ctrl+Shift+Left"};
+    changed.cursor_right_shortcuts = {"Ctrl+Shift+Right"};
+    changed.previous_page_shortcuts = {"[", "Ctrl+Shift+Up"};
+    changed.next_page_shortcuts = {"]", "Ctrl+Shift+Down"};
     const auto first_save = store.save(changed);
     if (!first_save.success || !first_save.changed || first_save.generation != 2) return 4;
     changed.candidate_page_size = 8;
@@ -102,11 +102,11 @@ int main(const int argc, char** argv) {
         "schema_version=1\ncandidate_page_size=6\nuser_learning_enabled=false\n"
         "model_ranking_enabled=true\nmodel_timeout_ms=75\n");
     if (!legacy.ok || legacy.value.candidate_page_size != 6 ||
-        legacy.value.correction_shortcut != "Alt" ||
-        legacy.value.language_shortcut != "Ctrl+Space" ||
-        legacy.value.raw_input_shortcut != "Enter" ||
-        legacy.value.cursor_left_shortcut != "Shift+Left" ||
-        legacy.value.next_page_shortcut != "Shift+Down" ||
+        legacy.value.correction_shortcuts != std::vector<std::string>{"Ctrl+Q"} ||
+        legacy.value.language_shortcuts != std::vector<std::string>{"Ctrl+Space"} ||
+        legacy.value.raw_input_shortcuts != std::vector<std::string>{"Enter"} ||
+        legacy.value.cursor_left_shortcuts != std::vector<std::string>{"Shift+Left"} ||
+        legacy.value.next_page_shortcuts != std::vector<std::string>{"]", "Shift+Down"} ||
         legacy.value.candidate_wrap_length != 12 ||
         legacy.value.user_learning_sensitivity != 7) return 20;
 
@@ -121,24 +121,24 @@ int main(const int argc, char** argv) {
 
     auto duplicate_shortcuts = changed;
     duplicate_shortcuts.raw_input_shortcut_enabled = true;
-    duplicate_shortcuts.raw_input_shortcut = duplicate_shortcuts.language_shortcut;
+    duplicate_shortcuts.raw_input_shortcuts = duplicate_shortcuts.language_shortcuts;
     if (owo::config::validate_config(duplicate_shortcuts).ok) return 21;
     auto noncanonical_shortcut = changed;
-    noncanonical_shortcut.correction_shortcut = "Alt+Ctrl+C";
+    noncanonical_shortcut.correction_shortcuts = {"Alt+Ctrl+C"};
     if (owo::config::validate_config(noncanonical_shortcut).ok) return 22;
     noncanonical_shortcut = changed;
-    noncanonical_shortcut.correction_shortcut = "Ctrl";
+    noncanonical_shortcut.correction_shortcuts = {"Ctrl"};
     if (owo::config::validate_config(noncanonical_shortcut).ok) return 25;
-    noncanonical_shortcut.correction_shortcut = "Shift";
+    noncanonical_shortcut.correction_shortcuts = {"Shift"};
     if (owo::config::validate_config(noncanonical_shortcut).ok) return 26;
-    noncanonical_shortcut.correction_shortcut = "Ctrl+Alt";
-    if (owo::config::validate_config(noncanonical_shortcut).ok) return 27;
-    noncanonical_shortcut.correction_shortcut = "Alt";
+    noncanonical_shortcut.correction_shortcuts = {"Ctrl+Alt"};
+    if (!owo::config::validate_config(noncanonical_shortcut).ok) return 27;
+    noncanonical_shortcut.correction_shortcuts = {"Alt"};
     if (!owo::config::validate_config(noncanonical_shortcut).ok) return 28;
 
     auto duplicate_navigation = changed;
-    duplicate_navigation.cursor_right_shortcut =
-        duplicate_navigation.cursor_left_shortcut;
+    duplicate_navigation.cursor_right_shortcuts =
+        duplicate_navigation.cursor_left_shortcuts;
     if (owo::config::validate_config(duplicate_navigation).ok) return 30;
 
     const auto stable = owo::config::serialize_config(changed);

@@ -1,4 +1,5 @@
 #include "owo/core/plugin_executor.h"
+#include "owo/plugin/plugin_services.h"
 
 #include "owo/plugin/plugin_host.h"
 
@@ -248,6 +249,13 @@ PluginExecutionSubmission PluginExecutor::submit(PluginExecutionRequest request)
     job.call_id = call_id;
     job.deadline = std::chrono::steady_clock::now() + request.timeout;
     job.request = std::move(request);
+    if (const auto* service = plugin::find_plugin_service(job.request.service);
+        service != nullptr && !service->required_permission.empty() &&
+        std::find(job.request.required_permissions.begin(),
+                  job.request.required_permissions.end(), service->required_permission) ==
+            job.request.required_permissions.end()) {
+        job.request.required_permissions.emplace_back(service->required_permission);
+    }
     auto completion = job.promise.get_future();
     auto reject = [&](const PluginExecutionStatus status, std::string diagnostic) {
         audit(call_id, job.request.source, job.request.plugin_id, job.request.service, status);

@@ -547,6 +547,24 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME owo.engine.candidates COMMAND owo_candidate_generator_tests)
 
+    add_executable(owo_contextual_candidate_order_tests
+        tests/ipc/contextual_candidate_order_tests.cpp)
+    target_include_directories(owo_contextual_candidate_order_tests PRIVATE include)
+    target_compile_features(owo_contextual_candidate_order_tests PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(owo_contextual_candidate_order_tests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME owo.ipc.contextual_candidate_order
+             COMMAND owo_contextual_candidate_order_tests)
+
+    if(WIN32)
+        add_executable(owo_language_context_tests tests/tsf/language_context_tests.cpp)
+        target_include_directories(owo_language_context_tests PRIVATE include)
+        target_compile_features(owo_language_context_tests PRIVATE cxx_std_20)
+        target_compile_options(owo_language_context_tests PRIVATE /W4 /permissive- /utf-8)
+        add_test(NAME owo.tsf.language_context COMMAND owo_language_context_tests)
+    endif()
+
     add_executable(owo_binary_lexicon_tests tests/engine/binary_lexicon_tests.cpp)
     target_link_libraries(owo_binary_lexicon_tests PRIVATE owo_engine)
     target_compile_features(owo_binary_lexicon_tests PRIVATE cxx_std_20)

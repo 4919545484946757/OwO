@@ -215,6 +215,40 @@ int main(const int argc, char** argv) {
         std::filesystem::exists(staging)) return 25;
     std::filesystem::remove_all(staging, error);
     if (error) return 26;
+    const auto folder = path.wstring() + L".folder";
+    std::filesystem::remove_all(folder, error);
+    std::filesystem::create_directories(std::filesystem::path(folder) / "bin", error);
+    if (error) return 33;
+    {
+        std::ofstream manifest(std::filesystem::path(folder) / "manifest.json",
+                               std::ios::binary);
+        std::ofstream executable(std::filesystem::path(folder) / "bin" / "example.exe",
+                                 std::ios::binary);
+        manifest << "{}";
+        executable << "MZ";
+    }
+    const auto folder_snapshot = owo::plugin::inspect_package(folder);
+    if (!folder_snapshot.ok || folder_snapshot.entries.size() != 2 ||
+        folder_snapshot.inventory_sha256.size() != 64) return 34;
+    {
+        std::ofstream executable(std::filesystem::path(folder) / "bin" / "example.exe",
+                                 std::ios::binary | std::ios::trunc);
+        executable << "NZ";
+    }
+    const auto folder_staging = staging.wstring() + L"-folder";
+    std::filesystem::remove_all(folder_staging, error);
+    const auto folder_extracted = owo::plugin::extract_package_to_staging(
+        folder_snapshot, folder_staging);
+    std::ifstream folder_executable(
+        std::filesystem::path(folder_staging) / "bin" / "example.exe", std::ios::binary);
+    if (!folder_extracted.ok || folder_extracted.files_written != 2 ||
+        std::string(std::istreambuf_iterator<char>(folder_executable),
+                    std::istreambuf_iterator<char>()) != "MZ") return 35;
+    folder_executable.close();
+    std::filesystem::remove(std::filesystem::path(folder) / "manifest.json", error);
+    if (owo::plugin::inspect_package(folder).ok) return 36;
+    std::filesystem::remove_all(folder, error);
+    std::filesystem::remove_all(folder_staging, error);
     std::filesystem::remove(path, error);
     return 0;
 }

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.1.0-alpha.1',
+    [string]$Version = '0.1.0-alpha.2',
     [string]$BuildDirectory = (Join-Path $PSScriptRoot '..\build\windows-release\Release'),
     [string]$SettingsDirectory = (Join-Path $PSScriptRoot '..\build\settings-publish\win-x64'),
     [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\artifacts\release')

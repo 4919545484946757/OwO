@@ -82,12 +82,12 @@ int wmain(const int argc, wchar_t** argv) {
         set_all_bytes.find("model_timeout_ms=25\n") == std::string::npos) return 14;
     PROCESS_INFORMATION shortcuts{};
     if (!launch(executable + L" " + config +
-                L" set-all 4 true false 40 true Ctrl+Alt+C false Ctrl+Shift+Space true Enter 18",
+                L" set-all 4 true false 40 true Ctrl+Alt+C;F8 false Ctrl+Shift+Space true Enter 18",
                 shortcuts) || wait_and_close(shortcuts) != 0) return 17;
     std::ifstream shortcut_input(path, std::ios::binary);
     const std::string shortcut_bytes((std::istreambuf_iterator<char>(shortcut_input)), {});
     shortcut_input.close();
-    if (shortcut_bytes.find("correction_shortcut=Ctrl+Alt+C\n") == std::string::npos ||
+    if (shortcut_bytes.find("correction_shortcut=Ctrl+Alt+C;F8\n") == std::string::npos ||
         shortcut_bytes.find("language_shortcut_enabled=false\n") == std::string::npos ||
         shortcut_bytes.find("language_shortcut=Ctrl+Shift+Space\n") == std::string::npos ||
         shortcut_bytes.find("raw_input_shortcut=Enter\n") == std::string::npos ||

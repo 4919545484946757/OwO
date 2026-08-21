@@ -140,6 +140,14 @@ int main(const int argc, char** argv) {
         if (outcome == 0 && background_result.status !=
                 owo::core::PluginExecutionStatus::rejected_source) outcome = 8;
 
+        auto implicit_sensitive = request(
+            plugin_id, "owo.ui.overlay.v1", "{}",
+            owo::core::PluginCallSource::core_background);
+        const auto implicit_sensitive_result =
+            executor.submit(std::move(implicit_sensitive)).completion.get();
+        if (outcome == 0 && implicit_sensitive_result.status !=
+                owo::core::PluginExecutionStatus::rejected_source) outcome = 23;
+
         auto too_deep = request(plugin_id, "example.echo.v1", "never-dispatch");
         too_deep.call_depth = owo::core::kMaximumPluginCallDepth + 1;
         if (outcome == 0 && executor.submit(std::move(too_deep)).completion.get().status !=

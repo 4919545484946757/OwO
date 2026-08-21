@@ -6,13 +6,13 @@ internal sealed record SettingsSnapshot(uint CandidatePageSize, uint CandidateWr
                                         uint UserLearningSensitivity,
                                         bool UserLearningEnabled,
                                         bool ModelRankingEnabled, uint ModelTimeoutMs,
-                                        bool CorrectionShortcutEnabled, string CorrectionShortcut,
-                                        bool LanguageShortcutEnabled, string LanguageShortcut,
-                                        bool RawInputShortcutEnabled, string RawInputShortcut,
-                                        bool CursorLeftShortcutEnabled, string CursorLeftShortcut,
-                                        bool CursorRightShortcutEnabled, string CursorRightShortcut,
-                                        bool PreviousPageShortcutEnabled, string PreviousPageShortcut,
-                                        bool NextPageShortcutEnabled, string NextPageShortcut);
+                                        bool CorrectionShortcutEnabled, IReadOnlyList<string> CorrectionShortcuts,
+                                        bool LanguageShortcutEnabled, IReadOnlyList<string> LanguageShortcuts,
+                                        bool RawInputShortcutEnabled, IReadOnlyList<string> RawInputShortcuts,
+                                        bool CursorLeftShortcutEnabled, IReadOnlyList<string> CursorLeftShortcuts,
+                                        bool CursorRightShortcutEnabled, IReadOnlyList<string> CursorRightShortcuts,
+                                        bool PreviousPageShortcutEnabled, IReadOnlyList<string> PreviousPageShortcuts,
+                                        bool NextPageShortcutEnabled, IReadOnlyList<string> NextPageShortcuts);
 
 internal sealed class ConfigShellClient
 {
@@ -37,19 +37,19 @@ internal sealed class ConfigShellClient
                    bool.Parse(values["model_ranking_enabled"]),
                    uint.Parse(values["model_timeout_ms"]),
                    bool.Parse(values["correction_shortcut_enabled"]),
-                   values["correction_shortcut"],
+                   SplitShortcuts(values["correction_shortcut"]),
                    bool.Parse(values["language_shortcut_enabled"]),
-                   values["language_shortcut"],
+                   SplitShortcuts(values["language_shortcut"]),
                    bool.Parse(values["raw_input_shortcut_enabled"]),
-                   values["raw_input_shortcut"],
+                   SplitShortcuts(values["raw_input_shortcut"]),
                    bool.Parse(values["cursor_left_shortcut_enabled"]),
-                   values["cursor_left_shortcut"],
+                   SplitShortcuts(values["cursor_left_shortcut"]),
                    bool.Parse(values["cursor_right_shortcut_enabled"]),
-                   values["cursor_right_shortcut"],
+                   SplitShortcuts(values["cursor_right_shortcut"]),
                    bool.Parse(values["previous_page_shortcut_enabled"]),
-                   values["previous_page_shortcut"],
+                   SplitShortcuts(values["previous_page_shortcut"]),
                    bool.Parse(values["next_page_shortcut_enabled"]),
-                   values["next_page_shortcut"]);
+                   SplitShortcuts(values["next_page_shortcut"]));
     }
 
     internal Task SaveAsync(SettingsSnapshot value, CancellationToken cancellationToken = default) =>
@@ -58,21 +58,26 @@ internal sealed class ConfigShellClient
                   value.ModelRankingEnabled.ToString().ToLowerInvariant(),
                   value.ModelTimeoutMs.ToString(),
                   value.CorrectionShortcutEnabled.ToString().ToLowerInvariant(),
-                  value.CorrectionShortcut,
+                  JoinShortcuts(value.CorrectionShortcuts),
                   value.LanguageShortcutEnabled.ToString().ToLowerInvariant(),
-                  value.LanguageShortcut,
+                  JoinShortcuts(value.LanguageShortcuts),
                   value.RawInputShortcutEnabled.ToString().ToLowerInvariant(),
-                  value.RawInputShortcut,
+                  JoinShortcuts(value.RawInputShortcuts),
                   value.CandidateWrapLength.ToString(),
                   value.UserLearningSensitivity.ToString(),
                   value.CursorLeftShortcutEnabled.ToString().ToLowerInvariant(),
-                  value.CursorLeftShortcut,
+                  JoinShortcuts(value.CursorLeftShortcuts),
                   value.CursorRightShortcutEnabled.ToString().ToLowerInvariant(),
-                  value.CursorRightShortcut,
+                  JoinShortcuts(value.CursorRightShortcuts),
                   value.PreviousPageShortcutEnabled.ToString().ToLowerInvariant(),
-                  value.PreviousPageShortcut,
+                  JoinShortcuts(value.PreviousPageShortcuts),
                   value.NextPageShortcutEnabled.ToString().ToLowerInvariant(),
-                  value.NextPageShortcut], cancellationToken);
+                  JoinShortcuts(value.NextPageShortcuts)], cancellationToken);
+
+    private static string[] SplitShortcuts(string value) =>
+        value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string JoinShortcuts(IReadOnlyList<string> value) => string.Join(';', value);
 
     private async Task<string> RunAsync(IEnumerable<string> arguments,
                                         CancellationToken cancellationToken)

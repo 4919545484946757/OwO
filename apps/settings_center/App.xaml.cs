@@ -31,7 +31,21 @@ public partial class App : Application
     /// </summary>
     public App()
     {
+        UnhandledException += (_, args) => WriteStartupFailure(args.Exception);
         InitializeComponent();
+    }
+
+    private static void WriteStartupFailure(Exception error)
+    {
+        try {
+            var directory = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "OwO", "InputMethod", "logs");
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(System.IO.Path.Combine(directory, "settings-crash.log"), error.ToString());
+        } catch {
+            // Preserve the original WinUI exception when diagnostics cannot be written.
+        }
     }
 
     /// <summary>

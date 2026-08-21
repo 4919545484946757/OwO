@@ -781,12 +781,65 @@ std::vector<LexiconEntry> BinaryLexicon::lookup_initial(const char initial,
 
 std::vector<AbbreviatedLexiconMatch> BinaryLexicon::lookup_mixed_abbreviation(
     const std::string_view input, const std::size_t limit) const {
-    if (limit == 0 || input.size() < 3 || input.find('\'') != std::string_view::npos)
+    if (limit == 0 || input.size() < 2 || input.find('\'') != std::string_view::npos)
         return {};
     std::vector<AbbreviatedLexiconMatch> matches;
     const auto prune_threshold = limit > (std::numeric_limits<std::size_t>::max)() / 4
                                      ? (std::numeric_limits<std::size_t>::max)()
                                      : limit * 4;
+    if (input.size() == 2) {
+        const auto syllable_count = mapped_entries_ != nullptr
+                                        ? mapped_syllable_count_
+                                        : syllables_.size();
+        for (std::size_t first_id = 0; first_id < syllable_count; ++first_id) {
+            const auto first_syllable = syllable_at(static_cast<std::uint16_t>(first_id));
+            if (first_syllable.empty() || first_syllable.front() != input[0]) continue;
+            const auto key = (static_cast<std::uint32_t>(first_id) << 8U) |
+                             static_cast<unsigned char>(input[1]);
+            const std::uint32_t* bucket_begin = nullptr;
+            const std::uint32_t* bucket_end = nullptr;
+            if (mapped_entries_ != nullptr) {
+                const auto* bucket = std::lower_bound(
+                    mapped_mixed_buckets_,
+                    mapped_mixed_buckets_ + mapped_mixed_bucket_count_, key,
+                    [](const MixedBucket& value, const std::uint32_t expected) {
+                        return value.key < expected;
+                    });
+                if (bucket == mapped_mixed_buckets_ + mapped_mixed_bucket_count_ ||
+                    bucket->key != key)
+                    continue;
+                bucket_begin = mapped_mixed_indices_ + bucket->offset;
+                bucket_end = bucket_begin + bucket->count;
+            }
+            const auto owned_bucket = mapped_entries_ == nullptr
+                                          ? mixed_entries_.find(key)
+                                          : mixed_entries_.end();
+            if (mapped_entries_ == nullptr && owned_bucket == mixed_entries_.end())
+                continue;
+            const auto append_entry = [&](const std::uint32_t entry_index) {
+                const auto& entry = mapped_entries_ != nullptr
+                                        ? mapped_entries_[entry_index]
+                                        : entries_[entry_index];
+                if (entry.syllable_count != 2) return;
+                matches.push_back({materialize(entry),
+                                   {std::string(1, input[0]),
+                                    std::string(1, input[1])}});
+                if (matches.size() >= prune_threshold)
+                    detail::retain_best_mixed_matches(matches, limit);
+            };
+            if (mapped_entries_ != nullptr) {
+                for (auto index = bucket_begin; index != bucket_end; ++index) {
+                    if (*index >= mapped_entry_count_) return {};
+                    append_entry(*index);
+                }
+            } else {
+                for (const auto entry_index : owned_bucket->second)
+                    append_entry(entry_index);
+            }
+        }
+        detail::retain_best_mixed_matches(matches, limit);
+        return matches;
+    }
     const auto maximum_first = std::min<std::size_t>(6, input.size() - 1);
     for (std::size_t first_size = 1; first_size <= maximum_first; ++first_size) {
         const auto first_syllable = input.substr(0, first_size);

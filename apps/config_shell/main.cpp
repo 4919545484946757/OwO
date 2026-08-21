@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -31,6 +32,23 @@ bool parse_ascii(const std::wstring_view text, std::string& output) {
     return !output.empty();
 }
 
+bool parse_shortcuts(const std::wstring_view text, std::vector<std::string>& output) {
+    std::string ascii;
+    if (!parse_ascii(text, ascii)) return false;
+    output.clear();
+    std::size_t offset = 0;
+    while (offset < ascii.size()) {
+        const auto separator = ascii.find(';', offset);
+        const auto item = ascii.substr(offset, separator == std::string::npos
+            ? ascii.size() - offset : separator - offset);
+        if (item.empty()) return false;
+        output.push_back(item);
+        if (separator == std::string::npos) break;
+        offset = separator + 1;
+    }
+    return !output.empty();
+}
+
 bool apply(owo::config::AppConfig& config, const std::wstring_view field,
            const std::wstring_view value) {
     if (field == L"candidate_page_size")
@@ -41,19 +59,19 @@ bool apply(owo::config::AppConfig& config, const std::wstring_view field,
         return parse_u32(value, config.user_learning_sensitivity);
     if (field == L"model_timeout_ms") return parse_u32(value, config.model_timeout_ms);
     if (field == L"correction_shortcut")
-        return parse_ascii(value, config.correction_shortcut);
+        return parse_shortcuts(value, config.correction_shortcuts);
     if (field == L"language_shortcut")
-        return parse_ascii(value, config.language_shortcut);
+        return parse_shortcuts(value, config.language_shortcuts);
     if (field == L"raw_input_shortcut")
-        return parse_ascii(value, config.raw_input_shortcut);
+        return parse_shortcuts(value, config.raw_input_shortcuts);
     if (field == L"cursor_left_shortcut")
-        return parse_ascii(value, config.cursor_left_shortcut);
+        return parse_shortcuts(value, config.cursor_left_shortcuts);
     if (field == L"cursor_right_shortcut")
-        return parse_ascii(value, config.cursor_right_shortcut);
+        return parse_shortcuts(value, config.cursor_right_shortcuts);
     if (field == L"previous_page_shortcut")
-        return parse_ascii(value, config.previous_page_shortcut);
+        return parse_shortcuts(value, config.previous_page_shortcuts);
     if (field == L"next_page_shortcut")
-        return parse_ascii(value, config.next_page_shortcut);
+        return parse_shortcuts(value, config.next_page_shortcuts);
     bool parsed{};
     if (value == L"true") parsed = true;
     else if (value != L"false") return false;

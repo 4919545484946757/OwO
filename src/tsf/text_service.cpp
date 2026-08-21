@@ -1,4 +1,5 @@
 #include "text_service.h"
+#include "owo/tsf/language_context.h"
 
 #include "owo/tsf/pinyin_cursor.h"
 
@@ -41,6 +42,7 @@ constexpr float kCandidateTextLineHeightDip = 20.0F;
 constexpr float kCandidateRowGapDip = 6.0F;
 constexpr float kHorizontalPaddingDip = 14.0F;
 constexpr float kCandidateGapDip = 6.0F;
+constexpr float kCandidateGroupGapDip = 18.0F;
 constexpr float kCandidatePillBaseWidthDip = 45.0F;
 constexpr float kButtonWidthDip = 30.0F;
 constexpr float kExpandButtonWidthDip = 52.0F;
@@ -69,6 +71,16 @@ std::wstring_view candidate_status_text(const bool pending, const bool failed,
     if (pending) return L"正在查找…";
     if (!failed) return L"无候选";
     return failure_detail.empty() ? L"候选服务暂不可用" : failure_detail;
+}
+
+bool is_double_initial_input(const std::wstring_view input) noexcept {
+    if (input.size() != 2) return false;
+    constexpr std::wstring_view vowels = L"aeiouv";
+    return std::all_of(input.begin(), input.end(), [vowels](wchar_t value) {
+        if (value >= L'A' && value <= L'Z') value = value - L'A' + L'a';
+        return value >= L'a' && value <= L'z' &&
+               vowels.find(value) == std::wstring_view::npos;
+    });
 }
 
 template <typename Interface>
@@ -720,6 +732,7 @@ HRESULT TextService::OnSetFocus(const BOOL foreground) {
     if (!foreground_focus_) {
         clear_composition();
         recent_language_context_.clear();
+        recent_language_input_.clear();
     } else if (!input_buffer_.empty()) {
         update_candidate_window();
     }
@@ -737,7 +750,10 @@ HRESULT TextService::OnUninitDocumentMgr(ITfDocumentMgr*) {
 HRESULT TextService::OnSetFocus(ITfDocumentMgr* document_manager,
                                 ITfDocumentMgr* previous_document_manager) {
     if (document_manager != previous_document_manager) clear_composition();
-    if (document_manager != previous_document_manager) recent_language_context_.clear();
+    if (document_manager != previous_document_manager) {
+        recent_language_context_.clear();
+        recent_language_input_.clear();
+    }
     foreground_focus_ = document_manager != nullptr;
     return S_OK;
 }
@@ -745,12 +761,14 @@ HRESULT TextService::OnSetFocus(ITfDocumentMgr* document_manager,
 HRESULT TextService::OnPushContext(ITfContext*) {
     clear_composition();
     recent_language_context_.clear();
+    recent_language_input_.clear();
     return S_OK;
 }
 
 HRESULT TextService::OnPopContext(ITfContext*) {
     clear_composition();
     recent_language_context_.clear();
+    recent_language_input_.clear();
     return S_OK;
 }
 
@@ -764,6 +782,7 @@ HRESULT TextService::OnKillThreadFocus() {
     foreground_focus_ = false;
     clear_composition();
     recent_language_context_.clear();
+    recent_language_input_.clear();
     return S_OK;
 }
 
@@ -787,19 +806,19 @@ HRESULT TextService::OnChange(REFGUID guid) {
 
 bool TextService::should_eat_key(const WPARAM key) const noexcept {
     if (shortcut_config_.correction_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.correction_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.correction_shortcuts, key)) return true;
     if (shortcut_config_.language_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.language_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.language_shortcuts, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.raw_input_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.raw_input_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.raw_input_shortcuts, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.cursor_left_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.cursor_left_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.cursor_left_shortcuts, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.cursor_right_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.cursor_right_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.cursor_right_shortcuts, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.previous_page_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.previous_page_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.previous_page_shortcuts, key)) return true;
     if (!input_buffer_.empty() && shortcut_config_.next_page_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.next_page_shortcut, key)) return true;
+        shortcut_matches(shortcut_config_.next_page_shortcuts, key)) return true;
     if (!chinese_mode_) return false;
     if (key >= 'A' && key <= 'Z') return !command_modifier_down();
     if (input_buffer_.empty()) return false;
@@ -809,10 +828,10 @@ bool TextService::should_eat_key(const WPARAM key) const noexcept {
         !key_down(VK_SHIFT) && !command_modifier_down()) return true;
     if (key == VK_NEXT || key == VK_OEM_6)
         return candidates_expanded_ ||
-               (!candidate_request_pending_ && has_more_candidates_);
+               candidate_request_pending_ || has_more_candidates_;
     if (key == VK_PRIOR || key == VK_OEM_4)
         return candidates_expanded_ ||
-               (!candidate_request_pending_ && candidate_page_ > 0);
+               candidate_page_ > 0;
     if (key == VK_SPACE)
         return candidate_request_pending_ || !candidates_.empty();
     return key >= '1' && key <= '9' &&
@@ -835,7 +854,7 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
     if (context != nullptr) update_candidate_anchor(context);
 
     if (shortcut_config_.correction_shortcut_enabled &&
-        shortcut_matches(shortcut_config_.correction_shortcut, key)) {
+        shortcut_matches(shortcut_config_.correction_shortcuts, key)) {
         correction_enabled_ = !correction_enabled_;
         if (!input_buffer_.empty()) {
             // A mode change is intentional, so immediately discard any
@@ -852,23 +871,23 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
             queue_candidate_request();
         }
     } else if (shortcut_config_.language_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.language_shortcut, key)) {
+               shortcut_matches(shortcut_config_.language_shortcuts, key)) {
         return toggle_language_mode(context);
     } else if (!input_buffer_.empty() && shortcut_config_.raw_input_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.raw_input_shortcut, key)) {
+               shortcut_matches(shortcut_config_.raw_input_shortcuts, key)) {
         if (context != nullptr) return commit_raw_input(context);
         clear_composition();
     } else if (!input_buffer_.empty() && shortcut_config_.cursor_left_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.cursor_left_shortcut, key)) {
+               shortcut_matches(shortcut_config_.cursor_left_shortcuts, key)) {
         move_pinyin_cursor(-1);
     } else if (!input_buffer_.empty() && shortcut_config_.cursor_right_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.cursor_right_shortcut, key)) {
+               shortcut_matches(shortcut_config_.cursor_right_shortcuts, key)) {
         move_pinyin_cursor(1);
     } else if (!input_buffer_.empty() && shortcut_config_.previous_page_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.previous_page_shortcut, key)) {
+               shortcut_matches(shortcut_config_.previous_page_shortcuts, key)) {
         move_candidate_page_from_shortcut(-1);
     } else if (!input_buffer_.empty() && shortcut_config_.next_page_shortcut_enabled &&
-               shortcut_matches(shortcut_config_.next_page_shortcut, key)) {
+               shortcut_matches(shortcut_config_.next_page_shortcuts, key)) {
         move_candidate_page_from_shortcut(1);
     } else if (key >= 'A' && key <= 'Z') {
         if (input_buffer_.size() >= kMaximumPinyinInputLength) return S_OK;
@@ -921,7 +940,8 @@ HRESULT TextService::OnKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* ea
                 key == VK_PRIOR || key == VK_OEM_4)) {
         scroll_expanded_candidates(-1);
     } else if (!candidates_expanded_ &&
-               (key == VK_NEXT || key == VK_OEM_6) && has_more_candidates_) {
+               (key == VK_NEXT || key == VK_OEM_6) &&
+               (candidate_request_pending_ || has_more_candidates_)) {
         change_candidate_page(1);
     } else if (!candidates_expanded_ &&
                (key == VK_PRIOR || key == VK_OEM_4) && candidate_page_ > 0) {
@@ -1156,6 +1176,43 @@ SIZE TextService::desired_candidate_window_size() const {
                                      ? kExpandButtonWidthDip
                                      : kButtonWidthDip * 2.0F + kExpandButtonWidthDip +
                                            kControlGapDip * 2.0F;
+    const bool split_double_initial = is_double_initial_input(input_buffer_) &&
+        candidate_consumed_.size() == candidates_.size();
+    const auto item_width = [this, wrap_length](const std::size_t index) {
+        const auto display = wrapped_candidate_text(candidates_[index], wrap_length);
+        return kCandidatePillBaseWidthDip +
+               measure_text_width(dwrite_factory_, candidate_text_format_, display);
+    };
+    const auto sequential_width = [&item_width](const std::vector<std::size_t>& indices) {
+        float width = 0.0F;
+        for (const auto index : indices) {
+            if (width != 0.0F) width += kCandidateGapDip;
+            width += item_width(index);
+        }
+        return width;
+    };
+    const auto row_width = [this, split_double_initial, &item_width,
+                            &sequential_width](const std::size_t begin,
+                                               const std::size_t end) {
+        if (!split_double_initial) {
+            float width = 0.0F;
+            for (std::size_t index = begin; index < end; ++index) {
+                if (width != 0.0F) width += kCandidateGapDip;
+                width += item_width(index);
+            }
+            return width;
+        }
+        std::vector<std::size_t> dictionary;
+        std::vector<std::size_t> prefixes;
+        for (std::size_t index = begin; index < end; ++index) {
+            (candidate_consumed_[index] == input_buffer_.size() ? dictionary
+                                                                : prefixes)
+                .push_back(index);
+        }
+        const auto half_width = std::max(sequential_width(dictionary),
+                                         sequential_width(prefixes));
+        return half_width * 2.0F + kCandidateGroupGapDip;
+    };
     float candidates_width = 0.0F;
     if (candidates_.empty()) {
         const auto status = candidate_status_text(candidate_request_pending_,
@@ -1166,24 +1223,10 @@ SIZE TextService::desired_candidate_window_size() const {
     } else if (candidates_expanded_) {
         for (std::size_t begin = 0; begin < candidates_.size(); begin += page_size) {
             const auto end = std::min(candidates_.size(), begin + page_size);
-            float row_width = 0.0F;
-            for (std::size_t index = begin; index < end; ++index) {
-                if (row_width != 0.0F) row_width += kCandidateGapDip;
-                const auto display = wrapped_candidate_text(candidates_[index], wrap_length);
-                row_width += kCandidatePillBaseWidthDip +
-                             measure_text_width(dwrite_factory_, candidate_text_format_,
-                                                display);
-            }
-            candidates_width = std::max(candidates_width, row_width);
+            candidates_width = std::max(candidates_width, row_width(begin, end));
         }
     } else {
-        for (const auto& candidate : candidates_) {
-            if (candidates_width != 0.0F) candidates_width += kCandidateGapDip;
-            const auto display = wrapped_candidate_text(candidate, wrap_length);
-            candidates_width += kCandidatePillBaseWidthDip +
-                                measure_text_width(dwrite_factory_, candidate_text_format_,
-                                                   display);
-        }
+        candidates_width = row_width(0, candidates_.size());
     }
     const std::wstring& reading = segmented_input_.empty() ? input_buffer_ : segmented_input_;
     const float preview_width = kHorizontalPaddingDip * 2.0F +
@@ -1329,6 +1372,75 @@ void TextService::render_candidate_window() {
                                            kControlGapDip * 2.0F;
     const float controls_left = size.width - kHorizontalPaddingDip - controls_width;
     const float candidate_right = controls_left - kCandidateControlGapDip;
+    const bool split_double_initial = is_double_initial_input(input_buffer_) &&
+        candidate_consumed_.size() == candidates_.size();
+    const auto draw_indices = [this, &draw_candidate, wrap_length](
+                                  const std::vector<std::size_t>& indices,
+                                  const float left, const float right,
+                                  const float top, const float row_height) {
+        if (indices.empty() || right <= left) return;
+        const float gaps_width = indices.size() > 1
+                                     ? kCandidateGapDip *
+                                           static_cast<float>(indices.size() - 1)
+                                     : 0.0F;
+        float requested_total = 0.0F;
+        for (const auto index : indices) {
+            const auto display = wrapped_candidate_text(candidates_[index], wrap_length);
+            requested_total += kCandidatePillBaseWidthDip +
+                               measure_text_width(dwrite_factory_, candidate_text_format_,
+                                                  display);
+        }
+        const float usable_width = std::max(1.0F, right - left - gaps_width);
+        const float width_scale = requested_total > usable_width
+                                      ? usable_width / requested_total
+                                      : 1.0F;
+        float x = left;
+        for (const auto index : indices) {
+            const auto display = wrapped_candidate_text(candidates_[index], wrap_length);
+            const float requested_width =
+                kCandidatePillBaseWidthDip +
+                measure_text_width(dwrite_factory_, candidate_text_format_, display);
+            const float width = requested_width * width_scale;
+            draw_candidate(D2D1::RectF(x, top, x + width, top + row_height), index);
+            x += width + kCandidateGapDip;
+        }
+    };
+    const auto draw_candidate_row = [this, split_double_initial, candidate_right,
+                                     &draw_indices](const std::size_t begin,
+                                                    const std::size_t end,
+                                                    const float top,
+                                                    const float row_height) {
+        std::vector<std::size_t> dictionary;
+        std::vector<std::size_t> prefixes;
+        if (split_double_initial) {
+            for (std::size_t index = begin; index < end; ++index) {
+                (candidate_consumed_[index] == input_buffer_.size() ? dictionary
+                                                                    : prefixes)
+                    .push_back(index);
+            }
+            const float available = std::max(
+                1.0F, candidate_right - kHorizontalPaddingDip - kCandidateGroupGapDip);
+            const float half = available * 0.5F;
+            draw_indices(dictionary, kHorizontalPaddingDip,
+                         kHorizontalPaddingDip + half, top, row_height);
+            draw_indices(prefixes,
+                         kHorizontalPaddingDip + half + kCandidateGroupGapDip,
+                         candidate_right, top, row_height);
+            return;
+        }
+        dictionary.reserve(end - begin);
+        for (std::size_t index = begin; index < end; ++index)
+            dictionary.push_back(index);
+        draw_indices(dictionary, kHorizontalPaddingDip, candidate_right, top, row_height);
+    };
+
+    if (split_double_initial && !candidates_.empty()) {
+        const float divider_x = (kHorizontalPaddingDip + candidate_right) * 0.5F;
+        render_target_->DrawLine(
+            D2D1::Point2F(divider_x, content_top + 3.0F),
+            D2D1::Point2F(divider_x, size.height - 11.0F),
+            mode_border_brush, 1.0F);
+    }
 
     if (candidates_.empty()) {
         const auto status = candidate_status_text(candidate_request_pending_,
@@ -1342,7 +1454,6 @@ void TextService::render_candidate_window() {
     } else if (candidates_expanded_) {
         const auto page_size = std::max<std::size_t>(
             1, static_cast<std::size_t>(candidate_page_size_));
-        const float available_width = std::max(1.0F, candidate_right - kHorizontalPaddingDip);
         const auto first_candidate = std::min(
             candidates_.size(), expanded_scroll_row_ * page_size);
         const auto visible_end = std::min(
@@ -1351,56 +1462,20 @@ void TextService::render_candidate_window() {
         for (std::size_t begin = first_candidate; begin < visible_end;
              begin += page_size) {
             const auto end = std::min(candidates_.size(), begin + page_size);
-            const auto item_count = end - begin;
             float row_height = kCandidateItemHeightDip;
-            const float gaps_width = item_count > 1
-                                         ? kCandidateGapDip * static_cast<float>(item_count - 1)
-                                         : 0.0F;
-            float requested_total = 0.0F;
             for (std::size_t index = begin; index < end; ++index) {
-                const auto display = wrapped_candidate_text(candidates_[index], wrap_length);
-                requested_total += kCandidatePillBaseWidthDip +
-                                   measure_text_width(dwrite_factory_, candidate_text_format_,
-                                                      display);
                 row_height = std::max(
                     row_height, wrapped_candidate_height(candidates_[index], wrap_length));
             }
-            const float usable_width = std::max(1.0F, available_width - gaps_width);
-            const float width_scale = requested_total > usable_width
-                                          ? usable_width / requested_total
-                                          : 1.0F;
-            float x = kHorizontalPaddingDip;
-            for (std::size_t index = begin; index < end; ++index) {
-                const auto display = wrapped_candidate_text(candidates_[index], wrap_length);
-                const float requested_width =
-                    kCandidatePillBaseWidthDip +
-                    measure_text_width(dwrite_factory_, candidate_text_format_,
-                                       display);
-                const float item_width = requested_width * width_scale;
-                draw_candidate(D2D1::RectF(x, top, x + item_width, top + row_height),
-                               index);
-                x += item_width + kCandidateGapDip;
-            }
+            draw_candidate_row(begin, end, top, row_height);
             top += row_height + kCandidateRowGapDip;
         }
     } else {
-        float x = kHorizontalPaddingDip;
         float row_height = kCandidateItemHeightDip;
         for (const auto& candidate : candidates_)
             row_height = std::max(row_height,
                                   wrapped_candidate_height(candidate, wrap_length));
-        for (std::size_t index = 0; index < candidates_.size(); ++index) {
-            const auto display = wrapped_candidate_text(candidates_[index], wrap_length);
-            const float requested_width =
-                kCandidatePillBaseWidthDip +
-                measure_text_width(dwrite_factory_, candidate_text_format_,
-                                   display);
-            if (x + requested_width > candidate_right) break;
-            draw_candidate(D2D1::RectF(x, content_top, x + requested_width,
-                                       content_top + row_height),
-                           index);
-            x += requested_width + kCandidateGapDip;
-        }
+        draw_candidate_row(0, candidates_.size(), content_top, row_height);
     }
 
     const auto draw_button = [this, &target_matches, &add_hit_region,
@@ -1428,13 +1503,13 @@ void TextService::render_candidate_window() {
             D2D1::RectF(control_x, content_top, control_x + kButtonWidthDip,
                         content_top + kCandidateItemHeightDip);
         draw_button(previous_bounds, {HitKind::previous_page, 0}, L"◀",
-                    !candidate_request_pending_ && candidate_page_ > 0);
+                    candidate_page_ > 0);
         control_x += kButtonWidthDip + kControlGapDip;
         const D2D1_RECT_F next_bounds =
             D2D1::RectF(control_x, content_top, control_x + kButtonWidthDip,
                         content_top + kCandidateItemHeightDip);
         draw_button(next_bounds, {HitKind::next_page, 0}, L"▶",
-                    !candidate_request_pending_ && has_more_candidates_);
+                    candidate_request_pending_ || has_more_candidates_);
         control_x += kButtonWidthDip + kControlGapDip;
     }
     const D2D1_RECT_F expand_bounds =
@@ -1597,7 +1672,7 @@ LRESULT CALLBACK TextService::keyboard_hook_proc(const int code, const WPARAM ke
         if (!released) {
             service->refresh_shortcut_config();
             if (service->shortcut_config_.language_shortcut_enabled &&
-                service->shortcut_matches(service->shortcut_config_.language_shortcut,
+                service->shortcut_matches(service->shortcut_config_.language_shortcuts,
                                            VK_SPACE)) {
                 service->language_space_key_suppressed_ = true;
                 if (!repeated && service->message_window_ != nullptr)
@@ -1640,38 +1715,38 @@ void TextService::refresh_shortcut_config(const bool force) {
 
 void TextService::sync_preserved_language_key() {
     if (thread_manager_ == nullptr || client_id_ == TF_CLIENTID_NULL) return;
-    const std::string desired = shortcut_config_.language_shortcut_enabled
-                                    ? shortcut_config_.language_shortcut
-                                    : std::string{};
-    if (preserved_language_key_registered_ && desired == preserved_language_shortcut_) return;
+    const std::vector<std::string> desired = shortcut_config_.language_shortcut_enabled
+                                    ? shortcut_config_.language_shortcuts
+                                    : std::vector<std::string>{};
+    if (desired == preserved_language_shortcuts_) return;
     clear_preserved_language_key();
     if (desired.empty()) return;
-    TF_PRESERVEDKEY key{};
-    if (!preserved_shortcut(desired, key)) return;
     ITfKeystrokeMgr* manager = nullptr;
     if (FAILED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager)))) return;
     constexpr wchar_t description[] = L"OwO 切换中英文输入";
-    const HRESULT preserved = manager->PreserveKey(
-        client_id_, kLanguageModePreservedKeyGuid, &key, description,
-        static_cast<ULONG>(std::size(description) - 1));
-    manager->Release();
-    if (SUCCEEDED(preserved)) {
-        preserved_language_key_ = key;
-        preserved_language_shortcut_ = desired;
-        preserved_language_key_registered_ = true;
+    for (const auto& shortcut : desired) {
+        TF_PRESERVEDKEY key{};
+        if (!preserved_shortcut(shortcut, key)) continue;
+        if (SUCCEEDED(manager->PreserveKey(
+                client_id_, kLanguageModePreservedKeyGuid, &key, description,
+                static_cast<ULONG>(std::size(description) - 1)))) {
+            preserved_language_keys_.push_back(key);
+        }
     }
+    manager->Release();
+    if (!preserved_language_keys_.empty()) preserved_language_shortcuts_ = desired;
 }
 
 void TextService::clear_preserved_language_key() noexcept {
-    if (!preserved_language_key_registered_ || thread_manager_ == nullptr) return;
+    if (preserved_language_keys_.empty() || thread_manager_ == nullptr) return;
     ITfKeystrokeMgr* manager = nullptr;
     if (SUCCEEDED(thread_manager_->QueryInterface(IID_PPV_ARGS(&manager)))) {
-        manager->UnpreserveKey(kLanguageModePreservedKeyGuid, &preserved_language_key_);
+        for (auto& key : preserved_language_keys_)
+            manager->UnpreserveKey(kLanguageModePreservedKeyGuid, &key);
         manager->Release();
     }
-    preserved_language_key_ = {};
-    preserved_language_shortcut_.clear();
-    preserved_language_key_registered_ = false;
+    preserved_language_keys_.clear();
+    preserved_language_shortcuts_.clear();
 }
 
 void TextService::initialize_language_compartment() {
@@ -1775,9 +1850,10 @@ void TextService::update_language_bar() noexcept {
     if (language_bar_item_ != nullptr) language_bar_item_->notify_mode_changed();
 }
 
-bool TextService::shortcut_matches(const std::string_view shortcut,
+bool TextService::shortcut_matches(const std::vector<std::string>& shortcuts,
                                    const WPARAM key) const {
-    return shortcut == shortcut_for_key_event(key);
+    const auto event = shortcut_for_key_event(key);
+    return std::find(shortcuts.begin(), shortcuts.end(), event) != shortcuts.end();
 }
 
 void TextService::schedule_candidate_request(const bool reset_retry) {
@@ -1814,24 +1890,15 @@ void TextService::schedule_candidate_request(const bool reset_retry) {
         pending_request_ = PendingRequest{
             static_cast<std::uint8_t>(protocol::MessageType::candidate_request),
             active_candidate_request_id_, context_generation_, candidate_page_, input_buffer_,
-            candidates_expanded_, correction_enabled_, {}, recent_language_context_};
+            candidates_expanded_, correction_enabled_, recent_language_input_,
+            recent_language_context_};
     }
     request_ready_.notify_one();
     update_candidate_window();
 }
 
 void TextService::append_language_context(const std::wstring_view text) {
-    constexpr std::size_t maximum_context_units = 16;
-    recent_language_context_.assign(text);
-    if (recent_language_context_.size() <= maximum_context_units) return;
-    auto begin = recent_language_context_.size() - maximum_context_units;
-    if (begin < recent_language_context_.size() && begin > 0 &&
-        recent_language_context_[begin] >= 0xdc00 &&
-        recent_language_context_[begin] <= 0xdfff &&
-        recent_language_context_[begin - 1] >= 0xd800 &&
-        recent_language_context_[begin - 1] <= 0xdbff)
-        ++begin;
-    recent_language_context_.erase(0, begin);
+    append_bounded_language_context(recent_language_context_, text);
 }
 
 void TextService::queue_commit_feedback(std::wstring candidate, std::wstring input,
@@ -2084,6 +2151,14 @@ void TextService::handle_candidate_result(CandidateResult* raw_result) {
             segmented_input_ = case_preserving_segmented_input(
                 input_buffer_, result->segmented_input);
     }
+    if (!result->preserve_paging && deferred_page_direction_ != 0) {
+        const int direction = std::exchange(deferred_page_direction_, 0);
+        if ((direction > 0 && has_more_candidates_) ||
+            (direction < 0 && candidate_page_ > 0)) {
+            change_candidate_page(direction);
+            return;
+        }
+    }
     if (deferred_candidate_text_) {
         const auto selected = std::find(candidates_.begin(), candidates_.end(),
                                         *deferred_candidate_text_);
@@ -2158,16 +2233,18 @@ void TextService::update_candidate_window() {
 }
 
 void TextService::change_candidate_page(const int direction) {
-    if (candidate_request_pending_ || candidates_expanded_) return;
+    if (candidates_expanded_ || direction == 0) return;
+    if (candidate_request_pending_) {
+        deferred_page_direction_ = direction > 0 ? 1 : -1;
+        return;
+    }
     if (direction > 0) {
         if (!has_more_candidates_) return;
         ++candidate_page_;
     } else if (direction < 0) {
         if (candidate_page_ == 0) return;
         --candidate_page_;
-    } else {
-        return;
-    }
+    } else return;
     has_more_candidates_ = false;
     candidates_expanded_ = false;
     hovered_target_.reset();
@@ -2234,6 +2311,10 @@ void TextService::invoke_hit_target(const HitTarget& target) {
     if (candidate_request_pending_) {
         if (target.kind == HitKind::candidate)
             defer_candidate_selection(target.candidate_index, nullptr);
+        else if (target.kind == HitKind::previous_page)
+            change_candidate_page(-1);
+        else if (target.kind == HitKind::next_page)
+            change_candidate_page(1);
         return;
     }
     switch (target.kind) {
@@ -2315,6 +2396,7 @@ void TextService::clear_composition() {
     candidate_page_ = 0;
     has_more_candidates_ = false;
     candidate_request_pending_ = false;
+    deferred_page_direction_ = 0;
     candidate_request_failed_ = false;
     candidate_retry_count_ = 0;
     candidates_expanded_ = false;
@@ -2341,6 +2423,7 @@ HRESULT TextService::commit_candidate(ITfContext* context, const std::size_t ind
     session->Release();
     if (SUCCEEDED(request_result) && SUCCEEDED(session_result)) {
         append_language_context(committed);
+        recent_language_input_ = learned_input;
         if (consumed == input_buffer_.size()) {
             clear_composition();
         } else {
@@ -2379,6 +2462,7 @@ HRESULT TextService::commit_raw_input(ITfContext* context) {
     if (SUCCEEDED(request_result) && SUCCEEDED(session_result)) {
         clear_composition();
         recent_language_context_.clear();
+        recent_language_input_.clear();
     }
     return FAILED(request_result) ? request_result : session_result;
 }

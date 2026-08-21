@@ -4,10 +4,11 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace owo::config {
 
-inline constexpr std::uint32_t kConfigSchemaVersion = 5;
+inline constexpr std::uint32_t kConfigSchemaVersion = 6;
 
 struct AppConfig {
     std::uint32_t candidate_page_size{5};
@@ -17,19 +18,19 @@ struct AppConfig {
     bool model_ranking_enabled{false};
     std::uint32_t model_timeout_ms{50};
     bool correction_shortcut_enabled{true};
-    std::string correction_shortcut{"Alt"};
+    std::vector<std::string> correction_shortcuts{"Ctrl+Q"};
     bool language_shortcut_enabled{true};
-    std::string language_shortcut{"Ctrl+Space"};
+    std::vector<std::string> language_shortcuts{"Ctrl+Space"};
     bool raw_input_shortcut_enabled{true};
-    std::string raw_input_shortcut{"Enter"};
+    std::vector<std::string> raw_input_shortcuts{"Enter"};
     bool cursor_left_shortcut_enabled{true};
-    std::string cursor_left_shortcut{"Shift+Left"};
+    std::vector<std::string> cursor_left_shortcuts{"Shift+Left"};
     bool cursor_right_shortcut_enabled{true};
-    std::string cursor_right_shortcut{"Shift+Right"};
+    std::vector<std::string> cursor_right_shortcuts{"Shift+Right"};
     bool previous_page_shortcut_enabled{true};
-    std::string previous_page_shortcut{"Shift+Up"};
+    std::vector<std::string> previous_page_shortcuts{"[", "Shift+Up"};
     bool next_page_shortcut_enabled{true};
-    std::string next_page_shortcut{"Shift+Down"};
+    std::vector<std::string> next_page_shortcuts{"]", "Shift+Down"};
     bool operator==(const AppConfig&) const = default;
 };
 

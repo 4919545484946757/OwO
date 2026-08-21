@@ -44,6 +44,21 @@ int main() {
         std::cerr << "invalid commit feedback input was encoded\n";
         ++failures;
     }
+    Message contextual_request{MessageType::candidate_request, 11, 6, "wang"};
+    contextual_request.input = "kuang";
+    contextual_request.context = "狂";
+    const auto decoded_contextual = decode_message(encode_message(contextual_request));
+    if (!decoded_contextual.validation ||
+        decoded_contextual.message.input != contextual_request.input ||
+        decoded_contextual.message.context != contextual_request.context) {
+        std::cerr << "candidate context input round trip failed\n";
+        ++failures;
+    }
+    contextual_request.input = "kuang wang";
+    if (!encode_message(contextual_request).empty()) {
+        std::cerr << "invalid candidate context input was encoded\n";
+        ++failures;
+    }
     if (decode_message("{}").validation.error != ErrorCode::invalid_payload) {
         std::cerr << "invalid schema was accepted\n";
         ++failures;

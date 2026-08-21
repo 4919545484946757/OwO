@@ -88,6 +88,10 @@ int main() {
 
     if (!preferred_source_is(schema.parse("xingb"), {"xing", "b"}))
         return fail("xingb preferred segmentation failed");
+    if (!contains_path(schema.parse("wodekuangaojiemingjiyuci", 16, false),
+                       {"wo", "de", "kuang", "ao", "jie", "ming", "ji", "yu", "ci"},
+                       owo::engine::InputMatchKind::exact))
+        return fail("coherent long segmentation was starved by boundary variants");
     if (!preferred_source_is(schema.parse("xingbaf"), {"xing", "ba", "f"}))
         return fail("xingbaf preferred segmentation failed");
     if (!preferred_source_is(schema.parse("bingb"), {"bing", "b"}))
@@ -100,6 +104,9 @@ int main() {
         return fail("mingd preferred segmentation failed");
     if (!preferred_source_is(schema.parse("kenengd"), {"ke", "neng", "d"}))
         return fail("kenengd preferred segmentation failed");
+    if (!preferred_source_is(schema.parse("wanan"), {"wan", "an"}) ||
+        !preferred_source_is(schema.parse("nanan"), {"nan", "an"}))
+        return fail("vowel-leading suffix preferred segmentation failed");
     if (!preferred_source_is(schema.parse("nengd"), {"neng", "d"}) ||
         !preferred_source_is(schema.parse("pengd"), {"peng", "d"}) ||
         !preferred_source_is(schema.parse("shengx"), {"sheng", "x"}) ||

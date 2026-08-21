@@ -15,7 +15,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit $elevated.ExitCode
 }
 
-$version = '0.1.0-alpha.1'
+$version = '0.1.0-alpha.2'
 $packageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $programRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Programs\OwO\InputMethod'))
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\OwO Input Method'
